@@ -17,7 +17,7 @@ if(APPLE)
     add_definitions(-Wno-missing-braces)
 endif(APPLE)
 if(WIN32)
-    add_definitions(/D_CRT_SECURE_NO_WARNINGS /wd4018 /wd4244 /wd4305 /wd4800 /wd4267)
+    add_definitions(/bigobj /D_CRT_SECURE_NO_WARNINGS /wd4018 /wd4244 /wd4305 /wd4800 /wd4267)
 endif(WIN32)
 
 add_library(projlib STATIC

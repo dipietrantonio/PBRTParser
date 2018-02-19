@@ -1,0 +1,1 @@
+\\bin\\parse.exe bin\\input.txt

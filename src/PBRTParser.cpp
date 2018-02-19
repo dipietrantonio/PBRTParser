@@ -14,6 +14,7 @@
 #include <string>
 #include <iostream>
 #include <fstream>
+#include <cstdio>
 #include <sstream>
 #include <exception>
 #include <locale>
@@ -35,6 +36,10 @@ class LexicalErrorException : public std::exception{
     LexicalErrorException(std::string msg){
         this->message = msg;
     }
+	virtual char const * what() {
+		return message.c_str();
+	}
+
 };
 
 class SyntaxErrorException : public std::exception{
@@ -46,6 +51,11 @@ class SyntaxErrorException : public std::exception{
     SyntaxErrorException(std::string msg){
         this->message = msg;
     }
+
+	virtual char const * what() {
+		return message.c_str();
+	}
+	
 };
 
 enum LexemeType {INDENTIFIER, NUMBER, STRING, SINGLETON};
@@ -87,13 +97,14 @@ class PBRTLexer{
         return this->text[currentPos + i];
     }
 
-    bool read_indentifier(Lexeme &lex);
-    bool read_number(Lexeme &lex);
-    bool read_string(Lexeme &lex);
+    bool read_indentifier();
+    bool read_number();
+    bool read_string();
 
     public:
+	Lexeme currentLexeme;
     PBRTLexer(std::string text);
-    bool get_next_lexeme(Lexeme &lex);
+    bool next_lexeme();
     int get_column(){ return this->column;};
     int get_line(){ return this->line; };
 };
@@ -114,23 +125,26 @@ PBRTLexer::PBRTLexer(std::string text){
 //
 // parse
 //
-bool PBRTLexer::get_next_lexeme(Lexeme &lex){
+bool PBRTLexer::next_lexeme(){
     this->remove_blanks();
 
-    if(this->read_indentifier(lex))
+    if(this->read_indentifier())
         return true;
-    if(this->read_string(lex))
+    if(this->read_string())
         return true;
-    if(this->read_number(lex))
+    if(this->read_number())
         return true;
     
     char c = this->look();
     if(c == '[' || c == ']' || c == '\n'){
         std::stringstream ss = std::stringstream();
         ss.put(c);
-        lex = Lexeme(LexemeType::SINGLETON, ss.str());
-        if(c == '\n')
-            this->column++;
+        this->currentLexeme = Lexeme(LexemeType::SINGLETON, ss.str());
+		if (c == '\n') {
+			this->line++;
+			this->column = 0;
+		}
+            
         this->advance();
         return true;
     }
@@ -140,7 +154,7 @@ bool PBRTLexer::get_next_lexeme(Lexeme &lex){
     throw LexicalErrorException(errStr.str());
 }
 
-bool PBRTLexer::read_indentifier(Lexeme &lex){
+bool PBRTLexer::read_indentifier(){
     char c = this->look();
     
     std::stringstream ss;
@@ -151,11 +165,11 @@ bool PBRTLexer::read_indentifier(Lexeme &lex){
         this->advance();
     }while(std::isalpha(c = this->look()));
 
-   lex = Lexeme(LexemeType::INDENTIFIER, ss.str());
+   this->currentLexeme = Lexeme(LexemeType::INDENTIFIER, ss.str());
    return true;
 }
 
-bool PBRTLexer::read_string(Lexeme &lex){
+bool PBRTLexer::read_string(){
     char c = this->look();
     std::stringstream ss;
     // remove "
@@ -167,11 +181,11 @@ bool PBRTLexer::read_string(Lexeme &lex){
         this->advance();
     }
     this->advance();
-   lex = Lexeme(LexemeType::STRING, ss.str());
+   this->currentLexeme = Lexeme(LexemeType::STRING, ss.str());
    return true;
 }
 
-bool PBRTLexer::read_number(Lexeme &lex){
+bool PBRTLexer::read_number(){
     char c = this->look();
     if( ! (c == '+' || c == '-' || c == '.' || std::isdigit(c)))
         return false;
@@ -231,7 +245,7 @@ bool PBRTLexer::read_number(Lexeme &lex){
         this->advance();
         c = this->look();
     }
-    lex = Lexeme(LexemeType::STRING, ss.str());
+    this->currentLexeme = Lexeme(LexemeType::NUMBER, ss.str());
     return true;
 }
 
@@ -240,8 +254,10 @@ bool PBRTLexer::read_number(Lexeme &lex){
 // Moves the lexer to the next character in the string.
 //
 void PBRTLexer::advance(){
-    if(this->currentPos < this->lastPos)
-        this->currentPos++;
+	if (this->currentPos < this->lastPos) {
+		this->currentPos++;
+		this->column++;
+	}
     else if(this->inputEnded)
         throw InputEndedException();
     else{
@@ -262,9 +278,8 @@ void PBRTLexer::advance(){
 void PBRTLexer::remove_blanks(){ 
     while(true){
         char tmp = this->look();
-        if(tmp == ' ' || tmp == '\t'){
+        if(tmp == ' ' || tmp == '\t' || tmp == '\r'){
             // '\n' is part of the grammar
-            this->column++;
             this->advance();
             continue;
         }else if(tmp == '#'){
@@ -272,8 +287,9 @@ void PBRTLexer::remove_blanks(){
             while(tmp != '\n'){
                 this->advance();
                 tmp = this->look();
-                this->column++;
             }
+			this->column = 0;
+			this->advance();
             this->line++;
             continue;
         }else{
@@ -298,10 +314,13 @@ class PBRTParser {
 
     private:
     PBRTLexer *lexer;
-    void parse_preworld_statements(ygl::scene *scn);
-    void parse_world_statements(ygl::scene *scn);
-    void parse_parameter(PBRTParameter &par, std::string type = "");
-
+    bool parse_preworld_statements(ygl::scene *scn);
+    bool parse_world_statements(ygl::scene *scn);
+    bool parse_parameter(PBRTParameter &par, std::string type = "");
+	bool parse_camera(ygl::scene *scn);
+	template<typename T1, typename T2>
+	void parse_value_array(PBRTLexer *lex, int groupSize, std::vector<T1> *vals, \
+		bool(*checkValue)(Lexeme &lexm), T1(*convert)(T2*, int), T2(*convert2)(std::string));
     inline void throw_syntax_error(std::string msg){
         std::stringstream ss;
         ss << "Syntax Error (line " << this->lexer->get_line() << ", column " << this->lexer->get_column() << "): " << msg;
@@ -316,16 +335,54 @@ class PBRTParser {
 
 };
 
-
-void PBRTParser::parse_preworld_statements(ygl::scene *scn){
-    // TODO
-}
-
-void PBRTParser::parse_world_statements(ygl::scene *scn) {
+void PBRTParser::parse(ygl::scene *scn) {
 	// TODO
+	while (true) {
+		try{
+			this->lexer->next_lexeme();
+			PBRTParameter par;
+			this->parse_parameter(par);
+			if (!par.type.compare("string")) {
+				std::cout << "String parameter of name " << par.name << "\nValues: ";
+				auto vals = (std::vector<std::string> *)par.value;
+				for (std::string s : *vals) {
+					std::cout << s << ", ";
+				}
+				std::cout << "\n";
+			}
+			else if (!par.type.compare("normal") || !par.type.compare("rgb")) {
+				std::cout << "Normal parameter of name " << par.name << "\nValues: ";
+				auto vals = (std::vector<ygl::vec3f> *)par.value;
+				for (ygl::vec3f s : *vals) {
+					std::cout << s << ", ";
+				}
+				std::cout << "\n";
+			}
+		}
+		catch (InputEndedException ex) {
+			std::cout << "Input ended.\n";
+			return;
+		}
+		catch (SyntaxErrorException ex) {
+			std::cout << ex.what() << std::endl;
+			return;
+		}
+		catch (LexicalErrorException ex) {
+			std::cout << "ERRR2\n";
+			std::cout << ex.what() << std::endl;
+			return;
+		}
+	}
 }
-void parse_statement(){
 
+bool PBRTParser::parse_preworld_statements(ygl::scene *scn){
+    // TODO
+	return false;
+}
+
+bool PBRTParser::parse_world_statements(ygl::scene *scn) {
+	// TODO
+	return false;
 }
 
 std::vector<std::string> split(std::string text){
@@ -351,32 +408,59 @@ std::vector<std::string> split(std::string text){
 }
 
 bool check_type_existence(std::string &val){
-    if(!val.compare("integer")) return true;
-    if(!val.compare("float")) return true;
-    if(!val.compare("point2")) return true;
-    if(!val.compare("vector2")) return true;
-    if(!val.compare("point3")) return true;
-    if(!val.compare("vector3")) return true;
-    if(!val.compare("normal3")) return true;
-    if(!val.compare("spectrum")) return true;
-    if(!val.compare("bool")) return true;
-    if(!val.compare("string")) return true;
-	if (!val.compare("rgb")) return true;
-	if (!val.compare("color")) return true;
-    if(!val.compare("point")) return true;
-    if(!val.compare("vector")) return true;
-    if(!val.compare("normal")) return true;
+	std::vector<std::string> varTypes{ "integer", "float", "point2", "vector2", "point3", "vector3",\
+		"normal3", "spectrum", "bool", "string", "rgb", "color", "point", "vector", "normal" };
+
+	for (auto s : varTypes)
+		if (!s.compare(val))
+			return true;
     return false;
 }
 
-void PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
-    
-    Lexeme lex;
-    this->lexer->get_next_lexeme(lex);
-    
-    if(lex.get_type() != LexemeType::STRING)
-        throw_syntax_error("Expected a string of the form \"type name\".");
-    auto tokens = split(lex.get_value());
+template<typename T1, typename T2>
+void PBRTParser::parse_value_array(PBRTLexer *lex, int groupSize, std::vector<T1> *vals, bool(*checkValue)(Lexeme &lexm), 
+	T1(*convert)(T2*, int), T2(*convert2)(std::string)) {
+	lex->next_lexeme();
+	// it can be a single value or multiple values
+	if (checkValue(lex->currentLexeme) && groupSize == 1) {
+		// single value
+		T2 v = convert2(lex->currentLexeme.get_value());
+		vals->push_back(convert(&v, 1));
+	}
+	else if (lex->currentLexeme.get_type() == LexemeType::SINGLETON && !lex->currentLexeme.get_value().compare("[")) {
+		// start array of value(s)
+		bool stopped = false;
+		T2 *value = new T2[groupSize];
+		while (!stopped) {
+			for (int i = 0; i < groupSize; i++) {
+				lex->next_lexeme();
+				if (lex->currentLexeme.get_type() == LexemeType::SINGLETON && !lex->currentLexeme.get_value().compare("]")) {
+					if (i == 0) {
+						stopped = true;
+						break; // finished to read the array
+					}
+					else {
+						throw_syntax_error("Too few values specified.");
+					}
+				}	
+				if (!checkValue(lex->currentLexeme))
+					throw_syntax_error("One of the values differs from the expected type.");
+				value[i] = convert2(lex->currentLexeme.get_value());
+			}
+			if(!stopped)
+				vals->push_back(convert(value, groupSize));
+		}
+		delete[] value;
+	}
+	else {
+		throw_syntax_error("Value differ from expected type.");
+	}
+}
+
+bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){ 
+	if (this->lexer->currentLexeme.get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected a string with type and name of a parameter.");
+    auto tokens = split(this->lexer->currentLexeme.get_value());
     // handle type
     if(!check_type_existence(tokens[0]))
         throw_syntax_error("Unrecognized type.");
@@ -390,63 +474,98 @@ void PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 
 	// now, according to type, we parse the value
 	if (!par.type.compare("string")) {
-		std::vector<std::string> *vals = new std::vector<std::string>();	
-		this->lexer->get_next_lexeme(lex);
-		// it can be a single value or multiple values
-		if (lex.get_type() == LexemeType::STRING) {
-			// single value
-			vals->push_back(lex.get_value());
-		}
-		else if (lex.get_type() == LexemeType::SINGLETON && !lex.get_value().compare("[")) {
-			// start array of value(s)
-			while(true) {
-				this->lexer->get_next_lexeme(lex);
-				if (lex.get_type() == LexemeType::SINGLETON && !lex.get_value().compare("]"))
-					break; // finished to read the array
-				if (lex.get_type() != LexemeType::STRING)
-					throw_syntax_error("One of the values is not a string.");
-				vals->push_back(lex.get_value());
-			}
-		}
-		else {
-			throw_syntax_error("Expected a string value.");
-		}
+		std::vector<std::string> *vals = new std::vector<std::string>();
+		parse_value_array<std::string, std::string>(this->lexer, 1, vals, \
+			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::STRING; },\
+			[](std::string *x, int g)->std::string {return *x; },
+			[](std::string x) -> std::string {return x; }
+		);
 		if (vals->size() == 0)
 			throw_syntax_error("No value specified.");
 		par.value = (void *)vals;
 	}
-	else if (!par.type.compare("point") || !par.type.compare("point3") || par.type.compare("normal") || !par.type.compare("normal3")) {
+	else if (!par.type.compare("float")) {
+		std::vector<float> *vals = new std::vector<float>();
+		parse_value_array<float, float>(this->lexer, 1, vals, \
+			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; },\
+			[](float *x, int g)->float {return *x; },
+			[](std::string x) -> float {return atof(x.c_str()); }
+		);
+		if (vals->size() == 0)
+			throw_syntax_error("No value specified.");
+		par.value = (void *)vals;
+	}
+	else if (!par.type.compare("integer")) {
+		std::vector<int> *vals = new std::vector<int>();
+		parse_value_array<int, int>(this->lexer, 1, vals, \
+			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; }, \
+			[](int *x, int g)->int {return *x; },
+			[](std::string x) -> int {return atoi(x.c_str()); }
+		);
+		if (vals->size() == 0)
+			throw_syntax_error("No value specified.");
+		par.value = (void *)vals;
+	}
+	else if (!par.type.compare("bool")) {
+		std::vector<bool> *vals = new std::vector<bool>();
+		parse_value_array<bool, bool>(this->lexer, 1, vals, \
+			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::STRING && \
+				(!lex.get_value().compare("true") || !lex.get_value().compare("false")); }, \
+			[](bool *x, int g)->bool {return *x; },
+			[](std::string x) -> bool { return (!x.compare("true")) ? true : false; }
+		);
+		if (vals->size() == 0)
+			throw_syntax_error("No value specified.");
+		par.value = (void *)vals;
+	}
+	// now we come at a special case of arrays
+	else if (!par.type.compare("point") || !par.type.compare("point3") || !par.type.compare("normal") 
+		|| !par.type.compare("normal3") || !par.type.compare("rgb") || !par.type.compare("color")) {
 		std::vector<ygl::vec3f> *vals = new std::vector<ygl::vec3f>();
-		this->lexer->get_next_lexeme(lex);
-		if (lex.get_type() == LexemeType::SINGLETON && !lex.get_value().compare("[")) {
-			// start array of value(s)
-			bool stopped = false;
-			while (true) {
-				ygl::vec3f value;
-				for (int i = 0; i < 3; i++) {
-					this->lexer->get_next_lexeme(lex);
-					if (lex.get_type() == LexemeType::SINGLETON && !lex.get_value().compare("]")) {
-						if (i == 0) {
-							stopped = true;
-							break;
-						}
-						else
-							throw_syntax_error("Too few values specified.");
-					}
-						
-					if (lex.get_type() != LexemeType::NUMBER)
-						throw_syntax_error("One of the values is not a number.");
-					value[i] = atof(lex.get_value().c_str());
-				}
-				if(!stopped)
-					vals->push_back(value);
-			}
-		}
-		else {
-			throw_syntax_error("Expected a string value.");
-		}
+		parse_value_array<ygl::vec3f, float>(this->lexer, 3, vals, \
+			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; }, \
+			[](float *x, int g)->ygl::vec3f {
+				ygl::vec3f r; 
+				for (int k = 0; k < g; k++) 
+					r[k] = x[k]; 
+				return r; },
+			[](std::string x) -> float { return atof(x.c_str()); }
+		);
 		if (vals->size() == 0)
 			throw_syntax_error("No value specified.");
 		par.value = (void *)vals;
 	}
+	return true;
+}
+
+bool is_camera_type(std::string type) {
+	std::vector<std::string> camTypes { "environment", "ortographic", "perspective", "realistic" };
+	for (auto s : camTypes)
+		if (!s.compare(type))
+			return true;
+	return false;
+}
+
+bool PBRTParser::parse_camera(ygl::scene *scn) {
+	ygl::camera cam;
+
+	// Parse the camera parameters
+	Lexeme lexm;
+	// First parameter is the type
+	this->lexer->next_lexeme();
+	if (lexm.get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected type string.");
+	if (!is_camera_type(lexm.get_value()))
+		throw_syntax_error("Invalid camera type.");
+	// TODO: support only one camera type, so add check here
+
+	// read parameters
+	this->lexer->next_lexeme();
+	while (!lexm.get_type() != LexemeType::INDENTIFIER) {
+	
+	}
+	
+	
+	
+
 }
