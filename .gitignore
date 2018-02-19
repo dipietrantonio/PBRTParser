@@ -1,3 +1,6 @@
 *.out
 *~
+.vs
+bin
+build
 .vscode
