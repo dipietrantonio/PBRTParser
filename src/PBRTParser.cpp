@@ -126,32 +126,27 @@ PBRTLexer::PBRTLexer(std::string text){
 // parse
 //
 bool PBRTLexer::next_lexeme(){
-    this->remove_blanks();
+	this->remove_blanks();
 
-    if(this->read_indentifier())
-        return true;
-    if(this->read_string())
-        return true;
-    if(this->read_number())
-        return true;
-    
-    char c = this->look();
-    if(c == '[' || c == ']' || c == '\n'){
-        std::stringstream ss = std::stringstream();
-        ss.put(c);
-        this->currentLexeme = Lexeme(LexemeType::SINGLETON, ss.str());
-		if (c == '\n') {
-			this->line++;
-			this->column = 0;
-		}
-            
-        this->advance();
-        return true;
-    }
+	if (this->read_indentifier())
+		return true;
+	if (this->read_string())
+		return true;
+	if (this->read_number())
+		return true;
 
-    std::stringstream errStr;
-    errStr << "Lexical error (line " << this->line << ", column " << this->column << ") input not recognized.";
-    throw LexicalErrorException(errStr.str());
+	char c = this->look();
+	if (c == '[' || c == ']') {
+		std::stringstream ss = std::stringstream();
+		ss.put(c);
+		this->currentLexeme = Lexeme(LexemeType::SINGLETON, ss.str());
+		this->advance();
+		return true;
+	}
+
+	std::stringstream errStr;
+	errStr << "Lexical error (line " << this->line << ", column " << this->column << ") input not recognized.";
+	throw LexicalErrorException(errStr.str());
 }
 
 bool PBRTLexer::read_indentifier(){
@@ -278,8 +273,11 @@ void PBRTLexer::advance(){
 void PBRTLexer::remove_blanks(){ 
     while(true){
         char tmp = this->look();
-        if(tmp == ' ' || tmp == '\t' || tmp == '\r'){
-            // '\n' is part of the grammar
+        if(tmp == ' ' || tmp == '\t' || tmp == '\r' || tmp == '\n'){
+			if (tmp == '\n') {
+				this->line++;
+				this->column = 0;
+			}
             this->advance();
             continue;
         }else if(tmp == '#'){
@@ -299,10 +297,41 @@ void PBRTLexer::remove_blanks(){
     }
 }
 
-/*
- * PBRTParser
+/* ===========================================================================================
+ *                                          PBRTParser
  * Parses a stream of lexemes.
+ * ===========================================================================================
  */
+
+// -------------------------------------------------------------------------------------------
+// UTILS
+// -------------------------------------------------------------------------------------------
+
+//
+// split
+// split a string according to space character.
+//
+std::vector<std::string> split(std::string text) {
+	std::vector<std::string> results;
+	std::stringstream ss;
+
+	for (char c : text) {
+		if (c == ' ') {
+			auto str = ss.str();
+			if (str.size() > 0) {
+				results.push_back(str);
+				ss = std::stringstream();
+			}
+		}
+		else {
+			ss << c;
+		}
+	}
+	auto str = ss.str();
+	if (str.length() > 0)
+		results.push_back(str);
+	return results;
+}
 
 struct PBRTParameter{
     std::string type;
@@ -314,14 +343,40 @@ class PBRTParser {
 
     private:
     PBRTLexer *lexer;
-    bool parse_preworld_statements(ygl::scene *scn);
-    bool parse_world_statements(ygl::scene *scn);
-    bool parse_parameter(PBRTParameter &par, std::string type = "");
-	bool parse_camera(ygl::scene *scn);
+	bool inputEnded = false;
+
+	void advance() {
+		try {
+			this->lexer->next_lexeme();
+		}
+		catch (InputEndedException ex) {
+			inputEnded = true;
+		}
+	};
+
+	Lexeme& current_token() {
+		return this->lexer->currentLexeme;
+	};
+
+	bool parse_preworld_statements(ygl::scene *scn, ygl::mat4f &CTM);
+    bool parse_world_statements(ygl::scene *scn, ygl::mat4f &CTM);
+    
+	bool parse_parameter(PBRTParameter &par, std::string type = "");
 	template<typename T1, typename T2>
-	void parse_value_array(PBRTLexer *lex, int groupSize, std::vector<T1> *vals, \
-		bool(*checkValue)(Lexeme &lexm), T1(*convert)(T2*, int), T2(*convert2)(std::string));
-    inline void throw_syntax_error(std::string msg){
+	void parse_value_array(int groupSize, std::vector<T1> *vals, bool(*checkValue)(Lexeme &lexm),\
+		T1(*convert)(T2*, int), T2(*convert2)(std::string));
+
+	/*
+	 * The following private methods correspond to Directives in pbrt format.
+	 */
+	void execute_Camera(ygl::scene *scn, ygl::mat4f &CTM);
+	void execute_Translate(ygl::mat4f &CTM);
+	void execute_Scale(ygl::mat4f &CTM);
+	void execute_Rotate(ygl::mat4f &CTM);
+	void execute_LookAt(ygl::mat4f &CTM);
+	void execute_Film(ygl::scene *scn);
+
+	inline void throw_syntax_error(std::string msg){
         std::stringstream ss;
         ss << "Syntax Error (line " << this->lexer->get_line() << ", column " << this->lexer->get_column() << "): " << msg;
         throw SyntaxErrorException(ss.str());
@@ -336,10 +391,11 @@ class PBRTParser {
 };
 
 void PBRTParser::parse(ygl::scene *scn) {
-	// TODO
-	while (true) {
+	ygl::mat4f CTM = ygl::identity_mat4f;
+	this->advance();
+
+	while (!inputEnded) {
 		try{
-			this->lexer->next_lexeme();
 			PBRTParameter par;
 			this->parse_parameter(par);
 			if (!par.type.compare("string")) {
@@ -359,10 +415,6 @@ void PBRTParser::parse(ygl::scene *scn) {
 				std::cout << "\n";
 			}
 		}
-		catch (InputEndedException ex) {
-			std::cout << "Input ended.\n";
-			return;
-		}
 		catch (SyntaxErrorException ex) {
 			std::cout << ex.what() << std::endl;
 			return;
@@ -375,36 +427,15 @@ void PBRTParser::parse(ygl::scene *scn) {
 	}
 }
 
-bool PBRTParser::parse_preworld_statements(ygl::scene *scn){
+bool PBRTParser::parse_preworld_statements(ygl::scene *scn, ygl::mat4f &CTM) {
     // TODO
 	return false;
 }
 
-bool PBRTParser::parse_world_statements(ygl::scene *scn) {
+bool PBRTParser::parse_world_statements(ygl::scene *scn, ygl::mat4f &CTM) {
 	// TODO
+	CTM = ygl::identity_mat4f;
 	return false;
-}
-
-std::vector<std::string> split(std::string text){
-
-    std::vector<std::string> results;
-    std::stringstream ss;
-    
-    for (char c : text){
-        if(c == ' '){
-            auto str = ss.str();
-            if(str.size() > 0){
-                results.push_back(str);
-                ss = std::stringstream();
-            }
-        }else{
-            ss << c;
-        }
-    }
-    auto str = ss.str();
-    if(str.length() > 0)
-        results.push_back(str);
-    return results;
 }
 
 bool check_type_existence(std::string &val){
@@ -418,23 +449,23 @@ bool check_type_existence(std::string &val){
 }
 
 template<typename T1, typename T2>
-void PBRTParser::parse_value_array(PBRTLexer *lex, int groupSize, std::vector<T1> *vals, bool(*checkValue)(Lexeme &lexm), 
+void PBRTParser::parse_value_array(int groupSize, std::vector<T1> *vals, bool(*checkValue)(Lexeme &lexm), 
 	T1(*convert)(T2*, int), T2(*convert2)(std::string)) {
-	lex->next_lexeme();
+	this->advance();
 	// it can be a single value or multiple values
-	if (checkValue(lex->currentLexeme) && groupSize == 1) {
+	if (checkValue(this->current_token()) && groupSize == 1) {
 		// single value
-		T2 v = convert2(lex->currentLexeme.get_value());
+		T2 v = convert2(this->current_token().get_value());
 		vals->push_back(convert(&v, 1));
 	}
-	else if (lex->currentLexeme.get_type() == LexemeType::SINGLETON && !lex->currentLexeme.get_value().compare("[")) {
+	else if (this->current_token().get_type() == LexemeType::SINGLETON && !this->current_token().get_value().compare("[")) {
 		// start array of value(s)
 		bool stopped = false;
 		T2 *value = new T2[groupSize];
 		while (!stopped) {
 			for (int i = 0; i < groupSize; i++) {
-				lex->next_lexeme();
-				if (lex->currentLexeme.get_type() == LexemeType::SINGLETON && !lex->currentLexeme.get_value().compare("]")) {
+				this->advance();
+				if (this->current_token().get_type() == LexemeType::SINGLETON && !this->current_token().get_value().compare("]")) {
 					if (i == 0) {
 						stopped = true;
 						break; // finished to read the array
@@ -443,9 +474,9 @@ void PBRTParser::parse_value_array(PBRTLexer *lex, int groupSize, std::vector<T1
 						throw_syntax_error("Too few values specified.");
 					}
 				}	
-				if (!checkValue(lex->currentLexeme))
+				if (!checkValue(this->current_token()))
 					throw_syntax_error("One of the values differs from the expected type.");
-				value[i] = convert2(lex->currentLexeme.get_value());
+				value[i] = convert2(this->current_token().get_value());
 			}
 			if(!stopped)
 				vals->push_back(convert(value, groupSize));
@@ -455,12 +486,13 @@ void PBRTParser::parse_value_array(PBRTLexer *lex, int groupSize, std::vector<T1
 	else {
 		throw_syntax_error("Value differ from expected type.");
 	}
+	this->advance(); // remove ] or single value
 }
 
-bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){ 
-	if (this->lexer->currentLexeme.get_type() != LexemeType::STRING)
+bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
+	if (this->current_token().get_type() != LexemeType::STRING)
 		throw_syntax_error("Expected a string with type and name of a parameter.");
-    auto tokens = split(this->lexer->currentLexeme.get_value());
+    auto tokens = split(this->current_token().get_value());
     // handle type
     if(!check_type_existence(tokens[0]))
         throw_syntax_error("Unrecognized type.");
@@ -475,7 +507,7 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	// now, according to type, we parse the value
 	if (!par.type.compare("string")) {
 		std::vector<std::string> *vals = new std::vector<std::string>();
-		parse_value_array<std::string, std::string>(this->lexer, 1, vals, \
+		parse_value_array<std::string, std::string>( 1, vals, \
 			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::STRING; },\
 			[](std::string *x, int g)->std::string {return *x; },
 			[](std::string x) -> std::string {return x; }
@@ -486,7 +518,7 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	}
 	else if (!par.type.compare("float")) {
 		std::vector<float> *vals = new std::vector<float>();
-		parse_value_array<float, float>(this->lexer, 1, vals, \
+		parse_value_array<float, float>( 1, vals, \
 			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; },\
 			[](float *x, int g)->float {return *x; },
 			[](std::string x) -> float {return atof(x.c_str()); }
@@ -497,7 +529,7 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	}
 	else if (!par.type.compare("integer")) {
 		std::vector<int> *vals = new std::vector<int>();
-		parse_value_array<int, int>(this->lexer, 1, vals, \
+		parse_value_array<int, int>( 1, vals, \
 			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; }, \
 			[](int *x, int g)->int {return *x; },
 			[](std::string x) -> int {return atoi(x.c_str()); }
@@ -508,7 +540,7 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	}
 	else if (!par.type.compare("bool")) {
 		std::vector<bool> *vals = new std::vector<bool>();
-		parse_value_array<bool, bool>(this->lexer, 1, vals, \
+		parse_value_array<bool, bool>( 1, vals, \
 			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::STRING && \
 				(!lex.get_value().compare("true") || !lex.get_value().compare("false")); }, \
 			[](bool *x, int g)->bool {return *x; },
@@ -522,7 +554,7 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	else if (!par.type.compare("point") || !par.type.compare("point3") || !par.type.compare("normal") 
 		|| !par.type.compare("normal3") || !par.type.compare("rgb") || !par.type.compare("color")) {
 		std::vector<ygl::vec3f> *vals = new std::vector<ygl::vec3f>();
-		parse_value_array<ygl::vec3f, float>(this->lexer, 3, vals, \
+		parse_value_array<ygl::vec3f, float>( 3, vals, \
 			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; }, \
 			[](float *x, int g)->ygl::vec3f {
 				ygl::vec3f r; 
@@ -546,26 +578,229 @@ bool is_camera_type(std::string type) {
 	return false;
 }
 
-bool PBRTParser::parse_camera(ygl::scene *scn) {
-	ygl::camera cam;
+//
+// TRANSFORMATIONS
+//
+
+void PBRTParser::execute_Translate(ygl::mat4f &CTM) {
+	float x, y, z;
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'x' parameter of Translate directive.");
+	x = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'y' parameter of Translate directive.");
+	y = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'z' parameter of Translate directive.");
+	z = atof(this->current_token().get_value().c_str());
+	
+	const ygl::vec3f transl_vec { x, y, z };
+	auto transl_mat = ygl::translation_mat4f(transl_vec);
+	CTM = CTM * transl_mat;
+	this->advance();
+}
+
+void PBRTParser::execute_Scale(ygl::mat4f &CTM){
+	float x, y, z;
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'x' parameter of Scale directive.");
+	x = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'y' parameter of Scale directive.");
+	y = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'z' parameter of Scale directive.");
+	z = atof(this->current_token().get_value().c_str());
+
+	const ygl::vec3f scale_vec{ x, y, z };
+	auto scale_mat = ygl::scaling_mat4f(scale_vec);
+	CTM = CTM * scale_mat;
+	this->advance();
+}
+void PBRTParser::execute_Rotate(ygl::mat4f &CTM) {
+	float angle, x, y, z;
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'angle' parameter of Rotate directive.");
+	angle = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'x' parameter of Rotate directive.");
+	x = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'y' parameter of Rotate directive.");
+	y = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'z' parameter of Rotate directive.");
+	z = atof(this->current_token().get_value().c_str());
+
+	const ygl::vec3f rot_vec{ x, y, z };
+	auto rot_mat = ygl::rotation_mat4f(rot_vec, angle);
+	CTM = CTM * rot_mat;
+	this->advance();
+}
+
+void PBRTParser::execute_LookAt(ygl::mat4f &CTM){
+	float eye_x, eye_y, eye_z, look_x, look_y, look_z, up_x, up_y, up_z;
+	
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'eye_x' parameter of LookAt directive.");
+	eye_x = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'eye_y' parameter of LookAt directive.");
+	eye_y = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'eye_z' parameter of LookAt directive.");
+	eye_z = atof(this->current_token().get_value().c_str());
+
+	const ygl::vec3f eye{ eye_x, eye_y, eye_z };
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'look_x' parameter of LookAt directive.");
+	look_x = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'look_y' parameter of LookAt directive.");
+	look_y = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'look_z' parameter of LookAt directive.");
+	look_z = atof(this->current_token().get_value().c_str());
+
+	const ygl::vec3f look { look_x, look_y, look_z };
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'up_x' parameter of LookAt directive.");
+	up_x = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'up_y' parameter of LookAt directive.");
+	up_y = atof(this->current_token().get_value().c_str());
+
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::NUMBER)
+		throw_syntax_error("Expected a float value for 'up_z' parameter of LookAt directive.");
+	up_z = atof(this->current_token().get_value().c_str());
+
+	const ygl::vec3f up{ up_x, up_y, up_z };
+
+	auto mm = ygl::lookat_mat4f(eye, look, up);
+	CTM = CTM * mm;
+	this->advance();
+}
+
+//
+// SCENE-WIDE RENDERING OPTIONS
+//
+
+
+//
+// execute_Camera
+// Parse camera information.
+// NOTE: only support perspective camera for now.
+//
+void PBRTParser::execute_Camera(ygl::scene *scn, ygl::mat4f &CTM) {
+	ygl::camera *cam = new ygl::camera;
+	cam->aspect = 0.0f;
+	cam->aperture = 0.0f;
+	cam->yfov = 90.0f;
+	cam->focus = powf(10, 30);
+
+	// TODO: check if this is right
+	// CTM defines world to camera transformation
+	cam->frame = ygl::to_frame3f(CTM);
 
 	// Parse the camera parameters
-	Lexeme lexm;
+
 	// First parameter is the type
-	this->lexer->next_lexeme();
-	if (lexm.get_type() != LexemeType::STRING)
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::STRING)
 		throw_syntax_error("Expected type string.");
-	if (!is_camera_type(lexm.get_value()))
-		throw_syntax_error("Invalid camera type.");
-	// TODO: support only one camera type, so add check here
+	std::string camType = this->current_token().get_value();
+	this->advance();
+
+	// RESTRICTION: only perspective camera is supported
+	if (camType.compare("perspective"))
+		throw_syntax_error("Only perspective camera type supported.");
+	// END-RESTRICTION
 
 	// read parameters
-	this->lexer->next_lexeme();
-	while (!lexm.get_type() != LexemeType::INDENTIFIER) {
-	
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		// get aspect ratio
+		if (!par.name.compare("frameaspectratio")) {
+			if (par.type.compare("float"))
+				throw_syntax_error("'floataspectratio' must have type float.");
+			if (camType.compare("perspective") && camType.compare("orthographic") && camType.compare("environment"))
+				throw_syntax_error("'floataspectratio' is not a parameter for the current camera type.");
+			auto data = (std::vector<float> *) par.value;
+			cam->aspect = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("lensradius")) {
+			if (par.type.compare("float"))
+				throw_syntax_error("'lensradius' must have type float.");
+			if (camType.compare("perspective") && camType.compare("orthographic"))
+				throw_syntax_error("'lensradius' is not a parameter for the current camera type.");
+			auto data = (std::vector<float> *) par.value;
+			cam->aperture = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("focaldistance")) {
+			if (par.type.compare("float"))
+				throw_syntax_error("'focaldistance' must have type float.");
+			if (camType.compare("perspective") && camType.compare("orthographic"))
+				throw_syntax_error("'focaldistance' is not a parameter for the current camera type.");
+			auto data = (std::vector<float> *) par.value;
+			cam->focus = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("fov")) {
+			if (par.type.compare("float"))
+				throw_syntax_error("'fov' must have type float.");
+			if (camType.compare("perspective"))
+				throw_syntax_error("'fov' is not a parameter for the current camera type.");
+			auto data = (std::vector<float> *) par.value;
+			// NOTE: this is true if the image is vertical
+			cam->yfov = data->at(0);
+			delete data;
+		}
 	}
-	
-	
-	
+
+	scn->cameras = std::vector<ygl::camera *>();
+	scn->cameras.push_back(cam);
+}
+
+void PBRTParser::execute_Film(ygl::scene *scn) {
 
 }
