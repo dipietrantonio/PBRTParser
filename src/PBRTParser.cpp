@@ -345,6 +345,9 @@ class PBRTParser {
     PBRTLexer *lexer;
 	bool inputEnded = false;
 
+	// Some members needed to share information among parsing calls
+	float defaultAspect = 0;
+
 	void advance() {
 		try {
 			this->lexer->next_lexeme();
@@ -428,8 +431,42 @@ void PBRTParser::parse(ygl::scene *scn) {
 }
 
 bool PBRTParser::parse_preworld_statements(ygl::scene *scn, ygl::mat4f &CTM) {
-    // TODO
-	return false;
+    // When this method starts executing, the first token must be an Identifier of
+	// a directive.
+	bool checkCamera = false;
+
+	// parse scene wide rendering options until the WorldBegin statement is met.
+	while (!(this->current_token().get_type() == LexemeType::INDENTIFIER &&
+		!this->current_token().get_value().compare("WorldBegin"))) {
+
+		if (this->current_token().get_type() != LexemeType::INDENTIFIER)
+			throw_syntax_error("Identifier expected.");
+
+		// Scene-Wide rendering options
+		else if (!this->current_token().get_value().compare("Camera")) {
+			this->execute_Camera(scn, CTM);
+			checkCamera = true;
+		}
+		else if (!this->current_token().get_value().compare("Film")) {
+			this->execute_Film(scn);
+		}
+
+		// Transformation
+		else if (!this->current_token().get_value().compare("Translate")) {
+			this->execute_Translate(CTM);
+		}
+		else if (!this->current_token().get_value().compare("Scale")) {
+			this->execute_Scale(CTM);
+		}
+		else if (!this->current_token().get_value().compare("Rotate")) {
+			this->execute_Rotate(CTM);
+		}
+		else if (!this->current_token().get_value().compare("LookAt")) {
+			this->execute_LookAt(CTM);
+		}
+	}
+	
+	return checkCamera;
 }
 
 bool PBRTParser::parse_world_statements(ygl::scene *scn, ygl::mat4f &CTM) {
@@ -725,11 +762,11 @@ void PBRTParser::execute_LookAt(ygl::mat4f &CTM){
 //
 // execute_Camera
 // Parse camera information.
-// NOTE: only support perspective camera for now.
+// NOTE: only support perspective camera for now. And only one camera
 //
 void PBRTParser::execute_Camera(ygl::scene *scn, ygl::mat4f &CTM) {
 	ygl::camera *cam = new ygl::camera;
-	cam->aspect = 0.0f;
+	cam->aspect = defaultAspect;
 	cam->aperture = 0.0f;
 	cam->yfov = 90.0f;
 	cam->focus = powf(10, 30);
@@ -801,6 +838,47 @@ void PBRTParser::execute_Camera(ygl::scene *scn, ygl::mat4f &CTM) {
 	scn->cameras.push_back(cam);
 }
 
+//
+// execute_Film
+//
 void PBRTParser::execute_Film(ygl::scene *scn) {
+	
+	// First parameter is the type
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected type string.");
+	std::string filmType = this->current_token().get_value();
+	this->advance();
 
+	if (filmType.compare("image"))
+		throw_syntax_error("Only image \"film\" is supported.");
+
+	int xres = 0;
+	int yres = 0;
+	// read parameters
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("xresolution")) {
+			if (par.type.compare("integer"))
+				throw_syntax_error("'xresolution' must have integer type.");
+
+			std::vector<int> *data = (std::vector<int> *)par.value;
+			xres = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("yresolution")) {
+			if (par.type.compare("integer"))
+				throw_syntax_error("'yresolution' must have integer type.");
+
+			std::vector<int> *data = (std::vector<int> *)par.value;
+			yres = data->at(0);
+			delete data;
+		}
+	}
+
+	if (xres && yres) {
+		this->defaultAspect = ((float)xres) / ((float)yres);
+	}
 }
