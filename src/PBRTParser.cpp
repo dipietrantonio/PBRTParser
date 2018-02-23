@@ -19,6 +19,9 @@
 #include <exception>
 #include <locale>
 #include "yocto_gl.h"
+#include <unordered_map>
+
+#define YGL_IMAGEIO 1
 
 class InputEndedException : public std::exception {
 
@@ -339,45 +342,98 @@ struct PBRTParameter{
     void *value;
 };
 
+struct AreaLightInfo {
+	bool active = false;
+	ygl::vec3f L = { 1, 1, 1 };
+	bool twosided = false;
+};
+
+struct GraphicState {
+	// Current Transformation Matrix
+	ygl::mat4f CTM;
+	// AreaLight directive status
+	AreaLightInfo alInfo;
+	// Current Material
+	ygl::material mat;
+
+};
+
 class PBRTParser {
 
     private:
+
+	// PRIVATE ATTRIBUTES
     PBRTLexer *lexer;
+	// end of the token stream reached?
 	bool inputEnded = false;
 
-	// Some members needed to share information among parsing calls
+	// What follows are some variables that need to be shared among
+	// parsing statements
+	
+	// pointer to the newly created yocto scene
+	ygl::scene *scn;
+	// aspect ratio can be set in Camera or Film directive
 	float defaultAspect = 0;
+	GraphicState gState{ ygl::identity_mat4f, {}, {} };
 
-	void advance() {
-		try {
-			this->lexer->next_lexeme();
-		}
-		catch (InputEndedException ex) {
-			inputEnded = true;
-		}
-	};
+	// mappings to memorize data (textures, objects, ..) by name and use
+	// them in different times duding parsing (eg for instancing).
+	std::unordered_map<std::string, ygl::texture*> nameToTexture{};
+	std::unordered_map<std::string, ygl::material*> nameToMaterial{};
+	std::unordered_map<std::string, ygl::shape*> nameToObject{}; // instancing
 
-	Lexeme& current_token() {
-		return this->lexer->currentLexeme;
-	};
-
-	bool parse_preworld_statements(ygl::scene *scn, ygl::mat4f &CTM);
-    bool parse_world_statements(ygl::scene *scn, ygl::mat4f &CTM);
-    
+	// PRIVATE METHODS
+	void advance();
+	Lexeme& current_token() {return this->lexer->currentLexeme;};
+	bool parse_preworld_statements();
+    bool parse_world_statements();
 	bool parse_parameter(PBRTParameter &par, std::string type = "");
+
 	template<typename T1, typename T2>
 	void parse_value_array(int groupSize, std::vector<T1> *vals, bool(*checkValue)(Lexeme &lexm),\
 		T1(*convert)(T2*, int), T2(*convert2)(std::string));
 
-	/*
-	 * The following private methods correspond to Directives in pbrt format.
-	 */
-	void execute_Camera(ygl::scene *scn, ygl::mat4f &CTM);
-	void execute_Translate(ygl::mat4f &CTM);
-	void execute_Scale(ygl::mat4f &CTM);
-	void execute_Rotate(ygl::mat4f &CTM);
-	void execute_LookAt(ygl::mat4f &CTM);
-	void execute_Film(ygl::scene *scn);
+
+	// The following private methods correspond to Directives in pbrt format.
+	 
+	// Scene wide rendering options
+	void execute_Camera();
+	void execute_Film();
+	// Transformation
+	void execute_Translate();
+	void execute_Scale();
+	void execute_Rotate();
+	void execute_LookAt();
+	// Attributes
+	void execute_AttributeBlock();
+	void parse_block_content();
+	void execute_TransformBlock();
+
+	void execute_Shape();
+	void parse_curve();
+	void parse_trianglemesh();
+
+	void load_texture_from_file(std::string filename, ygl::texture_info &txtinfo);
+
+	void execute_Object();
+	void execute_ObjectInstance();
+
+	void execute_LightSource();
+	void parse_InfiniteLight();
+	void parse_PointLight();
+
+	void execute_AreaLightSource();
+
+	void execute_MakeNamedMaterial();
+	void execute_NamedMaterial();
+	void execute_Material();
+	void parse_material_matte();
+	void parse_material_plastic();
+	void parse_material_metal();
+	void parse_material_mirror();
+	void parse_material_mix();
+
+	void execute_Texture();
 
 	inline void throw_syntax_error(std::string msg){
         std::stringstream ss;
@@ -386,14 +442,35 @@ class PBRTParser {
     };
 
     public:
-    PBRTParser(std::string text){
+    
+	// PUBLIC METHODS
+
+	PBRTParser(std::string text){
         this->lexer = new PBRTLexer(text);
+		this->scn = new ygl::scene();
     };
-    void parse(ygl::scene *scn);
+
+    ygl::scene *parse();
 
 };
 
-void PBRTParser::parse(ygl::scene *scn) {
+//
+// advance
+// Fetches the next lexeme (token)
+//
+void PBRTParser::advance() {
+	try {
+		this->lexer->next_lexeme();
+	}
+	catch (InputEndedException ex) {
+		inputEnded = true;
+	}
+};
+
+//
+// parse
+//
+ygl::scene *PBRTParser::parse() {
 	ygl::mat4f CTM = ygl::identity_mat4f;
 	this->advance();
 
@@ -420,17 +497,18 @@ void PBRTParser::parse(ygl::scene *scn) {
 		}
 		catch (SyntaxErrorException ex) {
 			std::cout << ex.what() << std::endl;
-			return;
+			return nullptr;
 		}
 		catch (LexicalErrorException ex) {
 			std::cout << "ERRR2\n";
 			std::cout << ex.what() << std::endl;
-			return;
+			return nullptr;
 		}
 	}
 }
 
-bool PBRTParser::parse_preworld_statements(ygl::scene *scn, ygl::mat4f &CTM) {
+
+bool PBRTParser::parse_preworld_statements() {
     // When this method starts executing, the first token must be an Identifier of
 	// a directive.
 	bool checkCamera = false;
@@ -444,34 +522,33 @@ bool PBRTParser::parse_preworld_statements(ygl::scene *scn, ygl::mat4f &CTM) {
 
 		// Scene-Wide rendering options
 		else if (!this->current_token().get_value().compare("Camera")) {
-			this->execute_Camera(scn, CTM);
+			this->execute_Camera();
 			checkCamera = true;
 		}
 		else if (!this->current_token().get_value().compare("Film")) {
-			this->execute_Film(scn);
+			this->execute_Film();
 		}
 
 		// Transformation
 		else if (!this->current_token().get_value().compare("Translate")) {
-			this->execute_Translate(CTM);
+			this->execute_Translate();
 		}
 		else if (!this->current_token().get_value().compare("Scale")) {
-			this->execute_Scale(CTM);
+			this->execute_Scale();
 		}
 		else if (!this->current_token().get_value().compare("Rotate")) {
-			this->execute_Rotate(CTM);
+			this->execute_Rotate();
 		}
 		else if (!this->current_token().get_value().compare("LookAt")) {
-			this->execute_LookAt(CTM);
+			this->execute_LookAt();
 		}
 	}
-	
 	return checkCamera;
 }
 
-bool PBRTParser::parse_world_statements(ygl::scene *scn, ygl::mat4f &CTM) {
+bool PBRTParser::parse_world_statements() {
 	// TODO
-	CTM = ygl::identity_mat4f;
+	this->gState.CTM = ygl::identity_mat4f;
 	return false;
 }
 
@@ -619,7 +696,7 @@ bool is_camera_type(std::string type) {
 // TRANSFORMATIONS
 //
 
-void PBRTParser::execute_Translate(ygl::mat4f &CTM) {
+void PBRTParser::execute_Translate() {
 	float x, y, z;
 
 	this->advance();
@@ -639,11 +716,11 @@ void PBRTParser::execute_Translate(ygl::mat4f &CTM) {
 	
 	const ygl::vec3f transl_vec { x, y, z };
 	auto transl_mat = ygl::translation_mat4f(transl_vec);
-	CTM = CTM * transl_mat;
+	this->gState.CTM = this->gState.CTM * transl_mat;
 	this->advance();
 }
 
-void PBRTParser::execute_Scale(ygl::mat4f &CTM){
+void PBRTParser::execute_Scale(){
 	float x, y, z;
 
 	this->advance();
@@ -663,10 +740,10 @@ void PBRTParser::execute_Scale(ygl::mat4f &CTM){
 
 	const ygl::vec3f scale_vec{ x, y, z };
 	auto scale_mat = ygl::scaling_mat4f(scale_vec);
-	CTM = CTM * scale_mat;
+	this->gState.CTM = this->gState.CTM * scale_mat;
 	this->advance();
 }
-void PBRTParser::execute_Rotate(ygl::mat4f &CTM) {
+void PBRTParser::execute_Rotate() {
 	float angle, x, y, z;
 
 	this->advance();
@@ -691,11 +768,11 @@ void PBRTParser::execute_Rotate(ygl::mat4f &CTM) {
 
 	const ygl::vec3f rot_vec{ x, y, z };
 	auto rot_mat = ygl::rotation_mat4f(rot_vec, angle);
-	CTM = CTM * rot_mat;
+	this->gState.CTM = this->gState.CTM * rot_mat;
 	this->advance();
 }
 
-void PBRTParser::execute_LookAt(ygl::mat4f &CTM){
+void PBRTParser::execute_LookAt(){
 	float eye_x, eye_y, eye_z, look_x, look_y, look_z, up_x, up_y, up_z;
 	
 	this->advance();
@@ -750,7 +827,7 @@ void PBRTParser::execute_LookAt(ygl::mat4f &CTM){
 	const ygl::vec3f up{ up_x, up_y, up_z };
 
 	auto mm = ygl::lookat_mat4f(eye, look, up);
-	CTM = CTM * mm;
+	this->gState.CTM = this->gState.CTM * mm;
 	this->advance();
 }
 
@@ -764,7 +841,7 @@ void PBRTParser::execute_LookAt(ygl::mat4f &CTM){
 // Parse camera information.
 // NOTE: only support perspective camera for now. And only one camera
 //
-void PBRTParser::execute_Camera(ygl::scene *scn, ygl::mat4f &CTM) {
+void PBRTParser::execute_Camera() {
 	ygl::camera *cam = new ygl::camera;
 	cam->aspect = defaultAspect;
 	cam->aperture = 0.0f;
@@ -773,7 +850,7 @@ void PBRTParser::execute_Camera(ygl::scene *scn, ygl::mat4f &CTM) {
 
 	// TODO: check if this is right
 	// CTM defines world to camera transformation
-	cam->frame = ygl::to_frame3f(CTM);
+	cam->frame = ygl::to_frame3f(this->gState.CTM);
 
 	// Parse the camera parameters
 
@@ -841,7 +918,7 @@ void PBRTParser::execute_Camera(ygl::scene *scn, ygl::mat4f &CTM) {
 //
 // execute_Film
 //
-void PBRTParser::execute_Film(ygl::scene *scn) {
+void PBRTParser::execute_Film() {
 	
 	// First parameter is the type
 	this->advance();
@@ -881,4 +958,697 @@ void PBRTParser::execute_Film(ygl::scene *scn) {
 	if (xres && yres) {
 		this->defaultAspect = ((float)xres) / ((float)yres);
 	}
+}
+
+//
+// DESCRIBING THE SCENE
+//
+
+//
+// Attributes
+//
+
+void PBRTParser::execute_AttributeBlock() {
+	this->advance();
+	// save the current state
+	GraphicState oldState = this->gState;
+
+	this->parse_block_content();
+
+	this->gState = oldState;
+	this->advance();
+}
+
+void PBRTParser::parse_block_content() {
+	// if (attributeEnd || TransformEnd) return
+}
+
+void PBRTParser::execute_TransformBlock() {
+	this->advance();
+	// save the current state
+	ygl::mat4f oldCTM = this->gState.CTM;
+
+	this->parse_block_content();
+
+	this->gState.CTM = oldCTM;
+	this->advance();
+}
+
+void PBRTParser::parse_curve() {
+
+	std::vector<ygl::vec3f> *p = nullptr; // max 4 points
+	int degree = 3; // only legal options 2 and 3
+	std::string type = "";
+	std::vector<ygl::vec3f> *N = nullptr;
+	int splitDepth = 3;
+	int width = 1;
+
+	ygl::shape *curve = new ygl::shape;
+
+	// read parameters
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("p")) {
+			if (par.type.compare("point3") && par.type.compare("point"))
+				throw_syntax_error("Parameter 'p' must be of point type.");
+			p = (std::vector<ygl::vec3f> *)par.value;
+		}
+		else if (!par.name.compare("degree")) {
+			if (par.type.compare("integer"))
+				throw_syntax_error("Parameter 'degree' must be of integer type.");
+			std::vector<int> *data = (std::vector<int> *)par.value;
+			degree = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("type")) {
+			if (par.type.compare("string"))
+				throw_syntax_error("Parameter 'type' must be of string type.");
+			std::vector<std::string> *data = (std::vector<std::string> *)par.value;
+			type = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("N")) {
+			if (par.type.compare("normal3") && par.type.compare("normal"))
+				throw_syntax_error("Parameter 'N' must be of normal type.");
+			N = (std::vector<ygl::vec3f> *)par.value;
+		}
+		else if (!par.name.compare("splitdepth")) {
+			if (par.type.compare("integer"))
+				throw_syntax_error("Parameter 'splitdepth' must be of normal type.");
+			auto data = (std::vector<int> *)par.value;
+			splitDepth = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("width")) {
+			if (par.type.compare("float"))
+				throw_syntax_error("Parameter 'width' must be of float type.");
+			auto data = (std::vector<float> *)par.value;
+			width = data->at(0);
+			delete data;
+		}
+	}
+
+	if (degree == 3 && type.compare("bezier")) {
+		
+		// add vertex to the shape
+		for (auto v : *p) {
+			curve->pos.push_back(v);
+			curve->radius.push_back(width);
+		}
+		curve->beziers.push_back({ 0, 1, 2, 3 });
+		for (int i = 0; i < splitDepth; i++) {
+			std::vector<int> verts;
+			std::vector<ygl::vec4i> segments;
+			tie(curve->beziers, verts, segments) =
+				ygl::subdivide_bezier_recursive(curve->beziers, (int)curve->pos.size());
+			curve->pos = ygl::subdivide_vert_bezier(curve->pos, verts, segments);
+			curve->norm = ygl::subdivide_vert_bezier(curve->norm, verts, segments);
+			curve->texcoord = ygl::subdivide_vert_bezier(curve->texcoord, verts, segments);
+			curve->color = ygl::subdivide_vert_bezier(curve->color, verts, segments);
+			curve->radius = ygl::subdivide_vert_bezier(curve->radius, verts, segments);
+		}
+
+		// TODO: add shape to scn
+	}
+	else {
+		throw_syntax_error("Other types of curve than cubic bezier are not supported.");
+	}
+}
+
+void PBRTParser::parse_trianglemesh() {
+	
+	ygl::shape *triangleMesh = new ygl::shape;
+
+	bool indicesCheck = false;
+	bool PCheck = false;
+
+	// read parameters
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("indices")) {
+			if (par.type.compare("integer"))
+				throw_syntax_error("'indices' parameter must have integer type.");
+			std::vector<int> *data = (std::vector<int> *) par.value;
+			if (data->size() % 3 != 0)
+				throw_syntax_error("'indices' parameter has a value array with wrong size (must be multiple of 3).");
+			int j = 0;
+			while (j < data->size()) {
+				ygl::vec3i triangle;
+				for (int i = 0; i < 3; i++, j++) {
+					triangle[i] = data->at(j);
+				}
+				triangleMesh->triangles.push_back(triangle);
+			}
+			indicesCheck = true;
+			delete data;
+		}
+		else if (!par.name.compare("P")) {
+			if (par.type.compare("point") && par.type.compare("point3"))
+				throw_syntax_error("'P' parameter must be of point3 type.");
+			std::vector<ygl::vec3f> *data = (std::vector<ygl::vec3f> *)par.value;
+			for (auto p : *data) {
+				triangleMesh->pos.push_back(p);
+			}
+			delete data;
+			PCheck = true;
+		}
+		else if (!par.name.compare("N")) {
+			if (par.type.compare("normal") && par.type.compare("normal3"))
+				throw_syntax_error("'N' parameter must be of normal3 type.");
+			std::vector<ygl::vec3f> *data = (std::vector<ygl::vec3f> *)par.value;
+			for (auto p : *data) {
+				triangleMesh->norm.push_back(p);
+			}
+			delete data;
+		}
+		else if (!par.name.compare("uv")) {
+			if (par.type.compare("float"))
+				throw_syntax_error("'uv' parameter must be of float type.");
+			std::vector<float> *data = (std::vector<float> *)par.value;
+			int j = 0;
+			while (j < data->size()) {
+				ygl::vec2f uv;
+				uv[0] = data->at(j++);
+				uv[1] = data->at(j++);
+				triangleMesh->texcoord.push_back(uv);
+			}
+			delete data;
+		}
+	}
+
+	if (!(indicesCheck && PCheck))
+		throw_syntax_error("Missing indices or positions in triangle mesh specification.");
+
+	// TODO: add the shape to scene
+	// TODO: material (kd, ks..)
+}
+
+void PBRTParser::execute_Shape() {
+	this->advance();
+
+	// parse the shape name
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected shape name.");
+	// TODO: check if the type is correct
+	std::string shapeName = this->current_token().get_value();
+	this->advance();
+	// current transformation matrix is used to set the object to world transformation for the shape.
+
+	if (!shapeName.compare("curve"))
+		this->parse_curve();
+	else if (!shapeName.compare("trianglemesh"))
+		this->parse_trianglemesh();
+}
+
+void PBRTParser::execute_Object() {
+	this->advance();
+
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected object name as a string.");
+	//NOTE: the current transformation matrix defines the transformation from
+	//object space to instance's coordinate space
+	std::string objName = this->current_token().get_value();
+	this->advance();
+
+	// TODO: parse list of shapes
+
+	this->advance();
+}
+
+void PBRTParser::execute_ObjectInstance() {
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected object name as a string.");
+	//NOTE: the current transformation matrix defines the transformation from
+	//instance space to world coordinate space
+	std::string objName = this->current_token().get_value();
+	this->advance();
+	//TODO: create instance
+
+}
+
+void PBRTParser::execute_LightSource() {
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected lightsource type as a string.");
+	// NOTE: when a light source is defined, the CTM is uded to define
+	// the light-to-world transformation. 
+	std::string lightType = this->current_token().get_value();
+	this->advance();
+
+	if (!lightType.compare("point"))
+		this->parse_PointLight();
+	else if (!lightType.compare("infinite"))
+		this->parse_InfiniteLight();
+	else
+		throw_syntax_error("Light type not supported.");
+}
+
+void PBRTParser::parse_InfiniteLight() {
+	
+	ygl::vec3f scale { 1, 1, 1 };
+	ygl::vec3f L { 1, 1, 1 };
+	std::string mapname;
+
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("scale")) {
+			if (par.type.compare("spectrum"))
+				throw_syntax_error("'scale' parameter expects a spectrum type.");
+			auto data = (std::vector<ygl::vec3f>*)par.value;
+			scale = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("L")) {
+			if (par.type.compare("specturm"))
+				throw_syntax_error("'L' parameter expects a spectrum type.");
+			auto data = (std::vector<ygl::vec3f>*)par.value;
+			L = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("mapname")) {
+			if (par.type.compare("string"))
+				throw_syntax_error("'mapname' parameter expects a string type.");
+			auto data = (std::vector<std::string>*)par.value;
+			mapname = data->at(0);
+			delete data;
+		}
+	}
+
+	ygl::light *lgt = new ygl::light;
+	ygl::environment *env = new ygl::environment;
+	lgt->env = env;
+	env->ke = scale * L;
+	if (mapname.length() > 0) {
+		// TODO: better manage the textures
+		this->load_texture_from_file(mapname, env->ke_txt);
+	}
+
+	scn->environments.push_back(env);
+	scn->lights.push_back(lgt);
+}
+
+std::string process_filename(std::string filename) {
+	// TODO: implement handling of relative paths, if needed
+	return filename;
+}
+
+void PBRTParser::load_texture_from_file(std::string filename, ygl::texture_info &txtinfo) {	
+	std::string fname = process_filename(filename);
+	ygl::texture *txt = new ygl::texture;
+	//TODO: maybe some bug in yocto
+	//txt->hdr = ygl::load_image4f(filename); // TODO: verify format
+	txtinfo.txt = txt;
+}
+
+void PBRTParser::parse_PointLight() {
+	ygl::vec3f scale{ 1, 1, 1 };
+	ygl::vec3f I{ 1, 1, 1 };
+	ygl::vec3f point;
+
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("scale")) {
+			if (par.type.compare("spectrum"))
+				throw_syntax_error("'scale' parameter expects a spectrum type.");
+			auto data = (std::vector<ygl::vec3f>*)par.value;
+			scale = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("I")) {
+			if (par.type.compare("specturm"))
+				throw_syntax_error("'I' parameter expects a spectrum type.");
+			auto data = (std::vector<ygl::vec3f>*)par.value;
+			I = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("from")) {
+			if (par.type.compare("point3") && par.type.compare("point"))
+				throw_syntax_error("'from' parameter expects a point type.");
+			auto data = (std::vector<ygl::vec3f>*)par.value;
+			point = data->at(0);
+			delete data;
+		}
+	}
+
+	ygl::shape *lgtShape = new ygl::shape;
+	lgtShape->pos.push_back(point);
+	lgtShape->points.push_back(0);
+	lgtShape->mat->ke = I * scale;
+	scn->shapes.push_back(lgtShape);
+	ygl::instance *inst = new ygl::instance;
+	inst->shp = lgtShape;
+	//TODO: frame!! (maybe light can have fixed position, caution)
+	scn->instances.push_back(inst);
+	ygl::light *lgt = new ygl::light;
+	lgt->ist = inst;
+	scn->lights.push_back(lgt);
+}
+
+void PBRTParser::execute_AreaLightSource() {
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected lightsource type as a string.");
+	
+	std::string areaLightType = this->current_token().get_value();
+	// TODO: check type
+	this->advance();
+
+	ygl::vec3f scale{ 1, 1, 1 };
+	ygl::vec3f L{ 1, 1, 1 };
+	bool twosided = false;
+
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("scale")) {
+			if (par.type.compare("spectrum"))
+				throw_syntax_error("'scale' parameter expects a spectrum type.");
+			auto data = (std::vector<ygl::vec3f>*)par.value;
+			scale = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("L")) {
+			if (par.type.compare("specturm"))
+				throw_syntax_error("'L' parameter expects a spectrum type.");
+			auto data = (std::vector<ygl::vec3f>*)par.value;
+			L = data->at(0);
+			delete data;
+		}
+		else if (!par.name.compare("twosided")) {
+			if (par.type.compare("bool"))
+				throw_syntax_error("'twosided' parameter expects a bool type.");
+			auto data = (std::vector<bool>*)par.value;
+			twosided = data->at(0);
+			delete data;
+		}
+	}
+
+	this->gState.alInfo.active = true;
+	this->gState.alInfo.L = L;
+	this->gState.alInfo.twosided = twosided;
+}
+
+void PBRTParser::execute_Material() {
+	this->advance();
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected lightsource type as a string.");
+
+	std::string materialType = this->current_token().get_value();
+	// TODO: check material type
+	// For now, implement matte, plastic, metal, mirror
+	// NOTE: shapes can override material parameters
+	// TODO: implement shape materials (in shape call)
+	
+	if (!materialType.compare("matte"))
+		this->parse_material_matte();
+	else if (!materialType.compare("metal"))
+		this->parse_material_metal();
+	else if (!materialType.compare("mix"))
+		this->parse_material_mix();
+	else if (!materialType.compare("plastic"))
+		this->parse_material_plastic();
+	else if (!materialType.compare("mirror"))
+		this->parse_material_mirror();
+}
+
+void PBRTParser::parse_material_matte() {
+	ygl::vec3f kd{ 0.5, 0.5, 0.5 };
+	std::string textureKd = "";
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("Kd")) {
+			if (!par.type.compare("spactrum") || !par.type.compare("rbg")) {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				kd = data->at(0);
+				delete data;
+			}
+			else if (!par.type.compare("texture")) {
+				auto data = (std::vector<std::string> *)par.value;
+				textureKd = data->at(0);
+				delete data;
+			}
+			else {
+				throw_syntax_error("'Kd' parameter must be a spectrum or a texture.");
+			}
+		}
+	}
+
+	this->gState.mat = {};
+	if (textureKd.compare("")) {
+		//TODO: check how yocto mixes kd and kdtxt
+		this->gState.mat.kd = { 1, 1, 1 };
+		this->gState.mat.kd_txt = {};
+		auto it = nameToTexture.find(textureKd);
+		if (it == nameToTexture.end())
+			throw_syntax_error("the specified texture for 'kd' parameter was not found.");
+		this->gState.mat.kd_txt.txt = it->second;
+	}
+	else {
+		this->gState.mat.kd = kd;
+	}
+}
+
+void PBRTParser::parse_material_metal() {
+	// TODO: default values = copper
+	ygl::vec3f eta{ 0.5, 0.5, 0.5 };
+	std::string textureETA = "";
+	
+	ygl::vec3f k { 0.5, 0.5, 0.5 };
+	std::string textureK = "";
+
+	float rs = 0.01;
+	std::string textureRS = "";
+
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("eta")) {
+			if (!par.type.compare("spactrum") || !par.type.compare("rbg")) {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				eta = data->at(0);
+				delete data;
+			}
+			else if (!par.type.compare("texture")) {
+				auto data = (std::vector<std::string> *)par.value;
+				textureETA = data->at(0);
+				delete data;
+			}
+			else {
+				throw_syntax_error("'eta' parameter must be a spectrum or a texture.");
+			}
+		}else if(!par.name.compare("k")) {
+			if (!par.type.compare("spactrum") || !par.type.compare("rbg")) {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				k = data->at(0);
+				delete data;
+			}
+			else if (!par.type.compare("texture")) {
+				auto data = (std::vector<std::string> *)par.value;
+				textureK = data->at(0);
+				delete data;
+			}
+			else {
+				throw_syntax_error("'k' parameter must be a spectrum or a texture.");
+			}
+		}
+		else if (!par.name.compare("roughness")) {
+			if (!par.type.compare("float")) {
+				auto data = (std::vector<float> *)par.value;
+				rs = data->at(0);
+				delete data;
+			}
+			else if (!par.type.compare("texture")) {
+				auto data = (std::vector<std::string> *)par.value;
+				textureRS = data->at(0);
+				delete data;
+			}
+			else {
+				throw_syntax_error("'roughness' parameter must be a float or a texture.");
+			}
+		}
+	}
+
+	this->gState.mat = {};
+	/*
+	if (textureKd.compare("")) {
+		//TODO: check how yocto mixes kd and kdtxt
+		this->gState.mat.kd = { 1, 1, 1 };
+		this->gState.mat.kd_txt = {};
+		auto it = nameToTexture.find(textureKd);
+		if (it == nameToTexture.end())
+			throw_syntax_error("the specified texture for 'kd' parameter was not found.");
+		this->gState.mat.kd_txt.txt = it->second;
+	}
+	else {
+		this->gState.mat.kd = kd;
+	}*/
+}
+
+void PBRTParser::parse_material_mirror() {
+	ygl::vec3f kr{ 0.9, 0.9, 0.9 };
+	std::string textureKr = "";
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("Kr")) {
+			if (!par.type.compare("spactrum") || !par.type.compare("rbg")) {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				kr = data->at(0);
+				delete data;
+			}
+			else if (!par.type.compare("texture")) {
+				auto data = (std::vector<std::string> *)par.value;
+				textureKr = data->at(0);
+				delete data;
+			}
+			else {
+				throw_syntax_error("'Kr' parameter must be a spectrum or a texture.");
+			}
+		}
+	}
+
+	this->gState.mat = {};
+	if (textureKr.compare("")) {
+		//TODO: check how yocto mixes kd and kdtxt
+		this->gState.mat.kr = { 1, 1, 1 };
+		this->gState.mat.kr_txt = {};
+		auto it = nameToTexture.find(textureKr);
+		if (it == nameToTexture.end())
+			throw_syntax_error("the specified texture for 'kr' parameter was not found.");
+		this->gState.mat.kr_txt.txt = it->second;
+	}
+	else {
+		this->gState.mat.kd = kr;
+	}
+}
+
+void PBRTParser::parse_material_mix() {
+	// TODO
+}
+
+void PBRTParser::parse_material_plastic() {
+	ygl::vec3f kd{ 0.25, 0.25, 0.25 };
+	std::string textureKd = "";
+	ygl::vec3f ks{ 0.25, 0.25, 0.25 };
+	std::string textureKs = "";
+	float rs = 0.1;
+	std::string textureRS = "";
+
+	while (this->current_token().get_type() != LexemeType::INDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (!par.name.compare("Kd")) {
+			if (!par.type.compare("spactrum") || !par.type.compare("rbg")) {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				kd = data->at(0);
+				delete data;
+			}
+			else if (!par.type.compare("texture")) {
+				auto data = (std::vector<std::string> *)par.value;
+				textureKd = data->at(0);
+				delete data;
+			}
+			else {
+				throw_syntax_error("'Kd' parameter must be a spectrum or a texture.");
+			}
+		}
+		else if (!par.name.compare("Ks")) {
+			if (!par.type.compare("spactrum") || !par.type.compare("rbg")) {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				ks = data->at(0);
+				delete data;
+			}
+			else if (!par.type.compare("texture")) {
+				auto data = (std::vector<std::string> *)par.value;
+				textureKs = data->at(0);
+				delete data;
+			}
+			else {
+				throw_syntax_error("'Ks' parameter must be a spectrum or a texture.");
+			}
+		}
+		else if (!par.name.compare("roughness")) {
+			if (!par.type.compare("float")) {
+				auto data = (std::vector<float> *)par.value;
+				rs = data->at(0);
+				delete data;
+			}
+			else if (!par.type.compare("texture")) {
+				auto data = (std::vector<std::string> *)par.value;
+				textureRS = data->at(0);
+				delete data;
+			}
+			else {
+				throw_syntax_error("'roughness' parameter must be a float or a texture.");
+			}
+		}
+	}
+
+	this->gState.mat = {};
+	if (textureKd.compare("")) {
+		//TODO: check how yocto mixes kd and kdtxt
+		this->gState.mat.kd = { 1, 1, 1 };
+		this->gState.mat.kd_txt = {};
+		auto it = nameToTexture.find(textureKd);
+		if (it == nameToTexture.end())
+			throw_syntax_error("the specified texture for 'kd' parameter was not found.");
+		this->gState.mat.kd_txt.txt = it->second;
+	}
+	else {
+		this->gState.mat.kd = kd;
+	}
+
+	if (textureKs.compare("")) {
+		//TODO: check how yocto mixes kd and kdtxt
+		this->gState.mat.ks = { 1, 1, 1 };
+		this->gState.mat.ks_txt = {};
+		auto it = nameToTexture.find(textureKs);
+		if (it == nameToTexture.end())
+			throw_syntax_error("the specified texture for 'ks' parameter was not found.");
+		this->gState.mat.ks_txt.txt = it->second;
+	}
+	else {
+		this->gState.mat.ks = ks;
+	}
+	if (textureRS.compare("")) {
+		// TODO: check how yocto mixes kd and kdtxt
+		// TODO: texture of only one float??
+	}
+	else {
+		this->gState.mat.rs = rs;
+	}
+}
+
+void PBRTParser::execute_MakeNamedMaterial() {
+	this->advance();
+
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected material name as string.");
+
+	std::string materialName = this->current_token().get_value();
+	this->advance();
+
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected material name as string.");
+
+
+}
+
+void PBRTParser::execute_NamedMaterial() {
+
 }

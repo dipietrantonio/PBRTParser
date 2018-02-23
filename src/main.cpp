@@ -15,5 +15,5 @@ int main(int argc, char** argv){
 	}
     auto istr =ss.str();
 	auto parser = PBRTParser(istr);
-	parser.parse(nullptr);
+	parser.parse();
 }
