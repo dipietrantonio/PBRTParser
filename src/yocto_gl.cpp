@@ -73,6 +73,57 @@
 //
 //
 
+//
+// # Todo
+//
+// ## Next
+//
+// - update documentation
+// - update BVH documentation
+//
+// - BVH simplify build functions: can we avoid preallocating nodes?
+// - BVH: maybe put axis with internal
+//
+// - tesselation functions using stencils
+//
+// - BUG: hair look in yitrace
+// - simplify trace_point
+//     - double sided in material functions
+//     - opacity in material functions
+// - simplify trace_light
+//     - maybe include shape directly?
+// - remove background from point?
+// - sample background to sum all environments
+// - lines seems wrong
+// - lines epsilon in ray generation
+// - add make_offset_ray functions
+// - envmap sampling
+// - sobol and cmjs
+//
+// ## Simple denoiser
+//
+// - joint bilateral denoiser
+// - non-local means denoiser
+//
+// ## Infrastructure
+//
+// - check rotation and decompoaition of rotations
+//    - see euclideanspace.com
+//
+// ## Trace
+//
+// - sampler simplification
+//     https://lemire.me/blog/2017/09/18/visiting-all-values-in-an-array-exactly-once-in-random-order/
+//     https://lemire.me/blog/2017/09/26/benchmarking-algorithms-to-visit-all-values-in-an-array-in-random-order/
+// - yitrace: check editing
+// - yitrace: consider update
+//
+// ## Shade
+//
+// - start in edit mode
+// - show edit scene
+//
+
 #include "yocto_gl.h"
 
 #if YGL_IMAGEIO
@@ -105,11 +156,91 @@ const unsigned int* imgui_extrafont_compressed_data();
 #endif
 
 // -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR UI UTILITIES
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Turntable for UI navigation.
+void camera_turntable(vec3f& from, vec3f& to, vec3f& up, const vec2f& rotate,
+    float dolly, const vec2f& pan) {
+    // rotate if necessary
+    if (rotate.x || rotate.y) {
+        auto z = normalize(to - from);
+        auto lz = length(to - from);
+        auto phi = atan2(z.z, z.x) + rotate.x;
+        auto theta = acos(z.y) + rotate.y;
+        theta = clamp(theta, 0.001f, pif - 0.001f);
+        auto nz = vec3f{sin(theta) * cos(phi) * lz, cos(theta) * lz,
+            sin(theta) * sin(phi) * lz};
+        from = to - nz;
+    }
+
+    // dolly if necessary
+    if (dolly) {
+        auto z = normalize(to - from);
+        auto lz = max(0.001f, length(to - from) * (1 + dolly));
+        z *= lz;
+        from = to - z;
+    }
+
+    // pan if necessary
+    if (pan.x || pan.y) {
+        auto z = normalize(to - from);
+        auto x = normalize(cross(up, z));
+        auto y = normalize(cross(z, x));
+        auto t = vec3f{pan.x * x.x + pan.y * y.x, pan.x * x.y + pan.y * y.y,
+            pan.x * x.z + pan.y * y.z};
+        from += t;
+        to += t;
+    }
+}
+
+// Turntable for UI navigation.
+void camera_turntable(frame3f& frame, float& focus, const vec2f& rotate,
+    float dolly, const vec2f& pan) {
+    // rotate if necessary
+    if (rotate != zero2f) {
+        auto phi = atan2(frame.z.z, frame.z.x) + rotate.x;
+        auto theta = acos(frame.z.y) + rotate.y;
+        theta = clamp(theta, 0.001f, pif - 0.001f);
+        auto new_z =
+            vec3f{sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi)};
+        auto new_center = frame.o - frame.z * focus;
+        auto new_o = new_center + new_z * focus;
+        frame = lookat_frame3(new_o, new_center, {0, 1, 0});
+        focus = length(new_o - new_center);
+    }
+
+    // pan if necessary
+    if (dolly) {
+        auto c = frame.o - frame.z * focus;
+        focus = max(focus * (1 + dolly), 0.001f);
+        frame.o = c + frame.z * focus;
+    }
+
+    // pan if necessary
+    if (pan.x || pan.y) { frame.o += frame.x * pan.x + frame.y * pan.y; }
+}
+
+// FPS camera for UI navigation for a frame parametrization.
+void camera_fps(frame3f& frame, const vec3f& transl, const vec2f& rotate) {
+    // https://gamedev.stackexchange.com/questions/30644/how-to-keep-my-quaternion-using-fps-camera-from-tilting-and-messing-up
+    auto y = vec3f{0, 1, 0};
+    auto z = orthonormalize(frame.z, y);
+    auto x = cross(y, z);
+
+    frame.rot() = rotation_mat3(vec3f{1, 0, 0}, rotate.y) * frame.rot() *
+                  rotation_mat3(vec3f{0, 1, 0}, rotate.x);
+    frame.pos() += transl.x * x + transl.y * y + transl.z * z;
+}
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
 // IMPLEMENTATION FOR PERLIN NOISE
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-namespace __impl_perlin {
 // clang-format off
 // not same permutation table as Perlin's reference to avoid copyright issues;
 // Perlin's table can be found at http://mrl.nyu.edu/~perlin/noise/
@@ -307,33 +438,877 @@ float stb_perlin_turbulence_noise3(float x, float y, float z, float lacunarity, 
 }
 // clang-format on
 
-}  // namespace __impl_perlin
-
 // adapeted  stb_perlin.h
 float perlin_noise(const vec3f& p, const vec3i& wrap) {
-    return __impl_perlin::stb_perlin_noise3(
-        p.x, p.y, p.z, wrap.x, wrap.y, wrap.z);
+    return stb_perlin_noise3(p.x, p.y, p.z, wrap.x, wrap.y, wrap.z);
 }
 
 // adapeted  stb_perlin.h
 float perlin_ridge_noise(const vec3f& p, float lacunarity, float gain,
     float offset, int octaves, const vec3i& wrap) {
-    return __impl_perlin::stb_perlin_ridge_noise3(p.x, p.y, p.z, lacunarity,
-        gain, offset, octaves, wrap.x, wrap.y, wrap.z);
+    return stb_perlin_ridge_noise3(p.x, p.y, p.z, lacunarity, gain, offset,
+        octaves, wrap.x, wrap.y, wrap.z);
 }
 
 // adapeted  stb_perlin.h
 float perlin_fbm_noise(const vec3f& p, float lacunarity, float gain,
     int octaves, const vec3i& wrap) {
-    return __impl_perlin::stb_perlin_fbm_noise3(
+    return stb_perlin_fbm_noise3(
         p.x, p.y, p.z, lacunarity, gain, octaves, wrap.x, wrap.y, wrap.z);
 }
 
 // adapeted  stb_perlin.h
 float perlin_turbulence_noise(const vec3f& p, float lacunarity, float gain,
     int octaves, const vec3i& wrap) {
-    return __impl_perlin::stb_perlin_turbulence_noise3(
+    return stb_perlin_turbulence_noise3(
         p.x, p.y, p.z, lacunarity, gain, octaves, wrap.x, wrap.y, wrap.z);
+}
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION OF SHAPE UTILITIES
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Compute per-vertex normals/tangents for lines, triangles and quads with
+// positions pos. Weighted indicated whether the normals/tangents are
+// weighted by line length.
+vector<vec3f> compute_normals(const vector<vec2i>& lines,
+    const vector<vec3i>& triangles, const vector<vec4i>& quads,
+    const vector<vec3f>& pos, bool weighted) {
+    auto norm = vector<vec3f>(pos.size(), zero3f);
+    for (auto& l : lines) {
+        auto n = pos[l.y] - pos[l.x];
+        if (!weighted) n = normalize(n);
+        for (auto vid : l) norm[vid] += n;
+    }
+    for (auto& t : triangles) {
+        auto n = cross(pos[t.y] - pos[t.x], pos[t.z] - pos[t.x]);
+        if (!weighted) n = normalize(n);
+        for (auto vid : t) norm[vid] += n;
+    }
+    for (auto& q : quads) {
+        auto n = cross(pos[q.y] - pos[q.x], pos[q.w] - pos[q.x]) +
+                 cross(pos[q.w] - pos[q.z], pos[q.x] - pos[q.z]);
+        if (!weighted) n = normalize(n);
+        for (auto vid : q) norm[vid] += n;
+    }
+    for (auto& n : norm) n = normalize(n);
+    return norm;
+}
+
+// Compute per-vertex tangent frame for triangle meshes.
+// Tangent space is defined by a four component vector.
+// The first three components are the tangent with respect to the U texcoord.
+// The fourth component is the sign of the tangent wrt the V texcoord.
+// Tangent frame is useful in normal mapping.
+vector<vec4f> compute_tangent_frames(const vector<vec3i>& triangles,
+    const vector<vec3f>& pos, const vector<vec3f>& norm,
+    const vector<vec2f>& texcoord, bool weighted) {
+    auto tangu = vector<vec3f>(pos.size(), zero3f);
+    auto tangv = vector<vec3f>(pos.size(), zero3f);
+    for (auto& t : triangles) {
+        auto tutv = triangle_tangents_fromuv(pos[t.x], pos[t.y], pos[t.z],
+            texcoord[t.x], texcoord[t.y], texcoord[t.z]);
+        if (!weighted) tutv = {normalize(tutv.first), normalize(tutv.second)};
+        for (auto vid : t) tangu[vid] += tutv.first;
+        for (auto vid : t) tangv[vid] += tutv.second;
+    }
+    for (auto& t : tangu) t = normalize(t);
+    for (auto& t : tangv) t = normalize(t);
+    auto tangsp = vector<vec4f>(pos.size(), zero4f);
+    for (auto i = 0; i < pos.size(); i++) {
+        tangu[i] = orthonormalize(tangu[i], norm[i]);
+        auto s = (dot(cross(norm[i], tangu[i]), tangv[i]) < 0) ? -1.0f : 1.0f;
+        tangsp[i] = {tangu[i].x, tangu[i].y, tangu[i].z, s};
+    }
+    return tangsp;
+}
+
+// Apply skinning
+void compute_skinning(const vector<vec3f>& pos, const vector<vec3f>& norm,
+    const vector<vec4f>& weights, const vector<vec4i>& joints,
+    const vector<mat4f>& xforms, vector<vec3f>& skinned_pos,
+    vector<vec3f>& skinned_norm) {
+    skinned_pos.resize(pos.size());
+    skinned_norm.resize(norm.size());
+    for (auto i = 0; i < pos.size(); i++) {
+        skinned_pos[i] =
+            transform_point(xforms[joints[i].x], pos[i]) * weights[i].x +
+            transform_point(xforms[joints[i].y], pos[i]) * weights[i].y +
+            transform_point(xforms[joints[i].z], pos[i]) * weights[i].z +
+            transform_point(xforms[joints[i].w], pos[i]) * weights[i].w;
+    }
+    for (auto i = 0; i < pos.size(); i++) {
+        skinned_norm[i] = normalize(
+            transform_direction(xforms[joints[i].x], norm[i]) * weights[i].x +
+            transform_direction(xforms[joints[i].y], norm[i]) * weights[i].y +
+            transform_direction(xforms[joints[i].z], norm[i]) * weights[i].z +
+            transform_direction(xforms[joints[i].w], norm[i]) * weights[i].w);
+    }
+}
+
+// Apply skinning
+void compute_skinning(const vector<vec3f>& pos, const vector<vec3f>& norm,
+    const vector<vec4f>& weights, const vector<vec4i>& joints,
+    const vector<frame3f>& xforms, vector<vec3f>& skinned_pos,
+    vector<vec3f>& skinned_norm) {
+    skinned_pos.resize(pos.size());
+    skinned_norm.resize(norm.size());
+    for (auto i = 0; i < pos.size(); i++) {
+        skinned_pos[i] =
+            transform_point(xforms[joints[i].x], pos[i]) * weights[i].x +
+            transform_point(xforms[joints[i].y], pos[i]) * weights[i].y +
+            transform_point(xforms[joints[i].z], pos[i]) * weights[i].z +
+            transform_point(xforms[joints[i].w], pos[i]) * weights[i].w;
+    }
+    for (auto i = 0; i < pos.size(); i++) {
+        skinned_norm[i] = normalize(
+            transform_direction(xforms[joints[i].x], norm[i]) * weights[i].x +
+            transform_direction(xforms[joints[i].y], norm[i]) * weights[i].y +
+            transform_direction(xforms[joints[i].z], norm[i]) * weights[i].z +
+            transform_direction(xforms[joints[i].w], norm[i]) * weights[i].w);
+    }
+}
+
+// Apply skinning as specified in Khronos glTF
+void compute_matrix_skinning(const vector<vec3f>& pos,
+    const vector<vec3f>& norm, const vector<vec4f>& weights,
+    const vector<vec4i>& joints, const vector<mat4f>& xforms,
+    vector<vec3f>& skinned_pos, vector<vec3f>& skinned_norm) {
+    skinned_pos.resize(pos.size());
+    skinned_norm.resize(norm.size());
+    for (auto i = 0; i < pos.size(); i++) {
+        auto xform = xforms[joints[i].x] * weights[i].x +
+                     xforms[joints[i].y] * weights[i].y +
+                     xforms[joints[i].z] * weights[i].z +
+                     xforms[joints[i].w] * weights[i].w;
+        skinned_pos[i] = transform_point(xform, pos[i]);
+        skinned_norm[i] = normalize(transform_direction(xform, norm[i]));
+    }
+}
+
+// Create an array of edges.
+vector<vec2i> get_edges(const vector<vec2i>& lines,
+    const vector<vec3i>& triangles, const vector<vec4i>& quads) {
+    auto edges = vector<vec2i>();
+    auto eset = unordered_set<vec2i>();
+    for (auto e : lines) {
+        e = {min(e.x, e.y), max(e.x, e.y)};
+        if (!eset.insert(e).second) continue;
+        eset.insert({e.y, e.x});
+        edges.push_back(e);
+    }
+    for (auto& t : triangles) {
+        for (auto e : {vec2i{t.x, t.y}, vec2i{t.y, t.z}, vec2i{t.z, t.x}}) {
+            e = {min(e.x, e.y), max(e.x, e.y)};
+            if (!eset.insert(e).second) continue;
+            eset.insert({e.y, e.x});
+            edges.push_back(e);
+        }
+    }
+    for (auto& q : quads) {
+        for (auto e : {vec2i{q.x, q.y}, vec2i{q.y, q.z}, vec2i{q.z, q.w},
+                 vec2i{q.w, q.x}}) {
+            if (e.x == e.y) continue;
+            e = {min(e.x, e.y), max(e.x, e.y)};
+            if (!eset.insert(e).second) continue;
+            eset.insert({e.y, e.x});
+            edges.push_back(e);
+        }
+    }
+
+    return edges;
+}
+
+// Create an array of boundary edges. Lines are always considered boundaries.
+vector<vec2i> get_boundary_edges(const vector<vec2i>& lines,
+    const vector<vec3i>& triangles, const vector<vec4i>& quads) {
+    auto ecount = unordered_map<vec2i, int>();
+
+    // lines are added manually later
+    for (auto l : lines) { ecount.insert({l, 2}); }
+    for (auto t : triangles) {
+        for (auto e : {vec2i{t.x, t.y}, vec2i{t.y, t.z}, vec2i{t.z, t.x}}) {
+            e = {min(e.x, e.y), max(e.x, e.y)};
+            auto ins = ecount.insert({e, 1});
+            if (!ins.second) ins.first->second += 1;
+        }
+    }
+    for (auto q : quads) {
+        for (auto e : {vec2i{q.x, q.y}, vec2i{q.y, q.z}, vec2i{q.z, q.w},
+                 vec2i{q.w, q.x}}) {
+            if (e.x == e.y) continue;
+            e = {min(e.x, e.y), max(e.x, e.y)};
+            auto ins = ecount.insert({e, 1});
+            if (!ins.second) ins.first->second += 1;
+        }
+    }
+
+    auto boundary = lines;
+    for (auto ec : ecount) {
+        if (ec.second > 1) continue;
+        boundary.push_back(ec.first);
+    }
+
+    return boundary;
+}
+
+// Get a list of all unique vertices.
+vector<int> get_verts(const vector<vec2i>& lines,
+    const vector<vec3i>& triangles, const vector<vec4i>& quads) {
+    auto verts = vector<int>();
+    auto vset = unordered_set<int>();
+    for (auto l : lines)
+        for (auto vid : l)
+            if (vset.insert(vid).second) verts.push_back(vid);
+    for (auto t : triangles)
+        for (auto vid : t)
+            if (vset.insert(vid).second) verts.push_back(vid);
+    for (auto q : quads)
+        for (auto vid : q)
+            if (vset.insert(vid).second) verts.push_back(vid);
+    return verts;
+}
+
+// Create an array of boundary vertices. Lines are always considered
+// boundaries.
+vector<int> get_boundary_verts(const vector<vec2i>& lines,
+    const vector<vec3i>& triangles, const vector<vec4i>& quads) {
+    return get_verts(get_boundary_edges(lines, triangles, quads), {}, {});
+}
+
+// Convert quads to triangles
+vector<vec3i> convert_quads_to_triangles(const vector<vec4i>& quads) {
+    auto triangles = vector<vec3i>();
+    triangles.reserve(quads.size() * 2);
+    for (auto& q : quads) {
+        triangles.push_back({q.x, q.y, q.w});
+        if (q.z != q.w) triangles.push_back({q.z, q.w, q.y});
+    }
+    return triangles;
+}
+
+// Convert quads to triangles with a diamond-like topology.
+// Quads have to be consecutive one row after another.
+vector<vec3i> convert_quads_to_triangles(
+    const vector<vec4i>& quads, int row_length) {
+    auto triangles = vector<vec3i>();
+    triangles.reserve(quads.size() * 2);
+    for (auto& q : quads) {
+        triangles.push_back({q.x, q.y, q.w});
+        if (q.z != q.w) triangles.push_back({q.z, q.w, q.y});
+    }
+    return triangles;
+#if 0
+        triangles.resize(usteps * vsteps * 2);
+        for (auto j = 0; j < vsteps; j++) {
+            for (auto i = 0; i < usteps; i++) {
+                auto& f1 = triangles[(j * usteps + i) * 2 + 0];
+                auto& f2 = triangles[(j * usteps + i) * 2 + 1];
+                if ((i + j) % 2) {
+                    f1 = {vid(i, j), vid(i + 1, j), vid(i + 1, j + 1)};
+                    f2 = {vid(i + 1, j + 1), vid(i, j + 1), vid(i, j)};
+                } else {
+                    f1 = {vid(i, j), vid(i + 1, j), vid(i, j + 1)};
+                    f2 = {vid(i + 1, j + 1), vid(i, j + 1), vid(i + 1, j)};
+                }
+            }
+        }
+#endif
+    return triangles;
+}
+
+// Convert beziers to lines using 3 lines for each bezier.
+vector<vec2i> convert_bezier_to_lines(const vector<vec4i>& beziers) {
+    auto lines = vector<vec2i>();
+    lines.reserve(beziers.size() * 3);
+    for (auto& b : beziers) {
+        lines.push_back({b.x, b.y});
+        lines.push_back({b.y, b.z});
+        lines.push_back({b.z, b.w});
+    }
+    return lines;
+}
+
+// Convert face varying data to single primitives. Returns the quads indices
+// and filled vectors for pos, norm and texcoord.
+tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
+convert_face_varying(const vector<vec4i>& quads_pos,
+    const vector<vec4i>& quads_norm, const vector<vec4i>& quads_texcoord,
+    const vector<vec3f>& pos, const vector<vec3f>& norm,
+    const vector<vec2f>& texcoord) {
+    // make faces unique
+    unordered_map<vec3i, int> vert_map;
+    auto quads = vector<vec4i>(quads_pos.size());
+    for (auto fid = 0; fid < quads_pos.size(); fid++) {
+        for (auto c = 0; c < 4; c++) {
+            auto v = vec3i{
+                quads_pos[fid][c],
+                (!quads_norm.empty()) ? quads_norm[fid][c] : -1,
+                (!quads_texcoord.empty()) ? quads_texcoord[fid][c] : -1,
+            };
+            if (vert_map.find(v) == vert_map.end()) {
+                auto s = (int)vert_map.size();
+                vert_map[v] = s;
+            }
+            quads[fid][c] = vert_map.at(v);
+        }
+    }
+
+    // fill vert data
+    auto qpos = vector<vec3f>();
+    if (!pos.empty()) {
+        qpos.resize(vert_map.size());
+        for (auto& kv : vert_map) { qpos[kv.second] = pos[kv.first.x]; }
+    }
+    auto qnorm = vector<vec3f>();
+    if (!norm.empty()) {
+        qnorm.resize(vert_map.size());
+        for (auto& kv : vert_map) { qnorm[kv.second] = norm[kv.first.y]; }
+    }
+    auto qtexcoord = vector<vec2f>();
+    if (!texcoord.empty()) {
+        qtexcoord.resize(vert_map.size());
+        for (auto& kv : vert_map) {
+            qtexcoord[kv.second] = texcoord[kv.first.z];
+        }
+    }
+
+    // done
+    return {quads, qpos, qnorm, qtexcoord};
+}
+
+// wrapper for implementation below
+inline float _subdivide_normalize(float x) { return x; }
+inline vec2f _subdivide_normalize(const vec2f& x) { return normalize(x); }
+inline vec3f _subdivide_normalize(const vec3f& x) { return normalize(x); }
+inline vec4f _subdivide_normalize(const vec4f& x) { return normalize(x); }
+
+// Tesselate lines, triangles and quads by spolitting edges.
+// Returns the tesselated elements and dictionaries for vertex calculations.
+tuple<vector<vec2i>, vector<vec3i>, vector<vec4i>, vector<vec2i>, vector<vec4i>>
+subdivide_elems_linear(const vector<vec2i>& lines,
+    const vector<vec3i>& triangles, const vector<vec4i>& quads, int nverts) {
+    if (!nverts) return {};
+    auto emap = unordered_map<vec2i, int>();
+    auto edges = vector<vec2i>();
+    for (auto e : lines) {
+        if (contains(emap, e)) continue;
+        emap[{e.x, e.y}] = nverts + (int)edges.size();
+        emap[{e.y, e.x}] = nverts + (int)edges.size();
+        edges.push_back(e);
+    }
+    for (auto& t : triangles) {
+        for (auto e : {vec2i{t.x, t.y}, vec2i{t.y, t.z}, vec2i{t.z, t.x}}) {
+            if (contains(emap, e)) continue;
+            emap[{e.x, e.y}] = nverts + (int)edges.size();
+            emap[{e.y, e.x}] = nverts + (int)edges.size();
+            edges.push_back(e);
+        }
+    }
+    for (auto& q : quads) {
+        for (auto e : {vec2i{q.x, q.y}, vec2i{q.y, q.z}, vec2i{q.z, q.w},
+                 vec2i{q.w, q.x}}) {
+            if (e.x == e.y) continue;
+            if (contains(emap, e)) continue;
+            emap[{e.x, e.y}] = nverts + (int)edges.size();
+            emap[{e.y, e.x}] = nverts + (int)edges.size();
+            edges.push_back(e);
+        }
+    }
+
+    auto tlines = vector<vec2i>();
+    tlines.reserve(lines.size() * 2);
+    for (auto& l : lines) {
+        tlines.push_back({l.x, emap.at(l)});
+        tlines.push_back({emap.at(l), l.y});
+    }
+
+    auto ttriangles = vector<vec3i>();
+    ttriangles.reserve(triangles.size() * 4);
+    for (auto& t : triangles) {
+        ttriangles.push_back({t.x, emap.at({t.x, t.y}), emap.at({t.z, t.x})});
+        ttriangles.push_back({t.y, emap.at({t.y, t.z}), emap.at({t.x, t.y})});
+        ttriangles.push_back({t.z, emap.at({t.z, t.x}), emap.at({t.y, t.z})});
+        ttriangles.push_back(
+            {emap.at({t.x, t.y}), emap.at({t.y, t.z}), emap.at({t.z, t.x})});
+    }
+
+    auto tquads = vector<vec4i>();
+    tquads.reserve(quads.size() * 4);
+    for (auto fid = 0; fid < quads.size(); fid++) {
+        auto& f = quads[fid];
+        auto fvert = nverts + (int)edges.size() + fid;
+        if (f.z != f.w) {
+            tquads.push_back(
+                {f.x, emap.at({f.x, f.y}), fvert, emap.at({f.w, f.x})});
+            tquads.push_back(
+                {f.y, emap.at({f.y, f.z}), fvert, emap.at({f.x, f.y})});
+            tquads.push_back(
+                {f.z, emap.at({f.z, f.w}), fvert, emap.at({f.y, f.z})});
+            tquads.push_back(
+                {f.w, emap.at({f.w, f.x}), fvert, emap.at({f.z, f.w})});
+        } else {
+            tquads.push_back(
+                {f.x, emap.at({f.x, f.y}), fvert, emap.at({f.z, f.x})});
+            tquads.push_back(
+                {f.y, emap.at({f.y, f.z}), fvert, emap.at({f.x, f.y})});
+            tquads.push_back(
+                {f.z, emap.at({f.z, f.x}), fvert, emap.at({f.y, f.z})});
+        }
+    }
+    tquads.shrink_to_fit();
+
+    return {tlines, ttriangles, tquads, edges, quads};
+}
+
+// Subdivide vertex properties given the maps
+template <typename T>
+vector<T> subdivide_vert_linear(const vector<T>& vert,
+    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized) {
+    if (vert.empty()) return {};
+
+    auto tvert = vector<T>();
+    tvert.reserve(vert.size() + edges.size() + faces.size());
+
+    append(tvert, vert);
+    for (auto e : edges) tvert.push_back((vert[e.x] + vert[e.y]) / 2);
+    for (auto f : faces) {
+        if (f.z != f.w)
+            tvert.push_back(
+                (vert[f.x] + vert[f.y] + vert[f.z] + vert[f.w]) / 4);
+        else
+            tvert.push_back((vert[f.x] + vert[f.y] + vert[f.z]) / 3);
+    }
+
+    if (normalized) {
+        for (auto& n : tvert) n = _subdivide_normalize(n);
+    }
+
+    return tvert;
+}
+
+// template instantiations
+template vector<float> subdivide_vert_linear(const vector<float>& vert,
+    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized);
+template vector<vec2f> subdivide_vert_linear(const vector<vec2f>& vert,
+    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized);
+template vector<vec3f> subdivide_vert_linear(const vector<vec3f>& vert,
+    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized);
+template vector<vec4f> subdivide_vert_linear(const vector<vec4f>& vert,
+    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized);
+
+// Performs the smoothing step of Catmull-Clark. Start with a tesselate quad
+// mesh obtained with subdivide_elems_linear() and subdivide_vert_linear(). To
+// handle open meshes with boundary, get the boundary from make_boundary_edge()
+// and pass it as crease_lines. To fix the boundary entirely, just get the
+// boundary vertices and pass it as creases.
+template <typename T>
+vector<T> subdivide_vert_catmullclark(const vector<vec4i>& quads,
+    const vector<T>& vert, const vector<vec2i>& crease_tlines,
+    const vector<int>& crease_tpoints, bool normalized) {
+    if (quads.empty() || vert.empty()) return vert;
+
+    // define vertex valence ---------------------------
+    auto val = vector<int>(vert.size(), 2);
+    for (auto e : crease_tlines)
+        for (auto vid : e) val[vid] = 1;
+    for (auto vid : crease_tpoints) val[vid] = 0;
+
+    // averaging pass ----------------------------------
+    auto tvert = vector<T>(vert.size(), T());
+    auto count = vector<int>(vert.size(), 0);
+    for (auto p : crease_tpoints) {
+        auto c = vert[p];
+        if (val[p] == 0) tvert[p] += c;
+        if (val[p] == 0) count[p] += 1;
+    }
+    for (auto e : crease_tlines) {
+        auto c = (vert[e.x] + vert[e.y]) / 2.0f;
+        for (auto vid : e) {
+            if (val[vid] == 1) tvert[vid] += c;
+            if (val[vid] == 1) count[vid] += 1;
+        }
+    }
+    for (auto& f : quads) {
+        auto c = (vert[f.x] + vert[f.y] + vert[f.z] + vert[f.w]) / 4.0f;
+        for (auto vid : f) {
+            if (val[vid] == 2) tvert[vid] += c;
+            if (val[vid] == 2) count[vid] += 1;
+        }
+    }
+    for (auto i = 0; i < vert.size(); i++) { tvert[i] /= (float)count[i]; }
+
+    // correction pass ----------------------------------
+    // p = p + (avg_p - p) * (4/avg_count)
+    for (auto i = 0; i < vert.size(); i++) {
+        if (val[i] != 2) continue;
+        tvert[i] = vert[i] + (tvert[i] - vert[i]) * (4.0f / count[i]);
+    }
+
+    if (normalized) {
+        for (auto& v : tvert) v = _subdivide_normalize(v);
+    }
+
+    return tvert;
+}
+
+// explicit instantiations
+template vector<float> subdivide_vert_catmullclark(const vector<vec4i>& quads,
+    const vector<float>& vert, const vector<vec2i>& crease_tlines,
+    const vector<int>& crease_tpoints, bool normalized);
+template vector<vec2f> subdivide_vert_catmullclark(const vector<vec4i>& quads,
+    const vector<vec2f>& vert, const vector<vec2i>& crease_tlines,
+    const vector<int>& crease_tpoints, bool normalized);
+template vector<vec3f> subdivide_vert_catmullclark(const vector<vec4i>& quads,
+    const vector<vec3f>& vert, const vector<vec2i>& crease_tlines,
+    const vector<int>& crease_tpoints, bool normalized);
+template vector<vec4f> subdivide_vert_catmullclark(const vector<vec4i>& quads,
+    const vector<vec4f>& vert, const vector<vec2i>& crease_tlines,
+    const vector<int>& crease_tpoints, bool normalized);
+
+// Subdivide bezier recursive by splitting each segment into two in the middle.
+// Returns the tesselated elements and dictionaries for vertex calculations.
+tuple<vector<vec4i>, vector<int>, vector<vec4i>> subdivide_bezier_recursive(
+    const vector<vec4i>& beziers, int nverts) {
+    if (!nverts) return {};
+    auto vmap = unordered_map<int, int>();
+    auto verts = vector<int>();
+    for (auto& b : beziers) {
+        if (!contains(vmap, b.x)) {
+            vmap[b.x] = verts.size();
+            verts.push_back(b.x);
+        }
+        if (!contains(vmap, b.w)) {
+            vmap[b.w] = verts.size();
+            verts.push_back(b.w);
+        }
+    }
+    auto tbeziers = vector<vec4i>();
+    tbeziers.reserve(beziers.size() * 2);
+    for (auto bid = 0; bid < beziers.size(); bid++) {
+        auto& b = beziers[bid];
+        auto bo = (int)verts.size() + bid * 5;
+        tbeziers.push_back({vmap.at(b.x), bo + 0, bo + 1, bo + 2});
+        tbeziers.push_back({bo + 2, bo + 3, bo + 4, vmap.at(b.w)});
+    }
+    return {tbeziers, verts, beziers};
+}
+
+// Subdivide vertex properties given the maps
+template <typename T>
+vector<T> subdivide_vert_bezier(const vector<T>& vert, const vector<int>& verts,
+    const vector<vec4i>& segments, bool normalized) {
+    if (vert.empty()) return {};
+
+    auto tvert = vector<T>();
+    tvert.reserve(verts.size() + segments.size() * 5);
+
+    for (auto v : verts) tvert.push_back(vert[v]);
+    for (auto s : segments) {
+        tvert.push_back(vert[s.x] * (1.f / 2) + vert[s.y] * (1.f / 2));
+        tvert.push_back(vert[s.x] * (1.f / 4) + vert[s.y] * (1.f / 2) +
+                        vert[s.z] * (1.f / 4));
+        tvert.push_back(vert[s.x] * (1.f / 8) + vert[s.y] * (3.f / 8) +
+                        vert[s.z] * (3.f / 8) + vert[s.w] * (1.f / 8));
+        tvert.push_back(vert[s.y] * (1.f / 4) + vert[s.z] * (1.f / 2) +
+                        vert[s.w] * (1.f / 4));
+        tvert.push_back(vert[s.z] * (1.f / 2) + vert[s.w] * (1.f / 2));
+    }
+
+    if (normalized) {
+        for (auto& n : tvert) n = _subdivide_normalize(n);
+    }
+
+    return tvert;
+}
+
+// template instantiations
+template vector<float> subdivide_vert_bezier(const vector<float>& vert,
+    const vector<int>& verts, const vector<vec4i>& segments, bool normalized);
+template vector<vec2f> subdivide_vert_bezier(const vector<vec2f>& vert,
+    const vector<int>& verts, const vector<vec4i>& segments, bool normalized);
+template vector<vec3f> subdivide_vert_bezier(const vector<vec3f>& vert,
+    const vector<int>& verts, const vector<vec4i>& segments, bool normalized);
+template vector<vec4f> subdivide_vert_bezier(const vector<vec4f>& vert,
+    const vector<int>& verts, const vector<vec4i>& segments, bool normalized);
+
+// Generate a rectangular grid of usteps x vsteps uv values for parametric
+// surface generation.
+tuple<vector<vec4i>, vector<vec2f>> make_uvquads(
+    int usteps, int vsteps, bool uwrap, bool vwrap, bool vpole0, bool vpole1) {
+    auto uvert = (uwrap) ? usteps : usteps + 1;
+    auto vvert = (vwrap) ? vsteps : vsteps + 1;
+    auto vid = [=](int i, int j) {
+        if (uwrap) i = i % usteps;
+        if (vwrap) j = j % vsteps;
+        return j * uvert + i;
+    };
+
+    auto uv = vector<vec2f>(uvert * vvert);
+    for (auto j = 0; j < vvert; j++) {
+        for (auto i = 0; i < uvert; i++) {
+            uv[vid(i, j)] = {i / (float)usteps, j / (float)vsteps};
+        }
+    }
+
+    auto quads = vector<vec4i>(usteps * vsteps);
+    for (auto j = 0; j < vsteps; j++) {
+        for (auto i = 0; i < usteps; i++) {
+            quads[j * usteps + i] = {
+                vid(i, j), vid(i + 1, j), vid(i + 1, j + 1), vid(i, j + 1)};
+        }
+    }
+
+    if (vpole0) {
+        if (vwrap) throw runtime_error("cannot have a pole with wrapping");
+        uv = vector<vec2f>(uv.begin() + uvert, uv.end());
+        uv.insert(uv.begin(), {0, 0});
+        for (auto& q : quads) {
+            for (auto& vid : q) { vid = (vid < usteps) ? 0 : vid - uvert + 1; }
+            if (q.x == 0 && q.y == 0) q = {q.z, q.w, q.x, q.y};
+        }
+    }
+
+    if (vpole1) {
+        if (vwrap) throw runtime_error("cannot have a pole with wrapping");
+        auto pid = (int)uv.size() - uvert;
+        uv = vector<vec2f>(uv.begin(), uv.end() - uvert);
+        uv.insert(uv.end(), {0, 1});
+        for (auto& q : quads) {
+            for (auto& vid : q) { vid = (vid < pid) ? vid : pid; }
+        }
+    }
+
+    return {quads, uv};
+}
+
+// Generate parametric num lines of usteps segments.
+tuple<vector<vec2i>, vector<vec2f>> make_uvlines(int num, int usteps) {
+    auto vid = [usteps](int i, int j) { return j * (usteps + 1) + i; };
+    auto uv = vector<vec2f>((usteps + 1) * num);
+    for (auto j = 0; j < num; j++) {
+        for (auto i = 0; i <= usteps; i++) {
+            uv[vid(i, j)] = {i / (float)usteps, j / (float)num};
+        }
+    }
+
+    auto lines = vector<vec2i>(usteps * num);
+    for (int j = 0; j < num; j++) {
+        for (int i = 0; i < usteps; i++) {
+            lines[j * usteps + i] = {vid(i, j), vid(i + 1, j)};
+        }
+    }
+
+    return {lines, uv};
+}
+
+// Generate a parametric point set. Mostly here for completeness.
+tuple<vector<int>, vector<vec2f>> make_uvpoints(int num) {
+    auto uv = vector<vec2f>(num);
+    for (auto i = 0; i < num; i++) { uv[i] = {i / (float)num, 0}; }
+
+    auto points = vector<int>(num);
+    for (auto i = 0; i < num; i++) points[i] = i;
+
+    return {points, uv};
+}
+
+// Merge elements between shapes. The elements are merged by increasing the
+// array size of the second array by the number of vertices of the first.
+// Vertex data can then be concatenated successfully.
+tuple<vector<vec2i>, vector<vec3i>, vector<vec4i>> merge_elems(int nverts,
+    const vector<vec2i>& lines1, const vector<vec3i>& triangles1,
+    const vector<vec4i>& quads1, const vector<vec2i>& lines2,
+    const vector<vec3i>& triangles2, const vector<vec4i>& quads2) {
+    auto lines = join(lines1, lines2);
+    auto triangles = join(triangles1, triangles2);
+    auto quads = join(quads1, quads2);
+    for (auto i = lines1.size(); i < lines.size(); i++)
+        lines[i] += {nverts, nverts};
+    for (auto i = triangles1.size(); i < triangles.size(); i++)
+        triangles[i] += {nverts, nverts, nverts};
+    for (auto i = quads1.size(); i < quads.size(); i++)
+        quads[i] += {nverts, nverts, nverts, nverts};
+    return {lines, triangles, quads};
+}
+
+// Unshare shape data by duplicating all vertex data for each element,
+// giving a faceted look. Note that faceted tangents are not computed.
+tuple<vector<vec2i>, vector<vec3i>, vector<vec4i>, vector<int>> facet_elems(
+    const vector<vec2i>& lines, const vector<vec3i>& triangles,
+    const vector<vec4i>& quads) {
+    auto verts = vector<int>();
+    auto nlines = vector<vec2i>();
+    for (auto l : lines) {
+        nlines.push_back({(int)verts.size(), (int)verts.size() + 1});
+        for (auto v : l) verts.push_back(v);
+    }
+
+    auto ntriangles = vector<vec3i>();
+    for (auto t : triangles) {
+        ntriangles.push_back(
+            {(int)verts.size(), (int)verts.size() + 1, (int)verts.size() + 2});
+        for (auto v : t) verts.push_back(v);
+    }
+
+    auto nquads = vector<vec4i>();
+    for (auto q : quads) {
+        if (q.z != q.w) {
+            nquads.push_back({(int)verts.size(), (int)verts.size() + 1,
+                (int)verts.size() + 2, (int)verts.size() + 3});
+            for (auto v : q) verts.push_back(v);
+        } else {
+            nquads.push_back({(int)verts.size(), (int)verts.size() + 1,
+                (int)verts.size() + 2, (int)verts.size() + 2});
+            for (auto v : q.xyz()) verts.push_back(v);
+        }
+    }
+
+    return {nlines, ntriangles, nquads, verts};
+}
+
+// Unshare vertices for faceting
+template <typename T>
+vector<T> facet_vert(const vector<T>& vert, const vector<int>& vmap) {
+    if (vert.empty()) return vert;
+    auto tvert = vector<T>(vmap.size());
+    for (auto vid = 0; vid < vmap.size(); vid++) tvert[vid] = vert[vmap[vid]];
+    return tvert;
+}
+
+// instantations
+template vector<float> facet_vert<float>(
+    const vector<float>& vert, const vector<int>& vmap);
+template vector<vec2f> facet_vert<vec2f>(
+    const vector<vec2f>& vert, const vector<int>& vmap);
+template vector<vec3f> facet_vert<vec3f>(
+    const vector<vec3f>& vert, const vector<int>& vmap);
+template vector<vec4f> facet_vert<vec4f>(
+    const vector<vec4f>& vert, const vector<int>& vmap);
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION OF SHAPE SAMPLING
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Pick a point
+int sample_points(int npoints, float re) {
+    return clamp(0, npoints - 1, (int)(re * npoints));
+}
+
+// Compute a distribution for sampling points uniformly
+vector<float> sample_points_cdf(int npoints) {
+    auto cdf = vector<float>(npoints);
+    for (auto i = 0; i < npoints; i++) cdf[i] = i + 1;
+    return cdf;
+}
+
+// Pick a point
+int sample_points(const vector<float>& cdf, float re) {
+    re = clamp(re * cdf.back(), 0.0f, cdf.back() - 0.00001f);
+    return (int)(std::upper_bound(cdf.begin(), cdf.end(), re) - cdf.begin());
+}
+
+// Compute a distribution for sampling lines uniformly
+vector<float> sample_lines_cdf(
+    const vector<vec2i>& lines, const vector<vec3f>& pos) {
+    auto cdf = vector<float>(lines.size());
+    for (auto i = 0; i < lines.size(); i++)
+        cdf[i] = length(pos[lines[i].x] - pos[lines[i].y]);
+    for (auto i = 1; i < lines.size(); i++) cdf[i] += cdf[i - 1];
+    return cdf;
+}
+
+// Pick a point on lines
+pair<int, vec2f> sample_lines(const vector<float>& cdf, float re, float ruv) {
+    re = clamp(re * cdf.back(), 0.0f, cdf.back() - 0.00001f);
+    auto eid =
+        (int)(std::upper_bound(cdf.begin(), cdf.end(), re) - cdf.begin());
+    return {eid, {1 - ruv, ruv}};
+}
+
+// Compute a distribution for sampling triangle meshes uniformly
+vector<float> sample_triangles_cdf(
+    const vector<vec3i>& triangles, const vector<vec3f>& pos) {
+    auto cdf = vector<float>(triangles.size());
+    for (auto i = 0; i < triangles.size(); i++)
+        cdf[i] = triangle_area(
+            pos[triangles[i].x], pos[triangles[i].y], pos[triangles[i].z]);
+    for (auto i = 1; i < triangles.size(); i++) cdf[i] += cdf[i - 1];
+    return cdf;
+}
+
+// Pick a point on a triangle mesh
+pair<int, vec3f> sample_triangles(
+    const vector<float>& cdf, float re, const vec2f& ruv) {
+    re = clamp(re * cdf.back(), 0.0f, cdf.back() - 0.00001f);
+    auto eid =
+        (int)(std::upper_bound(cdf.begin(), cdf.end(), re) - cdf.begin());
+    return {
+        eid, {sqrt(ruv.x) * (1 - ruv.y), 1 - sqrt(ruv.x), ruv.y * sqrt(ruv.x)}};
+}
+
+// Compute a distribution for sampling quad meshes uniformly
+vector<float> sample_quads_cdf(
+    const vector<vec4i>& quads, const vector<vec3f>& pos) {
+    auto cdf = vector<float>(quads.size());
+    for (auto i = 0; i < quads.size(); i++)
+        cdf[i] = quad_area(
+            pos[quads[i].x], pos[quads[i].y], pos[quads[i].z], pos[quads[i].w]);
+    for (auto i = 1; i < quads.size(); i++) cdf[i] += cdf[i - 1];
+    return cdf;
+}
+
+// Pick a point on a quad mesh
+pair<int, vec4f> sample_quads(
+    const vector<float>& cdf, float re, const vec2f& ruv) {
+    if (ruv.x < 0.5f) {
+        auto eid = 0;
+        auto euv = zero3f;
+        std::tie(eid, euv) = sample_triangles(cdf, re, {ruv.x * 2, ruv.y});
+        return {eid, {euv.x, euv.y, 0, euv.z}};
+    } else {
+        auto eid = 0;
+        auto euv = zero3f;
+        std::tie(eid, euv) =
+            sample_triangles(cdf, re, {(ruv.x - 0.5f) * 2, ruv.y});
+        return {eid, {0, euv.z, euv.x, euv.y}};
+    }
+}
+
+// Samples a set of points over a triangle mesh uniformly. The rng function
+// takes the point index and returns vec3f numbers uniform directibuted in
+// [0,1]^3. unorm and texcoord are optional.
+tuple<vector<vec3f>, vector<vec3f>, vector<vec2f>> sample_triangles_points(
+    const vector<vec3i>& triangles, const vector<vec3f>& pos,
+    const vector<vec3f>& norm, const vector<vec2f>& texcoord, int npoints,
+    uint64_t seed) {
+    auto sampled_pos = vector<vec3f>(npoints);
+    auto sampled_norm = vector<vec3f>(norm.empty() ? 0 : npoints);
+    auto sampled_texcoord = vector<vec2f>(texcoord.empty() ? 0 : npoints);
+    auto cdf = sample_triangles_cdf(triangles, pos);
+    auto rng = init_rng(seed);
+    for (auto i = 0; i < npoints; i++) {
+        auto eid = 0;
+        auto euv = zero3f;
+        std::tie(eid, euv) = sample_triangles(
+            cdf, next_rand1f(rng), {next_rand1f(rng), next_rand1f(rng)});
+        auto t = triangles[eid];
+        sampled_pos[i] = pos[t.x] * euv.x + pos[t.y] * euv.y + pos[t.z] * euv.z;
+        if (!sampled_norm.empty())
+            sampled_norm[i] = normalize(
+                norm[t.x] * euv.x + norm[t.y] * euv.y + norm[t.z] * euv.z);
+        if (!sampled_texcoord.empty())
+            sampled_texcoord[i] = texcoord[t.x] * euv.x +
+                                  texcoord[t.y] * euv.y + texcoord[t.z] * euv.z;
+    }
+
+    return {sampled_pos, sampled_norm, sampled_texcoord};
 }
 
 }  // namespace ygl
@@ -354,7 +1329,7 @@ image4b load_image4b(const string& filename) {
     auto w = 0, h = 0, c = 0;
     auto pixels = unique_ptr<byte>(stbi_load(filename.c_str(), &w, &h, &c, 4));
     if (!pixels) return {};
-    return image4b(w, h, (vec4b*)pixels.get());
+    return make_image(w, h, (vec4b*)pixels.get());
 }
 
 // Loads an hdr image.
@@ -370,17 +1345,17 @@ image4f load_image4f(const string& filename) {
         pixels = unique_ptr<float>(stbi_loadf(filename.c_str(), &w, &h, &c, 4));
     }
     if (!pixels) return {};
-    return image4f(w, h, (vec4f*)pixels.get());
+    return make_image(w, h, (vec4f*)pixels.get());
 }
 
 // Saves an ldr image.
 bool save_image4b(const string& filename, const image4b& img) {
     if (path_extension(filename) == ".png") {
         return stbi_write_png(filename.c_str(), img.width(), img.height(), 4,
-            (byte*)img.data(), img.width() * 4);
+            (byte*)data(img), img.width() * 4);
     } else if (path_extension(filename) == ".jpg") {
         return stbi_write_jpg(filename.c_str(), img.width(), img.height(), 4,
-            (byte*)img.data(), 75);
+            (byte*)data(img), 75);
     } else {
         return false;
     }
@@ -390,10 +1365,10 @@ bool save_image4b(const string& filename, const image4b& img) {
 bool save_image4f(const string& filename, const image4f& img) {
     if (path_extension(filename) == ".hdr") {
         return stbi_write_hdr(
-            filename.c_str(), img.width(), img.height(), 4, (float*)img.data());
+            filename.c_str(), img.width(), img.height(), 4, (float*)data(img));
     } else if (path_extension(filename) == ".exr") {
         return !SaveEXR(
-            (float*)img.data(), img.width(), img.height(), 4, filename.c_str());
+            (float*)data(img), img.width(), img.height(), 4, filename.c_str());
     } else {
         return false;
     }
@@ -464,6 +1439,17 @@ bool save_image(
     }
 }
 
+// Save an HDR or LDR image with tonemapping based on filename
+bool save_image(const string& filename, const image4f& hdr, float exposure,
+    float gamma, bool filmic) {
+    if (is_hdr_filename(filename)) {
+        return save_image4f(filename, hdr);
+    } else {
+        auto ldr = tonemap_image(hdr, exposure, gamma, filmic);
+        return save_image4b(filename, ldr);
+    }
+}
+
 // Resize image.
 void resize_image(const image4f& img, image4f& res_img, resize_filter filter,
     resize_edge edge, bool premultiplied_alpha) {
@@ -482,9 +1468,10 @@ void resize_image(const image4f& img, image4f& res_img, resize_filter filter,
             {resize_edge::wrap, STBIR_EDGE_WRAP},
             {resize_edge::zero, STBIR_EDGE_ZERO}};
 
-    stbir_resize_float_generic((float*)img.data(), img.width(), img.height(),
-        sizeof(vec4f) * img.width(), (float*)res_img.data(), res_img.width(),
-        res_img.height(), sizeof(vec4f) * res_img.width(), 4, 3,
+    stbir_resize_float_generic((float*)img.pixels.data(), img.width(),
+        img.height(), sizeof(vec4f) * img.width(),
+        (float*)res_img.pixels.data(), res_img.width(), res_img.height(),
+        sizeof(vec4f) * res_img.width(), 4, 3,
         (premultiplied_alpha) ? STBIR_FLAG_ALPHA_PREMULTIPLIED : 0,
         edge_map.at(edge), filter_map.at(filter), STBIR_COLORSPACE_LINEAR,
         nullptr);
@@ -508,10 +1495,10 @@ void resize_image(const image4b& img, image4b& res_img, resize_filter filter,
             {resize_edge::wrap, STBIR_EDGE_WRAP},
             {resize_edge::zero, STBIR_EDGE_ZERO}};
 
-    stbir_resize_uint8_generic((unsigned char*)img.data(), img.width(),
+    stbir_resize_uint8_generic((unsigned char*)img.pixels.data(), img.width(),
         img.height(), sizeof(vec4b) * img.width(),
-        (unsigned char*)res_img.data(), res_img.width(), res_img.height(),
-        sizeof(vec4b) * res_img.width(), 4, 3,
+        (unsigned char*)res_img.pixels.data(), res_img.width(),
+        res_img.height(), sizeof(vec4b) * res_img.width(), 4, 3,
         (premultiplied_alpha) ? STBIR_FLAG_ALPHA_PREMULTIPLIED : 0,
         edge_map.at(edge), filter_map.at(filter), STBIR_COLORSPACE_LINEAR,
         nullptr);
@@ -520,9 +1507,350 @@ void resize_image(const image4b& img, image4b& res_img, resize_filter filter,
 }  // namespace ygl
 
 // -----------------------------------------------------------------------------
+// IMPLEMENTATION OF IMAGE OPERATIONS
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+#if 1
+// Tone map with a fitted filmic curve.
+//
+// Implementation from
+// https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+inline float tonemap_filmic(float hdr) {
+    // rescale
+    auto x = hdr * 2.05f;
+    // fitted values
+    float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
+    auto y = ((x * (a * x + b)) / (x * (c * x + d) + e));
+    return pow(clamp(y, 0.0f, 1.0f), 1 / 2.2f);
+}
+#else
+inline float tonemap_filmic(float x) {
+    auto y =
+        (x * (x * (x * (x * 2708.7142 + 6801.1525) + 1079.5474) + 1.1614649) -
+            0.00004139375) /
+        (x * (x * (x * (x * 983.38937 + 4132.0662) + 2881.6522) + 128.35911) +
+            1.0);
+    return (float)std::max(y, 0.0);
+}
+#endif
+
+// Tone mapping HDR to LDR images.
+image4b tonemap_image(
+    const image4f& hdr, float exposure, float gamma, bool filmic) {
+    auto ldr = image4b(hdr.width(), hdr.height());
+    auto scale = pow(2.0f, exposure);
+    for (auto j = 0; j < hdr.height(); j++) {
+        for (auto i = 0; i < hdr.width(); i++) {
+            auto h = hdr[{i, j}];
+            h.xyz() *= scale;
+            if (filmic) {
+                h.xyz() = {tonemap_filmic(h.x), tonemap_filmic(h.y),
+                    tonemap_filmic(h.z)};
+            } else {
+                h.xyz() = {pow(h.x, 1 / gamma), pow(h.y, 1 / gamma),
+                    pow(h.z, 1 / gamma)};
+            }
+            ldr[{i, j}] = float_to_byte(h);
+        }
+    }
+    return ldr;
+}
+
+// Image over operator
+void image_over(
+    vec4f* img, int width, int height, int nlayers, vec4f** layers) {
+    for (auto i = 0; i < width * height; i++) {
+        img[i] = {0, 0, 0, 0};
+        auto weight = 1.0f;
+        for (auto l = 0; l < nlayers; l++) {
+            img[i].x += layers[l][i].x * layers[l][i].w * weight;
+            img[i].y += layers[l][i].y * layers[l][i].w * weight;
+            img[i].z += layers[l][i].z * layers[l][i].w * weight;
+            img[i].w += layers[l][i].w * weight;
+            weight *= (1 - layers[l][i].w);
+        }
+        if (img[i].w) {
+            img[i].x /= img[i].w;
+            img[i].y /= img[i].w;
+            img[i].z /= img[i].w;
+        }
+    }
+}
+
+// Image over operator
+void image_over(
+    vec4b* img, int width, int height, int nlayers, vec4b** layers) {
+    for (auto i = 0; i < width * height; i++) {
+        auto comp = zero4f;
+        auto weight = 1.0f;
+        for (auto l = 0; l < nlayers && weight > 0; l++) {
+            auto w = byte_to_float(layers[l][i].w);
+            comp.x += byte_to_float(layers[l][i].x) * w * weight;
+            comp.y += byte_to_float(layers[l][i].y) * w * weight;
+            comp.z += byte_to_float(layers[l][i].z) * w * weight;
+            comp.w += w * weight;
+            weight *= (1 - w);
+        }
+        if (comp.w) {
+            img[i].x = float_to_byte(comp.x / comp.w);
+            img[i].y = float_to_byte(comp.y / comp.w);
+            img[i].z = float_to_byte(comp.z / comp.w);
+            img[i].w = float_to_byte(comp.w);
+        } else {
+            img[i] = {0, 0, 0, 0};
+        }
+    }
+}
+
+// Convert HSV to RGB
+// Implementatkion from
+// http://stackoverflow.com/questions/3018313/algorithm-to-convert-rgb-to-hsv-and-hsv-to-rgb-in-range-0-255-for-both
+vec4b hsv_to_rgb(const vec4b& hsv) {
+    vec4b rgb = {0, 0, 0, hsv.w};
+    byte region, remainder, p, q, t;
+
+    byte h = hsv.x, s = hsv.y, v = hsv.z;
+
+    if (s == 0) {
+        rgb.x = v;
+        rgb.y = v;
+        rgb.z = v;
+        return rgb;
+    }
+
+    region = h / 43;
+    remainder = (h - (region * 43)) * 6;
+
+    p = (v * (255 - s)) >> 8;
+    q = (v * (255 - ((s * remainder) >> 8))) >> 8;
+    t = (v * (255 - ((s * (255 - remainder)) >> 8))) >> 8;
+
+    switch (region) {
+        case 0:
+            rgb.x = v;
+            rgb.y = t;
+            rgb.z = p;
+            break;
+        case 1:
+            rgb.x = q;
+            rgb.y = v;
+            rgb.z = p;
+            break;
+        case 2:
+            rgb.x = p;
+            rgb.y = v;
+            rgb.z = t;
+            break;
+        case 3:
+            rgb.x = p;
+            rgb.y = q;
+            rgb.z = v;
+            break;
+        case 4:
+            rgb.x = t;
+            rgb.y = p;
+            rgb.z = v;
+            break;
+        default:
+            rgb.x = v;
+            rgb.y = p;
+            rgb.z = q;
+            break;
+    }
+
+    return rgb;
+}
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
 // IMPLEMENTATION FOR IMAGE EXAMPLES
 // -----------------------------------------------------------------------------
 namespace ygl {
+
+// Make a grid image
+image4b make_grid_image(
+    int width, int height, int tile, const vec4b& c0, const vec4b& c1) {
+    image4b pixels(width, height);
+    for (int j = 0; j < width; j++) {
+        for (int i = 0; i < height; i++) {
+            auto c = i % tile == 0 || i % tile == tile - 1 || j % tile == 0 ||
+                     j % tile == tile - 1;
+            pixels.at(i, j) = (c) ? c0 : c1;
+        }
+    }
+    return pixels;
+}
+
+// Make a checkerboard image
+image4b make_checker_image(
+    int width, int height, int tile, const vec4b& c0, const vec4b& c1) {
+    image4b pixels(width, height);
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            auto c = (i / tile + j / tile) % 2 == 0;
+            pixels.at(i, j) = (c) ? c0 : c1;
+        }
+    }
+    return pixels;
+}
+
+// Make an image with bumps and dimples.
+image4b make_bumpdimple_image(int width, int height, int tile) {
+    image4b pixels(width, height);
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            auto c = (i / tile + j / tile) % 2 == 0;
+            auto ii = i % tile - tile / 2, jj = j % tile - tile / 2;
+            auto r =
+                sqrt(float(ii * ii + jj * jj)) / sqrt(float(tile * tile) / 4);
+            auto h = 0.5f;
+            if (r < 0.5f) { h += (c) ? (0.5f - r) : -(0.5f - r); }
+            auto g = float_to_byte(h);
+            pixels.at(i, j) = vec4b{g, g, g, 255};
+        }
+    }
+    return pixels;
+}
+
+// Make a uv colored grid
+image4b make_ramp_image(
+    int width, int height, const vec4b& c0, const vec4b& c1, bool srgb) {
+    image4b pixels(width, height);
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            auto u = (float)i / (float)width;
+            if (srgb) {
+                pixels.at(i, j) = linear_to_srgb(
+                    srgb_to_linear(c0) * (1 - u) + srgb_to_linear(c1) * u);
+            } else {
+                pixels.at(i, j) = float_to_byte(
+                    byte_to_float(c0) * (1 - u) + byte_to_float(c1) * u);
+            }
+        }
+    }
+    return pixels;
+}
+
+// Make a gamma ramp image
+image4b make_gammaramp_image(int width, int height) {
+    image4b pixels(width, height);
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            auto u = j / float(height - 1);
+            if (i < width / 3) u = pow(u, 2.2f);
+            if (i > (width * 2) / 3) u = pow(u, 1 / 2.2f);
+            auto c = (unsigned char)(u * 255);
+            pixels.at(i, j) = {c, c, c, 255};
+        }
+    }
+    return pixels;
+}
+
+// Make a gamma ramp image
+image4f make_gammaramp_imagef(int width, int height) {
+    image4f pixels(width, height);
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            auto u = j / float(height - 1);
+            if (i < width / 3) u = pow(u, 2.2f);
+            if (i > (width * 2) / 3) u = pow(u, 1 / 2.2f);
+            pixels.at(i, j) = {u, u, u, 1};
+        }
+    }
+    return pixels;
+}
+
+// Make an image color with red/green in the [0,1] range. Helpful to visualize
+// uv texture coordinate application.
+image4b make_uv_image(int width, int height) {
+    image4b pixels(width, height);
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            auto r = float_to_byte(i / (float)(width - 1));
+            auto g = float_to_byte(j / (float)(height - 1));
+            pixels.at(i, j) = vec4b{r, g, 0, 255};
+        }
+    }
+    return pixels;
+}
+
+// Make a uv colored grid
+image4b make_uvgrid_image(int width, int height, int tile, bool colored) {
+    image4b pixels(width, height);
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            byte ph = 32 * (i / (height / 8));
+            byte pv = 128;
+            byte ps = 64 + 16 * (7 - j / (height / 8));
+            if (i % (tile / 2) && j % (tile / 2)) {
+                if ((i / tile + j / tile) % 2)
+                    pv += 16;
+                else
+                    pv -= 16;
+            } else {
+                pv = 196;
+                ps = 32;
+            }
+            pixels.at(i, j) = (colored) ? hsv_to_rgb({ph, ps, pv, 255}) :
+                                          vec4b{pv, pv, pv, 255};
+        }
+    }
+    return pixels;
+}
+
+// Make a uv recusive colored grid
+image4b make_recuvgrid_image(int width, int height, int tile, bool colored) {
+    image4b pixels(width, height);
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            byte ph = 32 * (i / (height / 8));
+            byte pv = 128;
+            byte ps = 64 + 16 * (7 - j / (height / 8));
+            if (i % (tile / 2) && j % (tile / 2)) {
+                if ((i / tile + j / tile) % 2)
+                    pv += 16;
+                else
+                    pv -= 16;
+                if ((i / (tile / 4) + j / (tile / 4)) % 2)
+                    pv += 4;
+                else
+                    pv -= 4;
+                if ((i / (tile / 8) + j / (tile / 8)) % 2)
+                    pv += 1;
+                else
+                    pv -= 1;
+            } else {
+                pv = 196;
+                ps = 32;
+            }
+            pixels.at(i, j) = (colored) ? hsv_to_rgb({ph, ps, pv, 255}) :
+                                          vec4b{pv, pv, pv, 255};
+        }
+    }
+    return pixels;
+}
+
+// Comvert a bump map to a normal map.
+image4b bump_to_normal_map(const image4b& img, float scale) {
+    image4b norm(img.width(), img.height());
+    for (int j = 0; j < img.height(); j++) {
+        for (int i = 0; i < img.width(); i++) {
+            auto i1 = (i + 1) % img.width(), j1 = (j + 1) % img.height();
+            auto p00 = img.at(i, j), p10 = img.at(i1, j), p01 = img.at(i, j1);
+            auto g00 = (float(p00.x) + float(p00.y) + float(p00.z)) / (3 * 255);
+            auto g01 = (float(p01.x) + float(p01.y) + float(p01.z)) / (3 * 255);
+            auto g10 = (float(p10.x) + float(p10.y) + float(p10.z)) / (3 * 255);
+            auto n = vec3f{scale * (g00 - g10), scale * (g00 - g01), 1.0f};
+            n = normalize(n) * 0.5f + vec3f{0.5f, 0.5f, 0.5f};
+            auto c =
+                vec4b{byte(n.x * 255), byte(n.y * 255), byte(n.z * 255), 255};
+            norm.at(i, j) = c;
+        }
+    }
+    return norm;
+}
 
 // Implementation of sunsky modified heavily from pbrt
 image4f make_sunsky_image(
@@ -592,7 +1920,7 @@ image4f make_sunsky_image(
         1.0f / (cos(thetaSun) + 0.000940f * pow(1.6386f - thetaSun, -1.253f));
 
     auto sun_le = zero3f;
-    for (auto i : range(3)) {
+    for (auto i = 0; i < 3; i++) {
         auto tauR = exp(-sun_m * 0.008735f * pow(sun_lambda[i] / 1000, -4.08f));
         auto tauA = exp(-sun_m * sun_beta * pow(sun_lambda[i] / 1000, -1.3f));
         auto tauO = exp(-sun_m * sun_ko[i] * .35f);
@@ -693,152 +2021,1164 @@ image4b make_turbulence_image(int resx, int resy, float scale, float lacunarity,
 }  // namespace ygl
 
 // -----------------------------------------------------------------------------
-// IMPLEMENTATION FOR PATH TRACE
+// IMPLEMENRTATION OF RAY-PRIMITIVE INTERSECTION FUNCTIONS
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-namespace _impl_trace {
+// Intersect a ray with a point (approximate)
+bool intersect_point(const ray3f& ray, const vec3f& p, float r, float& ray_t) {
+    // find parameter for line-point minimum distance
+    auto w = p - ray.o;
+    auto t = dot(w, ray.d) / dot(ray.d, ray.d);
 
-// Phong exponent to roughness. Public API, see above.
-inline float specular_exponent_to_roughness(float n) {
-    return sqrtf(2 / (n + 2));
+    // exit if not within bounds
+    if (t < ray.tmin || t > ray.tmax) return false;
+
+    // test for line-point distance vs point radius
+    auto rp = ray.o + ray.d * t;
+    auto prp = p - rp;
+    if (dot(prp, prp) > r * r) return false;
+
+    // intersection occurred: set params and exit
+    ray_t = t;
+
+    return true;
 }
 
-// Specular to fresnel eta. Public API, see above.
-inline void specular_fresnel_from_ks(const vec3f& ks, vec3f& es, vec3f& esk) {
-    es = {(1 + sqrt(ks.x)) / (1 - sqrt(ks.x)),
-        (1 + sqrt(ks.y)) / (1 - sqrt(ks.y)),
-        (1 + sqrt(ks.z)) / (1 - sqrt(ks.z))};
-    esk = {0, 0, 0};
+// Intersect a ray with a line
+bool intersect_line(const ray3f& ray, const vec3f& v0, const vec3f& v1,
+    float r0, float r1, float& ray_t, vec2f& euv) {
+    // setup intersection params
+    auto u = ray.d;
+    auto v = v1 - v0;
+    auto w = ray.o - v0;
+
+    // compute values to solve a linear system
+    auto a = dot(u, u);
+    auto b = dot(u, v);
+    auto c = dot(v, v);
+    auto d = dot(u, w);
+    auto e = dot(v, w);
+    auto det = a * c - b * b;
+
+    // check determinant and exit if lines are parallel
+    // (could use EPSILONS if desired)
+    if (det == 0) return false;
+
+    // compute Parameters on both ray and segment
+    auto t = (b * e - c * d) / det;
+    auto s = (a * e - b * d) / det;
+
+    // exit if not within bounds
+    if (t < ray.tmin || t > ray.tmax) return false;
+
+    // clamp segment param to segment corners
+    s = clamp(s, (float)0, (float)1);
+
+    // compute segment-segment distance on the closest points
+    auto p0 = ray.o + ray.d * t;
+    auto p1 = v0 + (v1 - v0) * s;
+    auto p01 = p0 - p1;
+
+    // check with the line radius at the same point
+    auto r = r0 * (1 - s) + r1 * s;
+    if (dot(p01, p01) > r * r) return false;
+
+    // intersection occurred: set params and exit
+    ray_t = t;
+    euv = {1 - s, s};
+
+    return true;
 }
+
+// Intersect a ray with a triangle
+bool intersect_triangle(const ray3f& ray, const vec3f& v0, const vec3f& v1,
+    const vec3f& v2, float& ray_t, vec3f& euv) {
+    // compute triangle edges
+    auto edge1 = v1 - v0;
+    auto edge2 = v2 - v0;
+
+    // compute determinant to solve a linear system
+    auto pvec = cross(ray.d, edge2);
+    auto det = dot(edge1, pvec);
+
+    // check determinant and exit if triangle and ray are parallel
+    // (could use EPSILONS if desired)
+    if (det == 0) return false;
+    auto inv_det = 1.0f / det;
+
+    // compute and check first bricentric coordinated
+    auto tvec = ray.o - v0;
+    auto u = dot(tvec, pvec) * inv_det;
+    if (u < 0 || u > 1) return false;
+
+    // compute and check second bricentric coordinated
+    auto qvec = cross(tvec, edge1);
+    auto v = dot(ray.d, qvec) * inv_det;
+    if (v < 0 || u + v > 1) return false;
+
+    // compute and check ray parameter
+    auto t = dot(edge2, qvec) * inv_det;
+    if (t < ray.tmin || t > ray.tmax) return false;
+
+    // intersection occurred: set params and exit
+    ray_t = t;
+    euv = {1 - u - v, u, v};
+
+    return true;
+}
+
+// Intersect a ray with a quad.
+bool intersect_quad(const ray3f& ray, const vec3f& v0, const vec3f& v1,
+    const vec3f& v2, const vec3f& v3, float& ray_t, vec4f& euv) {
+    auto hit = false;
+    auto tray = ray;
+    if (intersect_triangle(tray, v0, v1, v3, ray_t, (vec3f&)euv)) {
+        euv = {euv.x, euv.y, 0, euv.z};
+        tray.tmax = ray_t;
+        hit = true;
+    }
+    if (intersect_triangle(tray, v2, v3, v1, ray_t, (vec3f&)euv)) {
+        euv = {0, 1 - euv.y, euv.y + euv.z - 1, 1 - euv.z};
+        tray.tmax = ray_t;
+        hit = true;
+    }
+    return hit;
+}
+
+// Intersect a ray with a tetrahedron.
+bool intersect_tetrahedron(const ray3f& ray_, const vec3f& v0, const vec3f& v1,
+    const vec3f& v2, const vec3f& v3, float& ray_t, vec4f& euv) {
+    // check intersction for each face
+    auto hit = false;
+    auto ray = ray_;
+    auto tuv = zero3f;
+    if (intersect_triangle(ray, v0, v1, v2, ray_t, tuv)) {
+        hit = true;
+        ray.tmax = ray_t;
+    }
+    if (intersect_triangle(ray, v0, v1, v3, ray_t, tuv)) {
+        hit = true;
+        ray.tmax = ray_t;
+    }
+    if (intersect_triangle(ray, v0, v2, v3, ray_t, tuv)) {
+        hit = true;
+        ray.tmax = ray_t;
+    }
+    if (intersect_triangle(ray, v1, v2, v3, ray_t, tuv)) {
+        hit = true;
+        ray.tmax = ray_t;
+    }
+
+    return hit;
+}
+
+// Intersect a ray with a axis-aligned bounding box
+bool intersect_check_bbox(const ray3f& ray, const bbox3f& bbox) {
+    // set up convenient pointers for looping over axes
+    auto tmin = ray.tmin, tmax = ray.tmax;
+
+    // for each axis, clip intersection against the bounding planes
+    for (int i = 0; i < 3; i++) {
+        // determine intersection ranges
+        auto invd = 1.0f / ray.d[i];
+        auto t0 = (bbox.min[i] - ray.o[i]) * invd;
+        auto t1 = (bbox.max[i] - ray.o[i]) * invd;
+        // flip based on range directions
+        if (invd < 0.0f) {
+            float a = t0;
+            t0 = t1;
+            t1 = a;
+        }
+        // clip intersection
+        tmin = t0 > tmin ? t0 : tmin;
+        tmax = t1 < tmax ? t1 : tmax;
+        // if intersection is empty, exit
+        if (tmin > tmax) return false;
+    }
+
+    // passed all planes, then intersection occurred
+    return true;
+}
+
+// Min/max used in BVH traversal. Copied here since the traversal code
+// relies on the specific behaviour wrt NaNs.
+static inline const float& _safemin(const float& a, const float& b) {
+    return (a < b) ? a : b;
+}
+// Min/max used in BVH traversal. Copied here since the traversal code
+// relies on the specific behaviour wrt NaNs.
+static inline const float& _safemax(const float& a, const float& b) {
+    return (a > b) ? a : b;
+}
+
+// Intersect a ray with a axis-aligned bounding box
+bool intersect_check_bbox(const ray3f& ray, const vec3f& ray_dinv,
+    const vec3i& ray_dsign, const bbox3f& bbox_) {
+    auto bbox = &bbox_.min;
+    auto txmin = (bbox[ray_dsign.x].x - ray.o.x) * ray_dinv.x;
+    auto txmax = (bbox[1 - ray_dsign.x].x - ray.o.x) * ray_dinv.x;
+    auto tymin = (bbox[ray_dsign.y].y - ray.o.y) * ray_dinv.y;
+    auto tymax = (bbox[1 - ray_dsign.y].y - ray.o.y) * ray_dinv.y;
+    auto tzmin = (bbox[ray_dsign.z].z - ray.o.z) * ray_dinv.z;
+    auto tzmax = (bbox[1 - ray_dsign.z].z - ray.o.z) * ray_dinv.z;
+    auto tmin = _safemax(tzmin, _safemax(tymin, _safemax(txmin, ray.tmin)));
+    auto tmax = _safemin(tzmax, _safemin(tymax, _safemin(txmax, ray.tmax)));
+    tmax *= 1.00000024f;  // for double: 1.0000000000000004
+    return tmin <= tmax;
+}
+
+}  // namespace ygl
 
 // -----------------------------------------------------------------------------
-// RANDOM NUMBER GENERATION
+// IMPLEMENRTATION OF POINT-PRIMITIVE DISTANCE FUNCTIONS
 // -----------------------------------------------------------------------------
+namespace ygl {
 
-// Random number smp. Handles random number generation for stratified
-// sampling and correlated multi-jittered sampling.
-struct sampler {
-    rng_pcg32& rng;        // random number state
-    uint32_t pixel_hash;   // pixel hash
-    int s, d;              // sample and dimension indices
-    int ns, ns2;           // number of samples and its square root
-    trace_rng_type rtype;  // random number type
-};
-
-// Initialize a smp ot type rtype for pixel i, j with ns total samples.
-//
-// Implementation Notes: we use hash functions to scramble the pixel ids
-// to avoid introducing unwanted correlation between pixels. These should not
-// around according to the RNG documentaion, but we still found bad cases.
-// Scrambling avoids it.
-inline sampler make_sampler(
-    rng_pcg32& rng, int i, int j, int s, int ns, trace_rng_type rtype) {
-    // we use various hashes to scramble the pixel values
-    return {rng, hash_uint32((uint32_t)(j + 1) << 16 | (uint32_t)(i + 1)), s, 0,
-        ns, (int)round(sqrt((float)ns)), rtype};
+// TODO: documentation
+bool overlap_point(
+    const vec3f& pos, float dist_max, const vec3f& p, float r, float& dist) {
+    auto d2 = dot(pos - p, pos - p);
+    if (d2 > (dist_max + r) * (dist_max + r)) return false;
+    dist = sqrt(d2);
+    return true;
 }
 
-// Generates a 1-dimensional sample.
-//
-// Implementation Notes: For deterministic sampling (stratified and cmjs) we
-// compute a 64bit sample and use hashing to avoid correlation. Then permutation
-// are computed with CMJS procedures.
-inline float sample_next1f(sampler& smp) {
-    switch (smp.rtype) {
-        case trace_rng_type::uniform: {
-            return clamp(next_rand1f(smp.rng), 0.0f, 1 - flt_eps);
-        } break;
-        case trace_rng_type::stratified: {
-            smp.d += 1;
-            auto p = hash_uint64_32(
-                (uint64_t)smp.pixel_hash | (uint64_t)smp.d << 32);
-            auto s = hash_permute(smp.s, smp.ns, p);
-            return clamp(
-                (s + next_rand1f(smp.rng)) / smp.ns, 0.0f, 1 - flt_eps);
-        } break;
-        default: {
-            assert(false);
-            return 0;
+// TODO: documentation
+vec2f closestuv_line(const vec3f& pos, const vec3f& v0, const vec3f& v1) {
+    auto ab = v1 - v0;
+    auto d = dot(ab, ab);
+    // Project c onto ab, computing parameterized position d(t) = a + t*(b –
+    // a)
+    auto u = dot(pos - v0, ab) / d;
+    u = clamp(u, (float)0, (float)1);
+    return {1 - u, u};
+}
+
+// TODO: documentation
+bool overlap_line(const vec3f& pos, float dist_max, const vec3f& v0,
+    const vec3f& v1, float r0, float r1, float& dist, vec2f& euv) {
+    auto uv = closestuv_line(pos, v0, v1);
+    // Compute projected position from the clamped t d = a + t * ab;
+    auto p = lerp(v0, v1, uv.y);
+    auto r = lerp(r0, r1, uv.y);
+    auto d2 = dot(pos - p, pos - p);
+    // check distance
+    if (d2 > (dist_max + r) * (dist_max + r)) return false;
+    // done
+    dist = sqrt(d2);
+    euv = uv;
+    return true;
+}
+
+// TODO: documentation
+// this is a complicated test -> I probably prefer to use a sequence of test
+// (triangle body, and 3 edges)
+vec3f closestuv_triangle(
+    const vec3f& pos, const vec3f& v0, const vec3f& v1, const vec3f& v2) {
+    auto ab = v1 - v0;
+    auto ac = v2 - v0;
+    auto ap = pos - v0;
+
+    auto d1 = dot(ab, ap);
+    auto d2 = dot(ac, ap);
+
+    // corner and edge cases
+    if (d1 <= 0 && d2 <= 0) return {1, 0, 0};
+
+    auto bp = pos - v1;
+    auto d3 = dot(ab, bp);
+    auto d4 = dot(ac, bp);
+    if (d3 >= 0 && d4 <= d3) return {0, 1, 0};
+
+    auto vc = d1 * d4 - d3 * d2;
+    if ((vc <= 0) && (d1 >= 0) && (d3 <= 0))
+        return {1 - d1 / (d1 - d3), d1 / (d1 - d3), 0};
+
+    auto cp = pos - v2;
+    auto d5 = dot(ab, cp);
+    auto d6 = dot(ac, cp);
+    if (d6 >= 0 && d5 <= d6) return {0, 0, 1};
+
+    auto vb = d5 * d2 - d1 * d6;
+    if ((vb <= 0) && (d2 >= 0) && (d6 <= 0))
+        return {1 - d2 / (d2 - d6), 0, d2 / (d2 - d6)};
+
+    auto va = d3 * d6 - d5 * d4;
+    if ((va <= 0) && (d4 - d3 >= 0) && (d5 - d6 >= 0)) {
+        auto w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return {0, 1 - w, w};
+    }
+
+    // face case
+    auto denom = 1 / (va + vb + vc);
+    auto v = vb * denom;
+    auto w = vc * denom;
+    return {1 - v - w, v, w};
+}
+
+// TODO: documentation
+bool overlap_triangle(const vec3f& pos, float dist_max, const vec3f& v0,
+    const vec3f& v1, const vec3f& v2, float r0, float r1, float r2, float& dist,
+    vec3f& euv) {
+    auto uv = closestuv_triangle(pos, v0, v1, v2);
+    auto p = v0 * uv.x + v1 * uv.y + v2 * uv.z;
+    auto r = r0 * uv.x + r1 * uv.y + r2 * uv.z;
+    auto dd = dot(p - pos, p - pos);
+    if (dd > (dist_max + r) * (dist_max + r)) return false;
+    dist = sqrt(dd);
+    euv = uv;
+    return true;
+}
+
+// TODO: documentation
+bool overlap_quad(const vec3f& pos, float dist_max, const vec3f& v0,
+    const vec3f& v1, const vec3f& v2, const vec3f& v3, float r0, float r1,
+    float r2, float r3, float& dist, vec4f& euv) {
+    auto hit = false;
+    if (overlap_triangle(
+            pos, dist_max, v0, v1, v3, r0, r1, r3, dist, (vec3f&)euv)) {
+        euv = {euv.x, euv.y, 0, euv.z};
+        dist_max = dist;
+        hit = true;
+    }
+    if (overlap_triangle(
+            pos, dist_max, v2, v3, v1, r2, r3, r1, dist, (vec3f&)euv)) {
+        // dist_max = dist;
+        euv = {0, 1 - euv.y, euv.y + euv.z - 1, 1 - euv.z};
+        hit = true;
+    }
+    return hit;
+}
+
+// TODO: documentation
+bool overlap_tetrahedron(const vec3f& pos, const vec3f& v0, const vec3f& v1,
+    const vec3f& v2, const vec3f& v3, vec4f& euv) {
+    auto vol = dot(v3 - v0, cross(v3 - v1, v3 - v0));
+    if (vol == 0) return false;
+    auto u = dot(v3 - v0, cross(v3 - v1, v3 - v0)) / vol;
+    if (u < 0 || u > 1) return false;
+    auto v = dot(v3 - v0, cross(v3 - v1, v3 - v0)) / vol;
+    if (v < 0 || v > 1 || u + v > 1) return false;
+    auto w = dot(v3 - v0, cross(v3 - v1, v3 - v0)) / vol;
+    if (w < 0 || w > 1 || u + v + w > 1) return false;
+    euv = {u, v, w, 1 - u - v - w};
+    return true;
+}
+
+// TODO: documentation
+bool overlap_tetrahedron(const vec3f& pos, float dist_max, const vec3f& v0,
+    const vec3f& v1, const vec3f& v2, const vec3f& v3, float r0, float r1,
+    float r2, float r3, float& dist, vec4f& euv) {
+    // check interior
+    if (overlap_tetrahedron(pos, v0, v1, v2, v3, euv)) {
+        dist = 0;
+        return true;
+    }
+
+    // check faces
+    auto hit = false;
+    auto tuv = zero3f;
+    if (overlap_triangle(pos, dist_max, v0, v1, v2, r0, r1, r2, dist, tuv)) {
+        hit = true;
+        dist_max = dist;
+    }
+    if (overlap_triangle(pos, dist_max, v0, v1, v3, r0, r1, r3, dist, tuv)) {
+        hit = true;
+        dist_max = dist;
+    }
+    if (overlap_triangle(pos, dist_max, v0, v2, v3, r0, r2, r3, dist, tuv)) {
+        hit = true;
+        dist_max = dist;
+    }
+    if (overlap_triangle(pos, dist_max, v1, v2, v3, r1, r2, r3, dist, tuv)) {
+        hit = true;
+        // dist_max = dist;
+    }
+
+    return hit;
+}
+
+// TODO: documentation
+bool distance_check_bbox(const vec3f& pos, float dist_max, const bbox3f& bbox) {
+    // computing distance
+    auto dd = 0.0f;
+
+    // For each axis count any excess distance outside box extents
+    for (int i = 0; i < 3; i++) {
+        auto v = pos[i];
+        if (v < bbox.min[i]) dd += (bbox.min[i] - v) * (bbox.min[i] - v);
+        if (v > bbox.max[i]) dd += (v - bbox.max[i]) * (v - bbox.max[i]);
+    }
+
+    // check distance
+    return dd < dist_max * dist_max;
+}
+
+// TODO: doc
+bool overlap_bbox(const bbox3f& bbox1, const bbox3f& bbox2) {
+    if (bbox1.max.x < bbox2.min.x || bbox1.min.x > bbox2.max.x) return false;
+    if (bbox1.max.y < bbox2.min.y || bbox1.min.y > bbox2.max.y) return false;
+    if (bbox1.max.z < bbox2.min.z || bbox1.min.z > bbox2.max.z) return false;
+    return true;
+}
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR BVH
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// cleanup
+bvh_tree::~bvh_tree() {
+    if (!own_shape_bvhs) return;
+    for (auto bvh : shape_bvhs) delete bvh;
+}
+
+// number of primitives to avoid splitting on
+const int bvh_minprims = 4;
+
+// Initializes the BVH node node that contains the primitives sorted_prims
+// from start to end, by either splitting it into two other nodes,
+// or initializing it as a leaf. When splitting, the heuristic heuristic is
+// used and nodes added sequentially in the preallocated nodes array and
+// the number of nodes nnodes is updated.
+void make_bvh_node(vector<bvh_node>& nodes, int nodeid,
+    vector<int>& sorted_prims, int start, int end, const vector<bbox3f>& bboxes,
+    bvh_node_type type, bool equal_size) {
+    // compute node bounds
+    auto& node = nodes.at(nodeid);
+    node.bbox = invalid_bbox3f;
+    for (auto i = start; i < end; i++) node.bbox += bboxes[sorted_prims[i]];
+
+    // initialize as a leaf
+    node.type = type;
+    node.start = start;
+    node.count = end - start;
+
+    // try to split into two children
+    if (end - start > bvh_minprims) {
+        // choose the split axis and position
+        // init to default values
+        auto axis = 0;
+        auto mid = (start + end) / 2;
+
+        // compute primintive bounds and size
+        auto centroid_bbox = invalid_bbox3f;
+        for (auto i = start; i < end; i++)
+            centroid_bbox += bbox_center(bboxes[sorted_prims[i]]);
+        auto centroid_size = bbox_diagonal(centroid_bbox);
+
+        // check if it is not possible to split
+        if (centroid_size != zero3f) {
+            // split along largest
+            auto largest_axis = max_element(centroid_size);
+
+            // check heuristic
+            if (equal_size) {
+                // split the space in the middle along the largest axis
+                axis = largest_axis;
+                auto middle = bbox_center(centroid_bbox)[largest_axis];
+                mid =
+                    (int)(std::partition(sorted_prims.data() + start,
+                              sorted_prims.data() + end,
+                              [axis, middle, &bboxes](auto& a) {
+                                  return bbox_center(bboxes[a])[axis] < middle;
+                              }) -
+                          sorted_prims.data());
+            } else {
+                // balanced tree split: find the largest axis of the bounding
+                // box and split along this one right in the middle
+                axis = largest_axis;
+                mid = (start + end) / 2;
+                std::nth_element(sorted_prims.data() + start,
+                    sorted_prims.data() + mid, sorted_prims.data() + end,
+                    [axis, &bboxes](auto& a, auto& b) {
+                        return bbox_center(bboxes[a])[axis] <
+                               bbox_center(bboxes[b])[axis];
+                    });
+            }
+
+            // check correctness
+            assert(axis >= 0 && mid > 0);
+            assert(mid > start && mid < end);
+
+            // makes an internal node
+            node.type = bvh_node_type::internal;
+            // perform the splits by preallocating the child nodes and recurring
+            node.axis = axis;
+            node.start = (int)nodes.size();
+            node.count = 2;
+            nodes.emplace_back();
+            nodes.emplace_back();
+            // build child nodes
+            make_bvh_node(nodes, node.start, sorted_prims, start, mid, bboxes,
+                type, equal_size);
+            make_bvh_node(nodes, node.start + 1, sorted_prims, mid, end, bboxes,
+                type, equal_size);
         }
     }
 }
 
-// Generates a 2-dimensional sample.
-//
-// Implementation notes: see above. Note that using deterministic keyed
-// permutaton we can use stratified sampling without preallocating samples.
-inline vec2f sample_next2f(sampler& smp) {
-    switch (smp.rtype) {
-        case trace_rng_type::uniform: {
-            return {next_rand1f(smp.rng), next_rand1f(smp.rng)};
-        } break;
-        case trace_rng_type::stratified: {
-            smp.d += 2;
-            auto p = hash_uint64_32(
-                (uint64_t)smp.pixel_hash | (uint64_t)smp.d << 32);
-            auto s = hash_permute(smp.s, smp.ns, p);
-            return {clamp((s % smp.ns2 + next_rand1f(smp.rng)) / smp.ns2, 0.0f,
-                        1 - flt_eps),
-                clamp((s / smp.ns2 + next_rand1f(smp.rng)) / smp.ns2, 0.0f,
-                    1 - flt_eps)};
-        } break;
-        default: {
-            assert(false);
-            return {0, 0};
+// Build a BVH node list and sorted primitive array
+tuple<vector<bvh_node>, vector<int>> make_bvh_nodes(
+    const vector<bbox3f>& bboxes, bvh_node_type type, bool equal_size) {
+    // create an array of primitives to sort
+    auto sorted_prim = vector<int>(bboxes.size());
+    for (auto i = 0; i < bboxes.size(); i++) sorted_prim[i] = i;
+
+    // allocate nodes (over-allocate now then shrink)
+    auto nodes = vector<bvh_node>();
+    nodes.reserve(sorted_prim.size() * 2);
+
+    // start recursive splitting
+    nodes.emplace_back();
+    make_bvh_node(nodes, 0, sorted_prim, 0, (int)sorted_prim.size(), bboxes,
+        type, equal_size);
+
+    // shrink back
+    nodes.shrink_to_fit();
+
+    // done
+    return {nodes, sorted_prim};
+}
+
+// Build a BVH from the data already set
+void make_bvh_nodes(bvh_tree* bvh, bool equal_size) {
+    // get the number of primitives and the primitive type
+    auto bboxes = vector<bbox3f>();
+    if (!bvh->points.empty()) {
+        for (auto& p : bvh->points) {
+            bboxes.push_back(point_bbox(bvh->pos[p], bvh->radius[p]));
         }
+        bvh->type = bvh_node_type::point;
+    } else if (!bvh->lines.empty()) {
+        for (auto& l : bvh->lines) {
+            bboxes.push_back(line_bbox(bvh->pos[l.x], bvh->pos[l.y],
+                bvh->radius[l.x], bvh->radius[l.y]));
+        }
+        bvh->type = bvh_node_type::line;
+    } else if (!bvh->triangles.empty()) {
+        for (auto& t : bvh->triangles) {
+            bboxes.push_back(
+                triangle_bbox(bvh->pos[t.x], bvh->pos[t.y], bvh->pos[t.z]));
+        }
+        bvh->type = bvh_node_type::triangle;
+    } else if (!bvh->quads.empty()) {
+        for (auto& q : bvh->quads) {
+            bboxes.push_back(quad_bbox(
+                bvh->pos[q.x], bvh->pos[q.y], bvh->pos[q.z], bvh->pos[q.w]));
+        }
+        bvh->type = bvh_node_type::quad;
+    } else if (!bvh->pos.empty()) {
+        for (auto i = 0; i < bvh->pos.size(); i++) {
+            bboxes.push_back(point_bbox(bvh->pos[i], bvh->radius[i]));
+        }
+        bvh->type = bvh_node_type::vertex;
+    } else if (!bvh->instances.empty()) {
+        for (auto& ist : bvh->instances) {
+            bboxes.push_back(transform_bbox(ist.frame, ist.bvh->nodes[0].bbox));
+        }
+        bvh->type = bvh_node_type::instance;
+    }
+
+    // make node bvh
+    tie(bvh->nodes, bvh->sorted_prim) =
+        make_bvh_nodes(bboxes, bvh->type, equal_size);
+
+    // sort primitives
+    auto sort_prims = [bvh](auto& prims) {
+        if (prims.empty()) return;
+        auto sprims = prims;
+        for (auto i = 0; i < bvh->sorted_prim.size(); i++) {
+            prims[i] = sprims[bvh->sorted_prim[i]];
+        }
+    };
+    sort_prims(bvh->points);
+    sort_prims(bvh->lines);
+    sort_prims(bvh->triangles);
+    sort_prims(bvh->quads);
+    sort_prims(bvh->instances);
+}
+
+// Build a BVH from a set of primitives.
+bvh_tree* make_bvh(const vector<int>& points, const vector<vec2i>& lines,
+    const vector<vec3i>& triangles, const vector<vec4i>& quads,
+    const vector<vec3f>& pos, const vector<float>& radius, float def_radius,
+    bool equal_size) {
+    // allocate the bvh
+    auto bvh = new bvh_tree();
+
+    // set values
+    bvh->points = points;
+    bvh->lines = lines;
+    bvh->triangles = triangles;
+    bvh->quads = quads;
+    bvh->pos = pos;
+    bvh->radius =
+        (radius.empty()) ? vector<float>(pos.size(), def_radius) : radius;
+
+    // make bvh nodes
+    make_bvh_nodes(bvh, equal_size);
+
+    // done
+    return bvh;
+}
+
+// Build a BVH from a set of shape instances.
+bvh_tree* make_bvh(const vector<bvh_instance>& instances,
+    const vector<bvh_tree*>& shape_bvhs, bool own_shape_bvhs, bool equal_size) {
+    // allocate the bvh
+    auto bvh = new bvh_tree();
+
+    // set values
+    bvh->instances = instances;
+    bvh->shape_bvhs = shape_bvhs;
+    bvh->own_shape_bvhs = own_shape_bvhs;
+
+    // make bvh nodes
+    make_bvh_nodes(bvh, equal_size);
+
+    // done
+    return bvh;
+}
+
+// Recursively recomputes the node bounds for a shape bvh
+void refit_bvh(bvh_tree* bvh, int nodeid) {
+    // refit
+    auto& node = bvh->nodes[nodeid];
+    node.bbox = invalid_bbox3f;
+    switch (node.type) {
+        case bvh_node_type::internal: {
+            for (auto i = node.start; i < node.start + node.count; i++) {
+                refit_bvh(bvh, i);
+                node.bbox += bvh->nodes[i].bbox;
+            }
+        } break;
+        case bvh_node_type::point: {
+            for (auto i = node.start; i < node.start + node.count; i++) {
+                auto& p = bvh->points[i];
+                node.bbox += point_bbox(bvh->pos[p], bvh->radius[p]);
+            }
+        } break;
+        case bvh_node_type::line: {
+            for (auto i = node.start; i < node.start + node.count; i++) {
+                auto& l = bvh->lines[i];
+                node.bbox += line_bbox(bvh->pos[l.x], bvh->pos[l.y],
+                    bvh->radius[l.x], bvh->radius[l.y]);
+            }
+        } break;
+        case bvh_node_type::triangle: {
+            for (auto i = node.start; i < node.start + node.count; i++) {
+                auto& t = bvh->triangles[i];
+                node.bbox +=
+                    triangle_bbox(bvh->pos[t.x], bvh->pos[t.y], bvh->pos[t.z]);
+            }
+        } break;
+        case bvh_node_type::quad: {
+            for (auto i = node.start; i < node.start + node.count; i++) {
+                auto& q = bvh->quads[i];
+                node.bbox += quad_bbox(
+                    bvh->pos[q.x], bvh->pos[q.y], bvh->pos[q.z], bvh->pos[q.w]);
+            }
+        } break;
+        case bvh_node_type::vertex: {
+            for (auto i = node.start; i < node.start + node.count; i++) {
+                auto idx = bvh->sorted_prim[i];
+                node.bbox += point_bbox(bvh->pos[idx], bvh->radius[idx]);
+            }
+        } break;
+        case bvh_node_type::instance: {
+            for (auto i = node.start; i < node.start + node.count; i++) {
+                auto& ist = bvh->instances[i];
+                node.bbox += transform_bbox(ist.frame, ist.bvh->nodes[0].bbox);
+            }
+        } break;
     }
 }
 
-// Creates a 1-dimensional sample in [0,num-1]
-inline int sample_next1i(sampler& smp, int num) {
-    return clamp(int(sample_next1f(smp) * num), 0, num - 1);
+// Recursively recomputes the node bounds for a shape bvh
+void refit_bvh(bvh_tree* bvh, const vector<vec3f>& pos,
+    const vector<float>& radius, float def_radius) {
+    bvh->pos = pos;
+    bvh->radius =
+        (radius.empty()) ? vector<float>(pos.size(), def_radius) : radius;
+    refit_bvh(bvh, 0);
 }
 
-// Brdf type
-enum struct brdf_type { none = 0, microfacet = 1, kajiya_kay = 2, point = 3 };
+// Recursively recomputes the node bounds for a scene bvh
+void refit_bvh(bvh_tree* bvh, const vector<frame3f>& frames,
+    const vector<frame3f>& frames_inv) {
+    for (auto i = 0; i < frames.size(); i++) {
+        bvh->instances[i].frame = frames[bvh->sorted_prim[i]];
+        bvh->instances[i].frame_inv = frames_inv[bvh->sorted_prim[i]];
+    }
+    refit_bvh(bvh, 0);
+}
 
-// Brdf
-struct brdf {
-    brdf_type type = brdf_type::none;  // type
-    vec3f kd = {0, 0, 0};              // diffuse
-    vec3f ks = {0, 0, 0};              // specular
-    float rs = 0;                      // specular roughness
-    vec3f kt = {0, 0, 0};              // transmission (thin glass)
-    operator bool() const { return type != brdf_type::none; }
-    vec3f rho() const { return kd + ks + kt; }
-};
+// Intersect ray with a bvh.
+bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
+    float& ray_t, int& iid, int& sid, int& eid, vec4f& ew) {
+    // node stack
+    int node_stack[128];
+    auto node_cur = 0;
+    node_stack[node_cur++] = 0;
 
-// Emission type
-enum struct emission_type {
-    none = 0,
-    diffuse = 1,
-    point = 2,
-    line = 3,
-    env = 4,
-};
+    // shared variables
+    auto hit = false;
 
-// Emission
-struct emission {
-    emission_type type = emission_type::none;
-    vec3f ke = zero3f;
-    operator bool() const { return type != emission_type::none; }
-};
+    // copy ray to modify it
+    auto ray = ray_;
 
-// Surface point with geometry and material data. Supports point on envmap too.
-// This is the key data manipulated in the path tracer.
-struct point {
-    const instance* ist = nullptr;     // instance
-    const environment* env = nullptr;  // environment
-    frame3f frame = identity_frame3f;  // local frame
-    vec3f wo = zero3f;                 // outgoing direction
-    emission em = {};                  // emission
-    brdf fr = {};                      // brdf
-};
+    // prepare ray for fast queries
+    auto ray_dinv = vec3f{1, 1, 1} / ray.d;
+    auto ray_dsign = vec3i{(ray_dinv.x < 0) ? 1 : 0, (ray_dinv.y < 0) ? 1 : 0,
+        (ray_dinv.z < 0) ? 1 : 0};
+    auto ray_reverse = array<bool, 4>{
+        {(bool)ray_dsign.x, (bool)ray_dsign.y, (bool)ray_dsign.z, false}};
 
-// Generates a ray ray_o, ray_d from a camera cam for image plane coordinate
-// uv and the lens coordinates luv.
-inline ray3f eval_camera(const camera* cam, const vec2f& uv, const vec2f& luv) {
+    // walking stack
+    while (node_cur) {
+        // grab node
+        auto& node = bvh->nodes[node_stack[--node_cur]];
+
+        // intersect bbox
+        if (!intersect_check_bbox(ray, ray_dinv, ray_dsign, node.bbox))
+            continue;
+
+        // intersect node, switching based on node type
+        // for each type, iterate over the the primitive list
+        switch (node.type) {
+            case bvh_node_type::internal: {
+                // for internal nodes, attempts to proceed along the
+                // split axis from smallest to largest nodes
+                if (ray_reverse[node.axis]) {
+                    node_stack[node_cur++] = node.start;
+                    node_stack[node_cur++] = node.start + 1;
+                } else {
+                    node_stack[node_cur++] = node.start + 1;
+                    node_stack[node_cur++] = node.start;
+                }
+            } break;
+            case bvh_node_type::point: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& p = bvh->points[i];
+                    if (intersect_point(
+                            ray, bvh->pos[p], bvh->radius[p], ray_t)) {
+                        hit = true;
+                        ray.tmax = ray_t;
+                        eid = bvh->sorted_prim[i];
+                        ew = {1, 0, 0, 0};
+                    }
+                }
+            } break;
+            case bvh_node_type::line: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& l = bvh->lines[i];
+                    if (intersect_line(ray, bvh->pos[l.x], bvh->pos[l.y],
+                            bvh->radius[l.x], bvh->radius[l.y], ray_t,
+                            (vec2f&)ew)) {
+                        hit = true;
+                        ray.tmax = ray_t;
+                        eid = bvh->sorted_prim[i];
+                        ew = {ew.x, ew.y, 0, 0};
+                    }
+                }
+            } break;
+            case bvh_node_type::triangle: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& t = bvh->triangles[i];
+                    if (intersect_triangle(ray, bvh->pos[t.x], bvh->pos[t.y],
+                            bvh->pos[t.z], ray_t, (vec3f&)ew)) {
+                        hit = true;
+                        ray.tmax = ray_t;
+                        eid = bvh->sorted_prim[i];
+                        ew = {ew.x, ew.y, ew.z, 0};
+                    }
+                }
+            } break;
+            case bvh_node_type::quad: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& q = bvh->quads[i];
+                    if (intersect_quad(ray, bvh->pos[q.x], bvh->pos[q.y],
+                            bvh->pos[q.z], bvh->pos[q.w], ray_t, ew)) {
+                        hit = true;
+                        ray.tmax = ray_t;
+                        eid = bvh->sorted_prim[i];
+                        ew = {ew.x, ew.y, ew.z, ew.w};
+                    }
+                }
+            } break;
+            case bvh_node_type::vertex: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto idx = bvh->sorted_prim[i];
+                    if (intersect_point(
+                            ray, bvh->pos[idx], bvh->radius[idx], ray_t)) {
+                        hit = true;
+                        ray.tmax = ray_t;
+                        eid = idx;
+                        ew = {1, 0, 0, 0};
+                    }
+                }
+            } break;
+            case bvh_node_type::instance: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& ist = bvh->instances[i];
+                    if (intersect_bvh(ist.bvh,
+                            transform_ray(ist.frame_inv, ray), early_exit,
+                            ray_t, iid, sid, eid, ew)) {
+                        hit = true;
+                        ray.tmax = ray_t;
+                        iid = ist.iid;
+                        sid = ist.sid;
+                    }
+                }
+            } break;
+        }
+
+        // check for early exit
+        if (early_exit && hit) return true;
+    }
+
+    return hit;
+}
+
+// Finds the closest element with a bvh.
+bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
+    bool early_exit, float& dist, int& iid, int& sid, int& eid, vec4f& ew) {
+    // node stack
+    int node_stack[64];
+    auto node_cur = 0;
+    node_stack[node_cur++] = 0;
+
+    // hit
+    auto hit = false;
+
+    // walking stack
+    while (node_cur) {
+        // grab node
+        auto node = bvh->nodes[node_stack[--node_cur]];
+
+        // intersect bbox
+        if (!distance_check_bbox(pos, max_dist, node.bbox)) continue;
+
+        // intersect node, switching based on node type
+        // for each type, iterate over the the primitive list
+        switch (node.type) {
+            case bvh_node_type::internal: {
+                // internal node
+                node_stack[node_cur++] = node.start;
+                node_stack[node_cur++] = node.start + 1;
+            } break;
+            case bvh_node_type::point: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& p = bvh->points[i];
+                    if (overlap_point(
+                            pos, max_dist, bvh->pos[p], bvh->radius[p], dist)) {
+                        hit = true;
+                        max_dist = dist;
+                        eid = bvh->sorted_prim[i];
+                        ew = {1, 0, 0, 0};
+                    }
+                }
+            } break;
+            case bvh_node_type::line: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& l = bvh->lines[i];
+                    if (overlap_line(pos, max_dist, bvh->pos[l.x],
+                            bvh->pos[l.y], bvh->radius[l.x], bvh->radius[l.y],
+                            dist, (vec2f&)ew)) {
+                        hit = true;
+                        max_dist = dist;
+                        eid = bvh->sorted_prim[i];
+                        ew = {ew.x, ew.y, 0, 0};
+                    }
+                }
+            } break;
+            case bvh_node_type::triangle: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& t = bvh->triangles[i];
+                    if (overlap_triangle(pos, max_dist, bvh->pos[t.x],
+                            bvh->pos[t.y], bvh->pos[t.z], bvh->radius[t.x],
+                            bvh->radius[t.y], bvh->radius[t.z], dist,
+                            (vec3f&)ew)) {
+                        hit = true;
+                        max_dist = dist;
+                        eid = bvh->sorted_prim[i];
+                        ew = {ew.x, ew.y, ew.z, 0};
+                    }
+                }
+            } break;
+            case bvh_node_type::quad: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& q = bvh->quads[i];
+                    if (overlap_quad(pos, max_dist, bvh->pos[q.x],
+                            bvh->pos[q.y], bvh->pos[q.z], bvh->pos[q.w],
+                            bvh->radius[q.x], bvh->radius[q.y],
+                            bvh->radius[q.z], bvh->radius[q.w], dist, ew)) {
+                        hit = true;
+                        max_dist = dist;
+                        eid = bvh->sorted_prim[i];
+                        ew = {ew.x, ew.y, ew.z, ew.w};
+                    }
+                }
+            } break;
+            case bvh_node_type::vertex: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto idx = bvh->sorted_prim[i];
+                    if (overlap_point(pos, max_dist, bvh->pos[idx],
+                            bvh->radius[idx], dist)) {
+                        hit = true;
+                        max_dist = dist;
+                        eid = idx;
+                        ew = {1, 0, 0, 0};
+                    }
+                }
+            } break;
+            case bvh_node_type::instance: {
+                for (auto i = node.start; i < node.start + node.count; i++) {
+                    auto& ist = bvh->instances[i];
+                    if (overlap_bvh(ist.bvh,
+                            transform_point(ist.frame_inv, pos), max_dist,
+                            early_exit, dist, iid, sid, eid, ew)) {
+                        hit = true;
+                        max_dist = dist;
+                        iid = ist.iid;
+                        sid = ist.sid;
+                    }
+                }
+            } break;
+        }
+    }
+
+    return hit;
+}
+
+// Intersect ray with a bvh (convenience wrapper).
+intersection_point intersect_bvh(
+    const bvh_tree* bvh, const ray3f& ray, bool early_exit) {
+    auto isec = intersection_point();
+    if (!intersect_bvh(bvh, ray, early_exit, isec.dist, isec.iid, isec.sid,
+            isec.eid, isec.euv))
+        return {};
+    return isec;
+}
+
+// Finds the closest element with a bvh (convenience wrapper).
+intersection_point overlap_bvh(
+    const bvh_tree* bvh, const vec3f& pos, float max_dist, bool early_exit) {
+    auto isec = intersection_point();
+    if (!overlap_bvh(bvh, pos, max_dist, early_exit, isec.dist, isec.iid,
+            isec.sid, isec.eid, isec.euv))
+        return {};
+    return isec;
+}
+
+#if 0
+    // Finds the overlap between BVH leaf nodes.
+    template <typename OverlapElem>
+    void overlap_bvh_elems(const bvh_tree* bvh1, const bvh_tree* bvh2,
+                           bool skip_duplicates, bool skip_self, vector<vec2i>& overlaps,
+                           const OverlapElem& overlap_elems) {
+        // node stack
+        vec2i node_stack[128];
+        auto node_cur = 0;
+        node_stack[node_cur++] = {0, 0};
+
+        // walking stack
+        while (node_cur) {
+            // grab node
+            auto node_idx = node_stack[--node_cur];
+            const auto node1 = bvh1->nodes[node_idx.x];
+            const auto node2 = bvh2->nodes[node_idx.y];
+
+            // intersect bbox
+            if (!overlap_bbox(node1.bbox, node2.bbox)) continue;
+
+            // check for leaves
+            if (node1.isleaf && node2.isleaf) {
+                // collide primitives
+                for (auto i1 = node1.start; i1 < node1.start + node1.count; i1++) {
+                    for (auto i2 = node2.start; i2 < node2.start + node2.count;
+                         i2++) {
+                        auto idx1 = bvh1->sorted_prim[i1];
+                        auto idx2 = bvh2->sorted_prim[i2];
+                        if (skip_duplicates && idx1 > idx2) continue;
+                        if (skip_self && idx1 == idx2) continue;
+                        if (overlap_elems(idx1, idx2))
+                            overlaps.push_back({idx1, idx2});
+                    }
+                }
+            } else {
+                // descend
+                if (node1.isleaf) {
+                    for (auto idx2 = node2.start; idx2 < node2.start + node2.count;
+                         idx2++) {
+                        node_stack[node_cur++] = {node_idx.x, (int)idx2};
+                        assert(node_cur < 128);
+                    }
+                } else if (node2.isleaf) {
+                    for (auto idx1 = node1.start; idx1 < node1.start + node1.count;
+                         idx1++) {
+                        node_stack[node_cur++] = {(int)idx1, node_idx.y};
+                        assert(node_cur < 128);
+                    }
+                } else {
+                    for (auto idx2 = node2.start; idx2 < node2.start + node2.count;
+                         idx2++) {
+                        for (auto idx1 = node1.start;
+                             idx1 < node1.start + node1.count; idx1++) {
+                            node_stack[node_cur++] = {(int)idx1, (int)idx2};
+                            assert(node_cur < 128);
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR SIMPLE SCENE
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// cleanup
+shape_group::~shape_group() {
+    for (auto v : shapes) delete v;
+}
+
+// cleanup
+animation_group::~animation_group() {
+    for (auto v : animations) delete v;
+}
+
+// cleanup
+scene::~scene() {
+    for (auto v : shapes) delete v;
+    for (auto v : instances) delete v;
+    for (auto v : materials) delete v;
+    for (auto v : textures) delete v;
+    for (auto v : cameras) delete v;
+    for (auto v : environments) delete v;
+    for (auto v : nodes) delete v;
+    for (auto v : animations) delete v;
+}
+
+// Shape value interpolated using barycentric coordinates
+template <typename T>
+T eval_barycentric(const shape* shp, const vector<T>& vals, int eid,
+    const vec4f& euv, const T& def) {
+    if (vals.empty()) return def;
+    if (!shp->triangles.empty()) {
+        return eval_barycentric_triangle(
+            vals, shp->triangles[eid], vec3f{euv.x, euv.y, euv.z});
+    } else if (!shp->lines.empty()) {
+        return eval_barycentric_line(
+            vals, shp->lines[eid], vec2f{euv.x, euv.y});
+    } else if (!shp->points.empty()) {
+        return eval_barycentric_point(vals, shp->points[eid], euv.x);
+    } else if (!shp->quads.empty()) {
+        return eval_barycentric_quad(vals, shp->quads[eid], euv);
+    } else {
+        return vals[eid];  // points
+    }
+}
+
+// Shape position interpolated using barycentric coordinates
+vec3f eval_pos(const shape* shp, int eid, const vec4f& euv) {
+    return eval_barycentric(shp, shp->pos, eid, euv, {0, 0, 0});
+}
+// Shape normal interpolated using barycentric coordinates
+vec3f eval_norm(const shape* shp, int eid, const vec4f& euv) {
+    return normalize(eval_barycentric(shp, shp->norm, eid, euv, {0, 0, 1}));
+}
+// Shape texcoord interpolated using barycentric coordinates
+vec2f eval_texcoord(const shape* shp, int eid, const vec4f& euv) {
+    return eval_barycentric(shp, shp->texcoord, eid, euv, {0, 0});
+}
+// Shape color interpolated using barycentric coordinates
+vec4f eval_color(const shape* shp, int eid, const vec4f& euv) {
+    return eval_barycentric(shp, shp->color, eid, euv, {1, 1, 1, 1});
+}
+// Shape radius interpolated using barycentric coordinates
+float eval_radius(const shape* shp, int eid, const vec4f& euv) {
+    return eval_barycentric(shp, shp->radius, eid, euv, 0.0f);
+}
+// Shape tangent space interpolated using barycentric coordinates
+vec4f eval_tangsp(const shape* shp, int eid, const vec4f& euv) {
+    return eval_barycentric(shp, shp->tangsp, eid, euv, {0, 0, 0, 1});
+}
+
+// Instance position interpolated using barycentric coordinates
+vec3f eval_pos(const instance* ist, int sid, int eid, const vec4f& euv) {
+    auto shp = ist->shp->shapes.at(sid);
+    return transform_point(
+        ist->frame, eval_barycentric(shp, shp->pos, eid, euv, {0, 0, 0}));
+}
+// Instance normal interpolated using barycentric coordinates
+vec3f eval_norm(const instance* ist, int sid, int eid, const vec4f& euv) {
+    auto shp = ist->shp->shapes.at(sid);
+    return transform_direction(ist->frame,
+        normalize(eval_barycentric(shp, shp->norm, eid, euv, {0, 0, 1})));
+}
+
+// Evaluate a texture
+vec4f eval_texture(const texture_info& info, const vec2f& texcoord, bool srgb,
+    const vec4f& def) {
+    if (!info.txt) return def;
+
+    // get texture
+    auto txt = info.txt;
+    assert(txt->hdr || txt->ldr);
+
+    auto lookup = [&def, &txt, &srgb](int i, int j) {
+        if (txt->ldr)
+            return (srgb) ? srgb_to_linear(txt->ldr[{i, j}]) :
+                            byte_to_float(txt->ldr[{i, j}]);
+        else if (txt->hdr)
+            return txt->hdr[{i, j}];
+        else
+            return def;
+    };
+
+    // get image width/height
+    auto w = txt->width(), h = txt->height();
+
+    // get coordinates normalized for tiling
+    auto s = 0.0f, t = 0.0f;
+    if (!info.wrap_s) {
+        s = clamp(texcoord.x, 0.0f, 1.0f) * w;
+    } else {
+        s = std::fmod(texcoord.x, 1.0f) * w;
+        if (s < 0) s += w;
+    }
+    if (!info.wrap_t) {
+        t = clamp(texcoord.y, 0.0f, 1.0f) * h;
+    } else {
+        t = std::fmod(texcoord.y, 1.0f) * h;
+        if (t < 0) t += h;
+    }
+
+    // get image coordinates and residuals
+    auto i = clamp((int)s, 0, w - 1), j = clamp((int)t, 0, h - 1);
+    auto ii = (i + 1) % w, jj = (j + 1) % h;
+    auto u = s - i, v = t - j;
+
+    // nearest lookup
+    if (!info.linear) return lookup(i, j);
+
+    // handle interpolation
+    return lookup(i, j) * (1 - u) * (1 - v) + lookup(i, jj) * (1 - u) * v +
+           lookup(ii, j) * u * (1 - v) + lookup(ii, jj) * u * v;
+}
+
+// Generates a ray from a camera for image plane coordinate uv and the
+// lens coordinates luv.
+ray3f eval_camera_ray(const camera* cam, const vec2f& uv, const vec2f& luv) {
     auto h = 2 * tan(cam->yfov / 2);
     auto w = h * cam->aspect;
     auto o = vec3f{luv.x * cam->aperture, luv.y * cam->aperture, 0};
@@ -848,4364 +3188,532 @@ inline ray3f eval_camera(const camera* cam, const vec2f& uv, const vec2f& luv) {
         transform_direction(cam->frame, normalize(q - o)));
 }
 
-// Evaluates emission.
-inline vec3f eval_emission(const point& pt) {
-    auto& em = pt.em;
-    auto& wo = pt.wo;
-    auto& wn = pt.frame.z;
-
-    if (!em) return zero3f;
-    auto ke = zero3f;
-    switch (em.type) {
-        case emission_type::diffuse:
-            ke += (dot(wn, wo) > 0) ? em.ke : zero3f;
-            break;
-        case emission_type::point: ke += em.ke; break;
-        case emission_type::line: ke += em.ke; break;
-        case emission_type::env: ke += em.ke; break;
-        default: assert(false); break;
-    }
-    return ke;
-}
-
-// Compute the fresnel term for dielectrics. Implementation from
-// https://seblagarde.wordpress.com/2013/04/29/memo-on-fresnel-equations/
-inline vec3f eval_fresnel_dielectric(float cosw, const vec3f& eta_) {
-    auto eta = eta_;
-    if (cosw < 0) {
-        eta = 1.0f / eta;
-        cosw = -cosw;
-    }
-
-    auto sin2 = 1 - cosw * cosw;
-    auto eta2 = eta * eta;
-
-    auto cos2t = vec3f{1, 1, 1} - sin2 / eta2;
-    if (cos2t.x < 0 || cos2t.y < 0 || cos2t.z < 0)
-        return vec3f{1, 1, 1};  // tir
-
-    auto t0 = vec3f{sqrt(cos2t.x), sqrt(cos2t.y), sqrt(cos2t.z)};
-    auto t1 = eta * t0;
-    auto t2 = eta * cosw;
-
-    auto rs = (vec3f{cosw, cosw, cosw} - t1) / (vec3f{cosw, cosw, cosw} + t1);
-    auto rp = (t0 - t2) / (t0 + t2);
-
-    return (rs * rs + rp * rp) / 2.0f;
-}
-
-// Compute the fresnel term for metals. Implementation from
-// https://seblagarde.wordpress.com/2013/04/29/memo-on-fresnel-equations/
-inline vec3f eval_fresnel_metal(
-    float cosw, const vec3f& eta, const vec3f& etak) {
-    if (etak == zero3f) return eval_fresnel_dielectric(cosw, eta);
-
-    cosw = clamp(cosw, (float)-1, (float)1);
-    auto cos2 = cosw * cosw;
-    auto sin2 = clamp(1 - cos2, (float)0, (float)1);
-    auto eta2 = eta * eta;
-    auto etak2 = etak * etak;
-
-    auto t0 = eta2 - etak2 - vec3f{sin2, sin2, sin2};
-    auto a2plusb2_2 = t0 * t0 + 4.0f * eta2 * etak2;
-    auto a2plusb2 =
-        vec3f{sqrt(a2plusb2_2.x), sqrt(a2plusb2_2.y), sqrt(a2plusb2_2.z)};
-    auto t1 = a2plusb2 + vec3f{cos2, cos2, cos2};
-    auto a_2 = (a2plusb2 + t0) / 2.0f;
-    auto a = vec3f{sqrt(a_2.x), sqrt(a_2.y), sqrt(a_2.z)};
-    auto t2 = 2.0f * a * cosw;
-    auto rs = (t1 - t2) / (t1 + t2);
-
-    auto t3 = vec3f{cos2, cos2, cos2} * a2plusb2 +
-              vec3f{sin2, sin2, sin2} * vec3f{sin2, sin2, sin2};
-    auto t4 = t2 * sin2;
-    auto rp = rs * (t3 - t4) / (t3 + t4);
-
-    return (rp + rs) / 2.0f;
-}
-
-// Schlick approximation of Fresnel term
-inline vec3f eval_fresnel_schlick(const vec3f& ks, float cosw) {
-    return ks +
-           (vec3f{1, 1, 1} - ks) * pow(clamp(1.0f - cosw, 0.0f, 1.0f), 5.0f);
-}
-
-// Schlick approximation of Fresnel term weighted by roughness.
-// This is a hack, but works better than not doing it.
-inline vec3f eval_fresnel_schlick(const vec3f& ks, float cosw, float rs) {
-    auto fks = eval_fresnel_schlick(ks, cosw);
-    return lerp(ks, fks, rs);
-}
-
-// Evaluates the GGX distribution and geometric term
-inline float eval_ggx(float rs, float ndh, float ndi, float ndo) {
-    // evaluate GGX
-    auto alpha2 = rs * rs;
-    auto di = (ndh * ndh) * (alpha2 - 1) + 1;
-    auto d = alpha2 / (pif * di * di);
-#ifndef YGL_GGX_SMITH
-    auto lambda_o = (-1 + sqrt(1 + alpha2 * (1 - ndo * ndo) / (ndo * ndo))) / 2;
-    auto lambda_i = (-1 + sqrt(1 + alpha2 * (1 - ndi * ndi) / (ndi * ndi))) / 2;
-    auto g = 1 / (1 + lambda_o + lambda_i);
-#else
-    auto go = (2 * ndo) / (ndo + sqrt(alpha2 + (1 - alpha2) * ndo * ndo));
-    auto gi = (2 * ndi) / (ndi + sqrt(alpha2 + (1 - alpha2) * ndi * ndi));
-    auto g = go * gi;
-#endif
-    return d * g;
-}
-
-// Evaluates the GGX pdf
-inline float pdf_ggx(float rs, float ndh) {
-    auto cos2 = ndh * ndh;
-    auto tan2 = (1 - cos2) / cos2;
-    auto alpha2 = rs * rs;
-    auto d = alpha2 / (pif * cos2 * cos2 * (alpha2 + tan2) * (alpha2 + tan2));
-    return d;
-}
-
-// Sample the GGX distribution
-inline vec3f sample_ggx(float rs, const vec2f& rn) {
-    auto tan2 = rs * rs * rn.y / (1 - rn.y);
-    auto rz = sqrt(1 / (tan2 + 1)), rr = sqrt(1 - rz * rz),
-         rphi = 2 * pif * rn.x;
-    // set to wh
-    auto wh_local = vec3f{rr * cos(rphi), rr * sin(rphi), rz};
-    return wh_local;
-}
-
-// Evaluates the BRDF scaled by the cosine of the incoming direction.
-//
-// Implementation notes:
-// - ggx from [Heitz 2014] and [Walter 2007] and [Lagarde 2014]
-// "Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs"
-// http://jcgt.org/published/0003/02/03/
-// - "Microfacet Models for Refraction through Rough Surfaces" EGSR 07
-// https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
-// - uses Kajiya-Kay for hair
-// - uses a hack for points
-inline vec3f eval_brdfcos(
-    const point& pt, const vec3f& wi, bool delta = false) {
-    // grab variables
-    auto& fr = pt.fr;
-    auto& wn = pt.frame.z;
-    auto& wo = pt.wo;
-
-    // exit if not needed
-    if (!fr) return zero3f;
-
-    // accumulate brdfcos for each lobe
-    auto brdfcos = zero3f;
-    switch (fr.type) {
-        // reflection terms
-        case brdf_type::microfacet: {
-            // compute wh
-            auto wh = normalize(wo + wi);
-
-            // compute dot products
-            auto ndo = dot(wn, wo), ndi = dot(wn, wi),
-                 ndh = clamp(dot(wh, wn), (float)-1, (float)1);
-
-            // diffuse term
-            if (fr.kd != zero3f && ndi > 0 && ndo > 0) {
-                brdfcos += fr.kd * ndi / pif;
-            }
-
-            // specular term (GGX)
-            if (fr.ks != zero3f && ndi > 0 && ndo > 0 && ndh > 0 && fr.rs) {
-                // microfacet term
-                auto dg = eval_ggx(fr.rs, ndh, ndi, ndo);
-
-                // handle fresnel
-                auto odh = clamp(dot(wo, wh), 0.0f, 1.0f);
-                auto ks = eval_fresnel_schlick(fr.ks, odh, fr.rs);
-
-                // sum up
-                brdfcos += ks * ndi * dg / (4 * ndi * ndo);
-            }
-
-            // specular term (mirror)
-            if (fr.ks != zero3f && ndi > 0 && ndo > 0 && !fr.rs && delta) {
-                // handle fresnel
-                auto ks = eval_fresnel_schlick(fr.ks, ndo, fr.rs);
-
-                // sum up
-                brdfcos += ks;
-            }
-
-            // transmission hack
-            if (fr.kt != zero3f && wo == -wi) brdfcos += fr.kt;
-        } break;
-        // hair (Kajiya-Kay)
-        case brdf_type::kajiya_kay: {
-            // compute wh
-            auto wh = normalize(wo + wi);
-
-            // compute dot products
-            auto ndo = dot(wn, wo), ndi = dot(wn, wi),
-                 ndh = clamp(dot(wh, wn), (float)0, (float)1);
-
-            // take sines
-            auto so = sqrt(clamp(1 - ndo * ndo, (float)0, (float)1)),
-                 si = sqrt(clamp(1 - ndi * ndi, (float)0, (float)1)),
-                 sh = sqrt(clamp(1 - ndh * ndh, (float)0, (float)1));
-
-            // diffuse term (Kajiya-Kay)
-            if (fr.kd != zero3f && si > 0 && so > 0) {
-                brdfcos += fr.kd * si / pif;
-            }
-
-            // specular term (Kajiya-Kay)
-            if (fr.ks != zero3f && si > 0 && so > 0 && sh > 0) {
-                auto ns = 2 / (fr.rs * fr.rs) - 2;
-                auto d = (ns + 2) * pow(sh, ns) / (2 + pif);
-                brdfcos += fr.ks * si * d / (4.0f * si * so);
-            }
-
-            // transmission hack
-            if (fr.kt != zero3f && wo == -wi) brdfcos += fr.kt;
-        } break;
-        // points
-        case brdf_type::point: {
-            // diffuse term
-            auto ido = dot(wo, wi);
-            brdfcos += fr.kd * (2 * ido + 1) / (2 * pif);
-
-            // transmission hack
-            if (fr.kt != zero3f && wo == -wi) brdfcos += fr.kt;
-        } break;
-        default: assert(false); break;
-    }
-
-    // check
-    assert(isfinite(brdfcos.x) && isfinite(brdfcos.y) && isfinite(brdfcos.z));
-
-    // done
-    return brdfcos;
-}
-
-// Compute the weight for sampling the BRDF
-inline float weight_brdfcos(
-    const point& pt, const vec3f& wi, bool delta = false) {
-    // grab variables
-    auto& fr = pt.fr;
-    auto& wn = pt.frame.z;
-    auto& wo = pt.wo;
-
-    // skip if no component
-    if (!fr) return 0;
-
-    // probability of each lobe
-    auto kdw = max_element(fr.kd).second, ksw = max_element(fr.ks).second,
-         ktw = max_element(fr.kt).second;
-    auto kaw = kdw + ksw + ktw;
-    kdw /= kaw;
-    ksw /= kaw;
-    ktw /= kaw;
-
-    // accumulate the probability over all lobes
-    auto pdf = 0.0f;
-    // sample the lobe
-    switch (fr.type) {
-        // reflection term
-        case brdf_type::microfacet: {
-            // compute wh
-            auto wh = normalize(wi + wo);
-
-            // compute dot products
-            auto ndo = dot(wn, wo), ndi = dot(wn, wi), ndh = dot(wn, wh);
-
-            // diffuse term (hemipherical cosine probability)
-            if (kdw && ndo > 0 && ndi > 0) { pdf += kdw * ndi / pif; }
-
-            // specular term (GGX)
-            if (ksw && ndo > 0 && ndi > 0 && ndh > 0 && fr.rs) {
-                // probability proportional to d adjusted by wh projection
-                auto d = pdf_ggx(fr.rs, ndh);
-                auto hdo = dot(wo, wh);
-                pdf += ksw * d / (4 * hdo);
-            }
-
-            // specular term (mirror)
-            if (ksw && ndo > 0 && ndi > 0 && !fr.rs && delta) {
-                // probability proportional to d adjusted by wh projection
-                pdf += ksw;
-            }
-
-            // transmission hack
-            if (ktw && wi == -wo) pdf += ktw;
-
-            // check
-            assert(isfinite(pdf));
-        } break;
-        // hair (Kajiya-Kay)
-        case brdf_type::kajiya_kay: {
-            // diffuse and specular
-            pdf += (kdw + ksw) * 4 * pif;
-            // transmission hack
-            if (wi == -wo) pdf += ktw;
-        } break;
-        // point
-        case brdf_type::point: {
-            // diffuse and specular
-            pdf += (kdw + ksw) * 4 * pif;
-            // transmission hack
-            if (wi == -wo) pdf += ktw;
-        } break;
-        default: assert(false); break;
-    }
-
-    // check for missed pdf
-    if (!pdf) return 0;
-
-    // check
-    assert(isfinite(pdf));
-
-    // done
-    return 1 / pdf;
-}
-
-// reflected vector
-inline vec3f reflect(const vec3f& w, const vec3f& n) {
-    return -w + 2 * dot(n, w) * n;
-}
-
-// refracted vector
-inline vec3f refract(const vec3f& w, const vec3f& n, float eta) {
-    // auto k = 1.0 - eta * eta * (1.0 - dot(n, w) * dot(n, w));
-    auto k = 1 - eta * eta * max(0.0f, 1 - dot(n, w) * dot(n, w));
-    if (k < 0) return zero3f;  // tir
-    return -w * eta + (eta * dot(n, w) - sqrt(k)) * n;
-}
-
-// Picks a direction based on the BRDF
-inline tuple<vec3f, bool> sample_brdfcos(
-    const point& pt, float rnl, const vec2f& rn) {
-    // grab variables
-    auto& fr = pt.fr;
-    auto& wn = pt.frame.z;
-    auto& fp = pt.frame;
-    auto& wo = pt.wo;
-
-    // skip if no component
-    if (!fr) return {zero3f, false};
-
-    // probability of each lobe
-    auto kdw = max_element(fr.kd).second, ksw = max_element(fr.ks).second,
-         ktw = max_element(fr.kt).second;
-    auto kaw = kdw + ksw + ktw;
-    kdw /= kaw;
-    ksw /= kaw;
-    ktw /= kaw;
-
-    // sample selected lobe
-    switch (fr.type) {
-        // reflection term
-        case brdf_type::microfacet: {
-            // compute cosine
-            auto ndo = dot(wn, wo);
-
-            // check to make sure we are above the surface
-            if (ndo <= 0) return {zero3f, false};
-
-            // sample according to diffuse
-            if (rnl < kdw) {
-                // sample wi with hemispherical cosine distribution
-                auto rz = sqrtf(rn.y), rr = sqrtf(1 - rz * rz),
-                     rphi = 2 * pif * rn.x;
-                // set to wi
-                auto wi_local = vec3f{rr * cosf(rphi), rr * sinf(rphi), rz};
-                return {transform_direction(fp, wi_local), false};
-            }
-            // sample according to specular GGX
-            else if (rnl < kdw + ksw && fr.rs) {
-                // sample wh with ggx distribution
-                auto wh_local = sample_ggx(fr.rs, rn);
-                auto wh = transform_direction(fp, wh_local);
-                // compute wi
-                return {normalize(wh * 2.0f * dot(wo, wh) - wo), false};
-            }
-            // sample according to specular mirror
-            else if (rnl < kdw + ksw && !fr.rs) {
-                // compute wi
-                return {normalize(wn * 2.0f * dot(wo, wn) - wo), true};
-            }
-            // transmission hack
-            else if (rnl < kdw + ksw + ktw) {
-                // continue ray direction
-                return {-wo, true};
-            } else
-                assert(false);
-        } break;
-        // hair (Kajiya-Kay)
-        case brdf_type::kajiya_kay: {
-            // diffuse and specular
-            if (rnl < kdw + ksw) {
-                // sample wi with uniform spherical distribution
-                auto rz = 2 * rn.y - 1, rr = sqrtf(1 - rz * rz),
-                     rphi = 2 * pif * rn.x;
-                auto wi_local = vec3f{rr * cosf(rphi), rr * sinf(rphi), rz};
-                return {transform_direction(fp, wi_local), false};
-            }
-            // transmission hack
-            else if (rnl < kdw + ksw + ktw) {
-                // continue ray direction
-                return {-wo, true};
-            } else
-                assert(false);
-        } break;
-        // diffuse term point
-        case brdf_type::point: {
-            // diffuse and specular
-            if (rnl < kdw + ksw) {
-                // sample wi with uniform spherical distribution
-                auto rz = 2 * rn.y - 1, rr = sqrtf(1 - rz * rz),
-                     rphi = 2 * pif * rn.x;
-                auto wi_local = vec3f{rr * cosf(rphi), rr * sinf(rphi), rz};
-                return {transform_direction(fp, wi_local), false};
-            }
-            // transmission hack
-            else if (rnl < kdw + ksw + ktw) {
-                // continue ray direction
-                return {-wo, true};
-            } else
-                assert(false);
-        } break;
-        default: assert(false); break;
-    }
-
-    // done
-    return {zero3f, false};
-}
-
-// Create a point for an environment map. Resolves material with textures.
-inline point eval_envpoint(const environment* env, const vec3f& wo) {
-    // set shape data
-    auto pt = point();
-
-    // env
-    pt.env = env;
-
-    // direction
-    pt.wo = wo;
-
-    // maerial
-    auto ke = env->ke;
-    if (env->ke_txt) {
-        auto w = transform_direction_inverse(env->frame, -wo);
-        auto theta = acos(clamp(w.y, (float)-1, (float)1));
-        auto phi = atan2(w.z, w.x);
-        auto texcoord = vec2f{0.5f + phi / (2 * pif), theta / pif};
-        ke *= eval_texture(env->ke_txt, texcoord).xyz();
-    }
-
-    // create emission lobe
-    if (ke != zero3f) {
-        pt.em.type = emission_type::env;
-        pt.em.ke = ke;
-    }
-
-    // done
-    return pt;
-}
-
-// Make a default material
-inline material make_default_material() {
-    auto mat = material();
-    mat.kd = {0.2f, 0.2f, 0.2f};
-    mat.rs = 1;
-    return mat;
-}
-
-// Create a point for a shape. Resolves geometry and material with textures.
-inline point eval_shapepoint(
-    const instance* ist, int eid, const vec4f& euv, const vec3f& wo) {
-    // default material
-    static auto def_material = make_default_material();
-
-    // set shape data
-    auto pt = point();
-
-    // instance
-    pt.ist = ist;
-
-    // direction
-    pt.wo = wo;
-
-    // shortcuts
-    auto shp = ist->shp;
-    auto mat = ist->shp->mat;
-    if (!mat) mat = &def_material;
-
-    // compute points and weights
-    auto pos = eval_pos(ist->shp, eid, euv);
-    auto norm = eval_norm(ist->shp, eid, euv);
-    auto texcoord = eval_texcoord(ist->shp, eid, euv);
-    auto color = eval_color(ist->shp, eid, euv);
-
-    // handle normal map
-    if (mat->norm_txt) {
-        auto tangsp = eval_tangsp(ist->shp, eid, euv);
-        auto txt = eval_texture(mat->norm_txt, texcoord, false).xyz() * 2.0f -
-                   vec3f{1, 1, 1};
-        auto ntxt = normalize(vec3f{txt.x, -txt.y, txt.z});
-        auto frame =
-            make_frame3_fromzx({0, 0, 0}, norm, {tangsp.x, tangsp.y, tangsp.z});
-        frame.y *= tangsp.w;
-        norm = transform_direction(frame, ntxt);
-    }
-
-    // correct for double sided
-    if (mat->double_sided && dot(norm, wo) < 0) norm = -norm;
-
-    // creating frame
-    pt.frame = make_frame_fromz(transform_point(ist->frame, pos),
-        transform_direction(ist->frame, norm));
-
-    // handle color
-    auto kx_scale = vec4f{1, 1, 1, 1};
-    if (!shp->color.empty()) kx_scale *= color;
-
-    // handle occlusion
-    if (mat->occ_txt)
-        kx_scale.xyz() *= eval_texture(mat->occ_txt, texcoord).xyz();
-
-    // sample emission
-    auto ke = mat->ke * kx_scale.xyz();
-
-    // sample reflectance
-    auto kd = zero4f, ks = zero4f, kt = zero4f;
-    switch (mat->mtype) {
-        case material_type::specular_roughness: {
-            kd = vec4f{mat->kd, mat->op} * kx_scale *
-                 eval_texture(mat->kd_txt, texcoord);
-            ks = vec4f{mat->ks, mat->rs} * vec4f{kx_scale.xyz(), 1} *
-                 eval_texture(mat->ks_txt, texcoord);
-            kt = vec4f{mat->kt, mat->rs} * vec4f{kx_scale.xyz(), 1} *
-                 eval_texture(mat->kt_txt, texcoord);
-        } break;
-        case material_type::metallic_roughness: {
-            auto kb = vec4f{mat->kd, mat->op} * kx_scale *
-                      eval_texture(mat->kd_txt, texcoord);
-            auto km = vec2f{mat->ks.x, mat->rs};
-            if (mat->ks_txt) {
-                auto ks_txt = eval_texture(mat->ks_txt, texcoord);
-                km.x *= ks_txt.y;
-                km.y *= ks_txt.z;
-            }
-            kd = vec4f{kb.xyz() * (1 - km.x), kb.w};
-            ks =
-                vec4f{kb.xyz() * km.x + vec3f{0.04f, 0.04f, 0.04f} * (1 - km.x),
-                    km.y};
-        } break;
-        case material_type::specular_glossiness: {
-            kd = vec4f{mat->kd, mat->op} * kx_scale *
-                 eval_texture(mat->kd_txt, texcoord);
-            ks = vec4f{mat->ks, mat->rs} * vec4f{kx_scale.xyz(), 1} *
-                 eval_texture(mat->ks_txt, texcoord);
-            ks.w = 1 - ks.w;  // glossiness -> roughness
-        } break;
-    }
-
-    // set up final values
-    pt.em.ke = ke * kd.w;
-    pt.fr.kd = kd.xyz() * kd.w;
-    pt.fr.ks =
-        (ks.xyz() != zero3f && ks.w < 0.9999f) ? ks.xyz() * kd.w : zero3f;
-    pt.fr.rs = (ks.xyz() != zero3f && ks.w < 0.9999f) ? ks.w * ks.w : 0;
-    pt.fr.kt = {1 - kd.w, 1 - kd.w, 1 - kd.w};
-    if (kt.xyz() != zero3f) pt.fr.kt *= kt.xyz();
-
-    // setup brdf and emission
-    if (!shp->points.empty()) {
-        if (kd.xyz() != zero3f || ks.xyz() != zero3f || kt.xyz() != zero3f)
-            pt.fr.type = brdf_type::point;
-        if (ke != zero3f) pt.em.type = emission_type::point;
-    } else if (!shp->lines.empty()) {
-        if (kd.xyz() != zero3f || ks.xyz() != zero3f || kt.xyz() != zero3f)
-            pt.fr.type = brdf_type::kajiya_kay;
-        if (ke != zero3f) pt.em.type = emission_type::line;
-    } else if (!shp->triangles.empty()) {
-        if (kd.xyz() != zero3f || ks.xyz() != zero3f || kt.xyz() != zero3f)
-            pt.fr.type = brdf_type::microfacet;
-        if (ke != zero3f) pt.em.type = emission_type::diffuse;
-    }
-
-    // done
-    return pt;
-}
-
-// Sample weight for a light point.
-inline float weight_light(const point& lpt, const point& pt) {
-    if (!lpt.em) return 0;
-    // support only one lobe for now
-    switch (lpt.em.type) {
-        case emission_type::env: {
-            return 4 * pif;
-        } break;
-        case emission_type::point: {
-            auto d = length(lpt.frame.o - pt.frame.o);
-            return lpt.ist->shp->elem_cdf.back() / (d * d);
-        } break;
-        case emission_type::line: {
-            assert(false);
-            return 0;
-        } break;
-        case emission_type::diffuse: {
-            auto d = length(lpt.frame.o - pt.frame.o);
-            return lpt.ist->shp->elem_cdf.back() *
-                   abs(dot(lpt.frame.z, lpt.wo)) / (d * d);
-        } break;
-        default: {
-            assert(false);
-            return 0;
-        } break;
+// Subdivides shape elements.
+void subdivide_shape_once(shape* shp, bool subdiv) {
+    if (!shp->lines.empty() || !shp->triangles.empty() || !shp->quads.empty()) {
+        vector<vec2i> edges;
+        vector<vec4i> faces;
+        tie(shp->lines, shp->triangles, shp->quads, edges, faces) =
+            subdivide_elems_linear(
+                shp->lines, shp->triangles, shp->quads, (int)shp->pos.size());
+        shp->pos = subdivide_vert_linear(shp->pos, edges, faces);
+        shp->norm = subdivide_vert_linear(shp->norm, edges, faces);
+        shp->texcoord = subdivide_vert_linear(shp->texcoord, edges, faces);
+        shp->color = subdivide_vert_linear(shp->color, edges, faces);
+        shp->radius = subdivide_vert_linear(shp->radius, edges, faces);
+        if (subdiv && !shp->quads.empty()) {
+            auto boundary = get_boundary_edges({}, {}, shp->quads);
+            shp->pos =
+                subdivide_vert_catmullclark(shp->quads, shp->pos, boundary, {});
+            shp->norm = subdivide_vert_catmullclark(
+                shp->quads, shp->norm, boundary, {});
+            shp->texcoord = subdivide_vert_catmullclark(
+                shp->quads, shp->texcoord, boundary, {});
+            shp->color = subdivide_vert_catmullclark(
+                shp->quads, shp->color, boundary, {});
+            shp->radius = subdivide_vert_catmullclark(
+                shp->quads, shp->radius, boundary, {});
+            shp->norm = compute_normals({}, {}, shp->quads, shp->pos);
+        }
+    } else if (!shp->quads_pos.empty()) {
+        vector<vec2i> _lines;
+        vector<vec3i> _triangles;
+        vector<vec2i> edges;
+        vector<vec4i> faces;
+        tie(_lines, _triangles, shp->quads_pos, edges, faces) =
+            subdivide_elems_linear({}, {}, shp->quads_pos, shp->pos.size());
+        shp->pos = subdivide_vert_linear(shp->pos, edges, faces);
+        tie(_lines, _triangles, shp->quads_norm, edges, faces) =
+            subdivide_elems_linear({}, {}, shp->quads_norm, shp->norm.size());
+        shp->norm = subdivide_vert_linear(shp->norm, edges, faces);
+        tie(_lines, _triangles, shp->quads_texcoord, edges, faces) =
+            subdivide_elems_linear(
+                {}, {}, shp->quads_texcoord, shp->texcoord.size());
+        shp->texcoord = subdivide_vert_linear(shp->texcoord, edges, faces);
+        if (subdiv) {
+            shp->pos = subdivide_vert_catmullclark(shp->quads_pos, shp->pos,
+                get_boundary_edges({}, {}, shp->quads_pos), {});
+            shp->norm = subdivide_vert_catmullclark(shp->quads_norm, shp->norm,
+                get_boundary_edges({}, {}, shp->quads_norm), {});
+            shp->texcoord =
+                subdivide_vert_catmullclark(shp->quads_texcoord, shp->texcoord,
+                    {}, get_boundary_verts({}, {}, shp->quads_texcoord));
+        }
+    } else if (!shp->beziers.empty()) {
+        vector<int> verts;
+        vector<vec4i> segments;
+        tie(shp->beziers, verts, segments) =
+            subdivide_bezier_recursive(shp->beziers, (int)shp->pos.size());
+        shp->pos = subdivide_vert_bezier(shp->pos, verts, segments);
+        shp->norm = subdivide_vert_bezier(shp->norm, verts, segments);
+        shp->texcoord = subdivide_vert_bezier(shp->texcoord, verts, segments);
+        shp->color = subdivide_vert_bezier(shp->color, verts, segments);
+        shp->radius = subdivide_vert_bezier(shp->radius, verts, segments);
     }
 }
 
-// Picks a point on a light.
-inline point sample_light(
-    const light* lgt, const point& pt, float rne, const vec2f& rn) {
-    if (lgt->ist) {
-        auto shp = lgt->ist->shp;
+// Facet a shape. Supports only non-facevarying shapes
+void facet_shape(shape* shp, bool recompute_normals) {
+    if (!shp->lines.empty() || !shp->triangles.empty() || !shp->quads.empty()) {
+        vector<int> verts;
+        tie(shp->lines, shp->triangles, shp->quads, verts) =
+            facet_elems(shp->lines, shp->triangles, shp->quads);
+        shp->pos = facet_vert(shp->pos, verts);
+        shp->norm = facet_vert(shp->norm, verts);
+        shp->texcoord = facet_vert(shp->texcoord, verts);
+        shp->color = facet_vert(shp->color, verts);
+        shp->radius = facet_vert(shp->radius, verts);
+        if (recompute_normals) {
+            shp->norm = compute_normals(
+                shp->lines, shp->triangles, shp->quads, shp->pos);
+        }
+    }
+}
+
+// Tesselate a shape into basic primitives
+void tesselate_shape(shape* shp, bool subdivide,
+    bool facevarying_to_sharedvertex, bool quads_to_triangles,
+    bool bezier_to_lines) {
+    if (subdivide && shp->subdivision_level) {
+        for (auto l = 0; l < shp->subdivision_level; l++) {
+            subdivide_shape_once(shp, shp->subdivision_catmullclark);
+        }
+    }
+    if (facevarying_to_sharedvertex && !shp->quads_pos.empty()) {
+        std::tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
+            convert_face_varying(shp->quads_pos, shp->quads_norm,
+                shp->quads_texcoord, shp->pos, shp->norm, shp->texcoord);
+        shp->quads_pos = {};
+        shp->quads_norm = {};
+        shp->quads_texcoord = {};
+    }
+    if (quads_to_triangles && !shp->quads.empty()) {
+        shp->triangles = convert_quads_to_triangles(shp->quads);
+        shp->quads = {};
+    }
+    if (bezier_to_lines && !shp->beziers.empty()) {
+        shp->lines = convert_bezier_to_lines(shp->beziers);
+        shp->beziers = {};
+    }
+}
+
+// Tesselate scene shapes and update pointers
+void tesselate_shapes(scene* scn, bool subdivide,
+    bool facevarying_to_sharedvertex, bool quads_to_triangles,
+    bool bezier_to_lines) {
+    for (auto sgr : scn->shapes) {
+        for (auto shp : sgr->shapes) {
+            tesselate_shape(shp, subdivide, facevarying_to_sharedvertex,
+                quads_to_triangles, bezier_to_lines);
+        }
+    }
+}
+
+// Update animation transforms
+void update_transforms(animation_group* agr, float time) {
+    auto interpolate = [](keyframe_type type, const vector<float>& times,
+                           const auto& vals, float time) {
+        switch (type) {
+            case keyframe_type::step:
+                return eval_keyframed_step(times, vals, time);
+            case keyframe_type::linear:
+                return eval_keyframed_linear(times, vals, time);
+            case keyframe_type::catmull_rom: return vals.at(0);
+            case keyframe_type::bezier:
+                return eval_keyframed_bezier(times, vals, time);
+            default: throw runtime_error("should not have been here");
+        }
+        return vals.at(0);
+    };
+
+    for (auto anm : agr->animations) {
+        if (!anm->translation.empty()) {
+            auto val =
+                interpolate(anm->type, anm->times, anm->translation, time);
+            for (auto target : agr->targets)
+                if (target.first == anm) target.second->translation = val;
+        }
+        if (!anm->rotation.empty()) {
+            auto val = interpolate(anm->type, anm->times, anm->rotation, time);
+            for (auto target : agr->targets)
+                if (target.first == anm) target.second->rotation = val;
+        }
+        if (!anm->scaling.empty()) {
+            auto val = interpolate(anm->type, anm->times, anm->scaling, time);
+            for (auto target : agr->targets)
+                if (target.first == anm) target.second->scaling = val;
+        }
+    }
+}
+
+// Update node transforms
+void update_transforms(node* nde, const frame3f& parent = identity_frame3f) {
+    auto frame = parent * nde->frame * translation_frame3(nde->translation) *
+                 rotation_frame3(nde->rotation) * scaling_frame3(nde->scaling);
+    if (nde->ist) nde->ist->frame = frame;
+    if (nde->cam) nde->cam->frame = frame;
+    if (nde->env) nde->env->frame = frame;
+    for (auto child : nde->children_) update_transforms(child, frame);
+}
+
+// Update node transforms
+void update_transforms(scene* scn, float time) {
+    for (auto agr : scn->animations) update_transforms(agr, time);
+    for (auto nde : scn->nodes) nde->children_.clear();
+    for (auto nde : scn->nodes)
+        if (nde->parent) nde->parent->children_.push_back(nde);
+    for (auto nde : scn->nodes)
+        if (!nde->parent) update_transforms(nde);
+}
+
+// Compute animation range
+vec2f compute_animation_range(const scene* scn) {
+    if (scn->animations.empty()) return zero2f;
+    auto range = vec2f{+flt_max, -flt_max};
+    for (auto agr : scn->animations) {
+        for (auto anm : agr->animations) {
+            range.x = min(range.x, anm->times.front());
+            range.y = max(range.y, anm->times.back());
+        }
+    }
+    return range;
+}
+
+// Add missing values and elements
+void add_elements(scene* scn, const add_elements_options& opts) {
+    if (opts.smooth_normals) {
+        for (auto sgr : scn->shapes) {
+            for (auto shp : sgr->shapes) {
+                if (!shp->norm.empty()) continue;
+                shp->norm.resize(shp->pos.size(), {0, 0, 1});
+                if (!shp->lines.empty() || !shp->triangles.empty() ||
+                    !shp->quads.empty()) {
+                    shp->norm = compute_normals(
+                        shp->lines, shp->triangles, shp->quads, shp->pos);
+                }
+                if (!shp->quads_pos.empty()) {
+                    if (!shp->quads_norm.empty())
+                        throw runtime_error("bad normals");
+                    shp->quads_norm = shp->quads_pos;
+                    shp->norm =
+                        compute_normals({}, {}, shp->quads_pos, shp->pos);
+                }
+            }
+        }
+    }
+
+    if (opts.tangent_space) {
+        for (auto sgr : scn->shapes) {
+            for (auto shp : sgr->shapes) {
+                if (!shp->tangsp.empty()) continue;
+                if (shp->texcoord.empty()) continue;
+                if (!shp->mat) continue;
+                if (!(shp->mat->norm_txt.txt || shp->mat->bump_txt.txt))
+                    continue;
+                if (!shp->triangles.empty()) {
+                    shp->tangsp = compute_tangent_frames(
+                        shp->triangles, shp->pos, shp->norm, shp->texcoord);
+                } else if (!shp->quads.empty()) {
+                    auto triangles = convert_quads_to_triangles(shp->quads);
+                    shp->tangsp = compute_tangent_frames(
+                        triangles, shp->pos, shp->norm, shp->texcoord);
+                }
+            }
+        }
+    }
+
+    if (opts.texture_data) {
+        for (auto txt : scn->textures) {
+            if (!txt->hdr && !txt->ldr) {
+                printf("unable to load texture %s\n", txt->path.c_str());
+                txt->ldr = image4b(1, 1, {255, 255, 255, 255});
+            }
+        }
+    }
+
+    if (opts.shape_instances) {
+        if (!scn->instances.empty()) return;
+        for (auto shp : scn->shapes) {
+            auto ist = new instance();
+            ist->name = shp->name;
+            ist->shp = shp;
+            scn->instances.push_back(ist);
+        }
+    }
+
+    if (opts.default_names || opts.default_paths) {
+        auto cid = 0;
+        for (auto cam : scn->cameras) {
+            if (cam->name.empty())
+                cam->name = "unnamed_camera_" + std::to_string(cid);
+            cid++;
+        }
+
+        auto tid = 0;
+        for (auto txt : scn->textures) {
+            if (txt->name.empty())
+                txt->name = "unnamed_texture_" + std::to_string(tid);
+            tid++;
+        }
+
+        auto mid = 0;
+        for (auto mat : scn->materials) {
+            if (mat->name.empty())
+                mat->name = "unnamed_material_" + std::to_string(mid);
+            mid++;
+        }
+
+        auto sid = 0;
+        for (auto shp : scn->shapes) {
+            if (shp->name.empty())
+                shp->name = "unnamed_shape_" + std::to_string(sid);
+            sid++;
+        }
+
+        auto iid = 0;
+        for (auto ist : scn->instances) {
+            if (ist->name.empty())
+                ist->name = "unnamed_instance_" + std::to_string(iid);
+            iid++;
+        }
+
         auto eid = 0;
-        auto euv = zero4f;
-        if (!shp->triangles.empty()) {
-            std::tie(eid, (vec3f&)euv) =
-                sample_triangles(shp->elem_cdf, rne, rn);
-        } else if (!shp->quads.empty()) {
-            std::tie(eid, (vec4f&)euv) = sample_quads(shp->elem_cdf, rne, rn);
-        } else if (!shp->lines.empty()) {
-            std::tie(eid, (vec2f&)euv) = sample_lines(shp->elem_cdf, rne, rn.x);
-        } else if (!shp->points.empty()) {
-            eid = sample_points(shp->elem_cdf, rne);
-            euv = {1, 0, 0, 0};
-        } else {
-            assert(false);
+        for (auto env : scn->environments) {
+            if (env->name.empty())
+                env->name = "unnamed_environment_" + std::to_string(eid);
+            eid++;
         }
-        auto lpt = eval_shapepoint(lgt->ist, eid, euv, zero3f);
-        lpt.wo = normalize(pt.frame.o - lpt.frame.o);
-        return lpt;
-    } else if (lgt->env) {
-        auto z = -1 + 2 * rn.y;
-        auto rr = sqrt(clamp(1 - z * z, (float)0, (float)1));
-        auto phi = 2 * pif * rn.x;
-        auto wo = vec3f{cos(phi) * rr, z, sin(phi) * rr};
-        auto lpt = eval_envpoint(lgt->env, wo);
-        return lpt;
+    }
+
+    if (opts.default_paths) {
+        for (auto txt : scn->textures) {
+            if (txt->path != "") continue;
+            txt->path = txt->name + ".png";
+        }
+        for (auto shp : scn->shapes) {
+            if (shp->path != "") continue;
+            shp->path = shp->name + ".bin";
+        }
+        for (auto anm : scn->animations) {
+            if (anm->path != "") continue;
+            anm->path = anm->name + ".bin";
+        }
+    }
+}
+
+// Make a view camera either copying a given one or building a default one.
+camera* make_view_camera(const scene* scn, int camera_id) {
+    if (scn->cameras.empty()) {
+        auto bbox = compute_bounds(scn);
+        auto bbox_center = (bbox.max + bbox.min) / 2.0f;
+        auto bbox_size = bbox.max - bbox.min;
+        auto bbox_msize = max(bbox_size[0], max(bbox_size[1], bbox_size[2]));
+        // set up camera
+        auto cam = new camera();
+        cam->name = "default_camera";
+        auto camera_dir = vec3f{1, 0.4f, 1};
+        auto from = camera_dir * bbox_msize + bbox_center;
+        auto to = bbox_center;
+        auto up = vec3f{0, 1, 0};
+        cam->frame = lookat_frame3(from, to, up);
+        cam->ortho = false;
+        cam->aspect = 16.0f / 9.0f;
+        cam->yfov = 2 * atanf(0.5f);
+        cam->aperture = 0;
+        cam->focus = length(to - from);
+        return cam;
     } else {
-        assert(false);
-        return {};
+        camera_id = clamp(camera_id, 0, (int)scn->cameras.size());
+        return new camera(*scn->cameras[camera_id]);
     }
 }
 
-// Offsets a ray origin to avoid self-intersection.
-inline ray3f offset_ray(
-    const point& pt, const vec3f& w, const trace_params& params) {
-    if (dot(w, pt.frame.z) > 0) {
-        return ray3f(
-            pt.frame.o + pt.frame.z * params.ray_eps, w, params.ray_eps);
+// Merge scene into one another
+void merge_into(scene* merge_into, scene* merge_from) {
+    merge_into->cameras.insert(merge_from->cameras.begin(),
+        merge_from->cameras.end(), merge_into->cameras.end());
+    merge_from->cameras.clear();
+    merge_into->textures.insert(merge_from->textures.begin(),
+        merge_from->textures.end(), merge_into->textures.end());
+    merge_from->textures.clear();
+    merge_into->materials.insert(merge_from->materials.begin(),
+        merge_from->materials.end(), merge_into->materials.end());
+    merge_from->materials.clear();
+    merge_into->shapes.insert(merge_from->shapes.begin(),
+        merge_from->shapes.end(), merge_into->shapes.end());
+    merge_from->shapes.clear();
+    merge_into->instances.insert(merge_from->instances.begin(),
+        merge_from->instances.end(), merge_into->instances.end());
+    merge_from->instances.clear();
+    merge_into->environments.insert(merge_from->environments.begin(),
+        merge_from->environments.end(), merge_into->environments.end());
+    merge_from->environments.clear();
+}
+
+// Computes a shape bounding box (quick computation that ignores radius)
+bbox3f compute_bounds(const shape* shp) {
+    auto bbox = invalid_bbox3f;
+    for (auto p : shp->pos) bbox += vec3f(p);
+    return bbox;
+}
+
+// Updates the scene and scene's instances bounding boxes
+bbox3f compute_bounds(const scene* scn) {
+    auto shape_bboxes = unordered_map<shape_group*, bbox3f>();
+    for (auto sgr : scn->shapes) {
+        shape_bboxes[sgr] = invalid_bbox3f;
+        for (auto shp : sgr->shapes) shape_bboxes[sgr] += compute_bounds(shp);
+    }
+    auto bbox = invalid_bbox3f;
+    if (!scn->instances.empty()) {
+        for (auto ist : scn->instances)
+            bbox += transform_bbox(ist->frame, shape_bboxes.at(ist->shp));
+
     } else {
-        return ray3f(
-            pt.frame.o - pt.frame.z * params.ray_eps, w, params.ray_eps);
+        for (auto shp : scn->shapes) bbox += shape_bboxes.at(shp);
     }
+    return bbox;
 }
 
-// Offsets a ray origin to avoid self-intersection.
-inline ray3f offset_ray(
-    const point& pt, const point& pt2, const trace_params& params) {
-    auto ray_dist = (!pt2.env) ? length(pt.frame.o - pt2.frame.o) : flt_max;
-    if (dot(-pt2.wo, pt.frame.z) > 0) {
-        return ray3f(pt.frame.o + pt.frame.z * params.ray_eps, -pt2.wo,
-            params.ray_eps, ray_dist - 2 * params.ray_eps);
-    } else {
-        return ray3f(pt.frame.o - pt.frame.z * params.ray_eps, -pt2.wo,
-            params.ray_eps, ray_dist - 2 * params.ray_eps);
-    }
-}
-
-// Intersects a ray with the scn and return the point (or env
-// point).
-inline point intersect_scene(const scene* scn, const ray3f& ray) {
-    auto iid = 0, eid = 0;
-    auto euv = zero4f;
-    auto ray_t = 0.0f;
-    if (intersect_ray(scn, ray, false, ray_t, iid, eid, euv)) {
-        return eval_shapepoint(scn->instances[iid], eid, euv, -ray.d);
-    } else if (!scn->environments.empty()) {
-        return eval_envpoint(scn->environments[0], -ray.d);
-    } else {
-        return {};
-    }
-}
-
-// Test occlusion
-inline vec3f eval_transmission(const scene* scn, const point& pt,
-    const point& lpt, const trace_params& params) {
-    if (params.shadow_notransmission) {
-        auto shadow_ray = offset_ray(pt, lpt, params);
-        // auto shadow_ray = ray3f{pt.frame.o, -lpt.wo, 0.01f, flt_max};
-        return (intersect_ray(scn, shadow_ray, true)) ? zero3f : vec3f{1, 1, 1};
-    } else {
-        auto cpt = pt;
-        auto weight = vec3f{1, 1, 1};
-        for (auto bounce = 0; bounce < params.max_depth; bounce++) {
-            cpt = intersect_scene(scn, offset_ray(cpt, lpt, params));
-            if (!cpt.ist) break;
-            weight *= cpt.fr.kt;
-            if (weight == zero3f) break;
+// Flatten scene instances into separate meshes.
+void flatten_instances(scene* scn) {
+    if (scn->instances.empty()) return;
+    auto shapes = scn->shapes;
+    scn->shapes.clear();
+    auto instances = scn->instances;
+    scn->instances.clear();
+    for (auto ist : instances) {
+        if (!ist->shp) continue;
+        auto nsgr = new shape_group();
+        nsgr->name = ist->shp->name;
+        nsgr->path = "";
+        for (auto shp : ist->shp->shapes) {
+            auto nshp = new shape(*shp);
+            for (auto& p : nshp->pos) p = transform_point(ist->frame, p);
+            for (auto& n : nshp->norm) n = transform_direction(ist->frame, n);
+            nsgr->shapes.push_back(nshp);
         }
-        return weight;
+        scn->shapes.push_back(nsgr);
     }
+    for (auto e : shapes) delete e;
+    for (auto e : instances) delete e;
+    for (auto e : scn->nodes) delete e;
+    scn->nodes.clear();
+    for (auto e : scn->animations) delete e;
+    scn->animations.clear();
 }
 
-// Mis weight
-inline float weight_mis(float w0, float w1) {
-    if (!w0 || !w1) return 1;
-    return (1 / w0) / (1 / w0 + 1 / w1);
+// Build a shape BVH
+bvh_tree* make_bvh(const shape* shp, float def_radius, bool equalsize) {
+    return make_bvh(shp->points, shp->lines, shp->triangles, shp->quads,
+        shp->pos, shp->radius, def_radius, equalsize);
 }
 
-// Recursive path tracing.
-inline vec3f eval_li_pathtrace(const scene* scn, const ray3f& ray, sampler& smp,
-    const trace_params& params, bool& hit) {
-    // intersection
-    auto pt = intersect_scene(scn, ray);
-    hit = pt.ist;
-
-    // emission
-    auto l = eval_emission(pt);
-    if (!pt.fr || scn->lights.empty()) return l;
-
-    // trace path
-    auto weight = vec3f{1, 1, 1};
-    auto emission = false;
-    for (auto bounce = 0; bounce < params.max_depth; bounce++) {
-        // emission
-        if (emission) l += weight * eval_emission(pt);
-
-        // direct – light
-        auto lgt = scn->lights[sample_next1i(smp, (int)scn->lights.size())];
-        auto lpt =
-            sample_light(lgt, pt, sample_next1f(smp), sample_next2f(smp));
-        auto lw = weight_light(lpt, pt) * (float)scn->lights.size();
-        auto lke = eval_emission(lpt);
-        auto lbc = eval_brdfcos(pt, -lpt.wo);
-        auto lld = lke * lbc * lw;
-        if (lld != zero3f) {
-            l += weight * lld * eval_transmission(scn, pt, lpt, params) *
-                 weight_mis(lw, weight_brdfcos(pt, -lpt.wo));
+// Build a scene BVH
+bvh_tree* make_bvh(const scene* scn, float def_radius, bool equalsize) {
+    // do shapes
+    auto shape_bvhs = vector<bvh_tree*>();
+    auto smap = unordered_map<shape*, bvh_tree*>();
+    for (auto sgr : scn->shapes) {
+        for (auto shp : sgr->shapes) {
+            shape_bvhs.push_back(make_bvh(shp, def_radius, equalsize));
+            smap[shp] = shape_bvhs.back();
         }
+    }
 
-        // direct – brdf
-        auto bwi = zero3f;
-        auto bdelta = false;
-        std::tie(bwi, bdelta) =
-            sample_brdfcos(pt, sample_next1f(smp), sample_next2f(smp));
-        auto bpt = intersect_scene(scn, offset_ray(pt, bwi, params));
-        auto bw = weight_brdfcos(pt, -bpt.wo, bdelta);
-        auto bke = eval_emission(bpt);
-        auto bbc = eval_brdfcos(pt, -bpt.wo, bdelta);
-        auto bld = bke * bbc * bw;
-        if (bld != zero3f) {
-            l += weight * bld * weight_mis(bw, weight_light(bpt, pt));
+    // tree bvh
+    auto bists = vector<bvh_instance>();
+    for (auto iid = 0; iid < scn->instances.size(); iid++) {
+        auto ist = scn->instances[iid];
+        for (auto sid = 0; sid < ist->shp->shapes.size(); sid++) {
+            auto bist = bvh_instance();
+            bist.frame = ist->frame;
+            bist.frame_inv = inverse(ist->frame);
+            bist.iid = iid;
+            bist.sid = sid;
+            bist.bvh = smap.at(ist->shp->shapes.at(sid));
+            bists.push_back(bist);
         }
-
-        // skip recursion if path ends
-        if (bounce == params.max_depth - 1) break;
-        if (!bpt.fr) break;
-
-        // continue path
-        weight *= eval_brdfcos(pt, -bpt.wo) * weight_brdfcos(pt, -bpt.wo);
-        if (weight == zero3f) break;
-
-        // roussian roulette
-        if (bounce > 2) {
-            auto rrprob = 1.0f - min(max_element(pt.fr.rho()).second, 0.95f);
-            if (sample_next1f(smp) < rrprob) break;
-            weight *= 1 / (1 - rrprob);
-        }
-
-        // continue path
-        pt = bpt;
-        emission = false;
     }
-
-    return l;
+    return make_bvh(bists, shape_bvhs, true, equalsize);
 }
 
-// Recursive path tracing.
-inline vec3f eval_li_pathtrace_nomis(const scene* scn, const ray3f& ray,
-    sampler& smp, const trace_params& params, bool& hit) {
-    // intersection
-    auto pt = intersect_scene(scn, ray);
-    hit = pt.ist;
-
-    // emission
-    auto l = eval_emission(pt);
-    if (!pt.fr) return l;
-
-    // trace path
-    auto weight = vec3f{1, 1, 1};
-    auto emission = false;
-    for (auto bounce = 0; bounce < params.max_depth; bounce++) {
-        // emission
-        if (emission) l += weight * eval_emission(pt);
-
-        // direct
-        auto lgt = scn->lights[sample_next1i(smp, (int)scn->lights.size())];
-        auto lpt =
-            sample_light(lgt, pt, sample_next1f(smp), sample_next2f(smp));
-        auto ld = eval_emission(lpt) * eval_brdfcos(pt, -lpt.wo) *
-                  weight_light(lpt, pt) * (float)scn->lights.size();
-        if (ld != zero3f) {
-            l += weight * ld * eval_transmission(scn, pt, lpt, params);
-        }
-
-        // skip recursion if path ends
-        if (bounce == params.max_depth - 1) break;
-
-        // roussian roulette
-        if (bounce > 2) {
-            auto rrprob = 1.0f - min(max_element(pt.fr.rho()).second, 0.95f);
-            if (sample_next1f(smp) < rrprob) break;
-            weight *= 1 / (1 - rrprob);
-        }
-
-        // continue path
-        auto bwi = zero3f;
-        auto bdelta = false;
-        std::tie(bwi, bdelta) =
-            sample_brdfcos(pt, sample_next1f(smp), sample_next2f(smp));
-        weight *=
-            eval_brdfcos(pt, bwi, bdelta) * weight_brdfcos(pt, bwi, bdelta);
-        if (weight == zero3f) break;
-
-        auto bpt = intersect_scene(scn, offset_ray(pt, bwi, params));
-        emission = false;
-        if (!bpt.fr) break;
-
-        // continue path
-        pt = bpt;
-    }
-
-    return l;
+// Refits a scene BVH
+void refit_bvh(bvh_tree* bvh, const shape* shp, float def_radius) {
+    refit_bvh(bvh, shp->pos, shp->radius, def_radius);
 }
 
-// Recursive path tracing.
-inline vec3f eval_li_pathtrace_hack(const scene* scn, const ray3f& ray,
-    sampler& smp, const trace_params& params, bool& hit) {
-    // intersection
-    auto pt = intersect_scene(scn, ray);
-    hit = pt.ist;
-
-    // emission
-    auto l = eval_emission(pt);
-    if (!pt.fr || scn->lights.empty()) return l;
-
-    // trace path
-    auto weight = vec3f{1, 1, 1};
-    for (auto bounce = 0; bounce < params.max_depth; bounce++) {
-        // direct
-        auto lgt = scn->lights[sample_next1i(smp, (int)scn->lights.size())];
-        auto lpt =
-            sample_light(lgt, pt, sample_next1f(smp), sample_next2f(smp));
-        auto ld = eval_emission(lpt) * eval_brdfcos(pt, -lpt.wo) *
-                  weight_light(lpt, pt) * (float)scn->lights.size();
-        if (ld != zero3f) {
-            l += weight * ld * eval_transmission(scn, pt, lpt, params);
-        }
-
-        // skip recursion if path ends
-        if (bounce == params.max_depth - 1) break;
-
-        // roussian roulette
-        if (bounce > 2) {
-            auto rrprob = 1.0f - min(max_element(pt.fr.rho()).second, 0.95f);
-            if (sample_next1f(smp) < rrprob) break;
-            weight *= 1 / (1 - rrprob);
-        }
-
-        // continue path
-        auto bwi = zero3f;
-        auto bdelta = false;
-        std::tie(bwi, bdelta) =
-            sample_brdfcos(pt, sample_next1f(smp), sample_next2f(smp));
-        weight *=
-            eval_brdfcos(pt, bwi, bdelta) * weight_brdfcos(pt, bwi, bdelta);
-        if (weight == zero3f) break;
-
-        auto bpt = intersect_scene(scn, offset_ray(pt, bwi, params));
-        if (!bpt.fr) break;
-
-        // continue path
-        pt = bpt;
-    }
-
-    return l;
-}
-
-// Direct illumination.
-inline vec3f eval_li_direct(const scene* scn, const ray3f& ray, int bounce,
-    sampler& smp, const trace_params& params, bool& hit) {
-    // intersection
-    auto pt = intersect_scene(scn, ray);
-    if (!bounce) hit = pt.ist;
-
-    // emission
-    auto l = eval_emission(pt);
-    if (!pt.fr || scn->lights.empty()) return l;
-
-    // ambient
-    l += params.ambient * pt.fr.rho();
-
-    // direct
-    for (auto& lgt : scn->lights) {
-        auto lpt =
-            sample_light(lgt, pt, sample_next1f(smp), sample_next2f(smp));
-        auto ld = eval_emission(lpt) * eval_brdfcos(pt, -lpt.wo) *
-                  weight_light(lpt, pt);
-        if (ld == zero3f) continue;
-        l += ld * eval_transmission(scn, pt, lpt, params);
-    }
-
-    // exit if needed
-    if (bounce >= params.max_depth) return l;
-
-    // reflection
-    if (pt.fr.ks != zero3f && !pt.fr.rs) {
-        auto wi = reflect(pt.wo, pt.frame.z);
-        auto ray = offset_ray(pt, wi, params);
-        l += pt.fr.ks * eval_li_direct(scn, ray, bounce + 1, smp, params, hit);
-    }
-
-    // opacity
-    if (pt.fr.kt != zero3f) {
-        auto ray = offset_ray(pt, -pt.wo, params);
-        l += pt.fr.kt * eval_li_direct(scn, ray, bounce + 1, smp, params, hit);
-    }
-
-    // done
-    return l;
-}
-
-// Direct illumination.
-inline vec3f eval_li_direct(const scene* scn, const ray3f& ray, sampler& smp,
-    const trace_params& params, bool& hit) {
-    return eval_li_direct(scn, ray, 0, smp, params, hit);
-}
-
-// Eyelight for quick previewing.
-inline vec3f eval_li_eyelight(const scene* scn, const ray3f& ray, int bounce,
-    sampler& smp, const trace_params& params, bool& hit) {
-    // intersection
-    auto pt = intersect_scene(scn, ray);
-    if (!bounce) hit = pt.ist;
-
-    // emission
-    auto l = eval_emission(pt);
-    if (!pt.fr) return l;
-
-    // brdf*light
-    l += eval_brdfcos(pt, pt.wo) * pif;
-
-    // opacity
-    if (bounce >= params.max_depth) return l;
-    if (pt.fr.kt != zero3f) {
-        auto ray = offset_ray(pt, -pt.wo, params);
-        l +=
-            pt.fr.kt * eval_li_eyelight(scn, ray, bounce + 1, smp, params, hit);
-    }
-
-    // done
-    return l;
-}
-
-// Eyelight for quick previewing.
-inline vec3f eval_li_eyelight(const scene* scn, const ray3f& ray, sampler& smp,
-    const trace_params& params, bool& hit) {
-    return eval_li_eyelight(scn, ray, 0, smp, params, hit);
-}
-
-// Debug previewing.
-inline vec3f eval_li_debug_normal(const scene* scn, const ray3f& ray,
-    sampler& smp, const trace_params& params, bool& hit) {
-    // intersection
-    auto isec = intersect_ray(scn, ray, false);
-    hit = (bool)isec;
-    if (!hit) return {0, 0, 0};
-
-    // texcoord
-    auto norm = eval_norm(scn->instances[isec.iid], isec.eid, isec.euv);
-    return norm * 0.5f + vec3f{0.5f, 0.5f, 0.5f};
-}
-
-// Debug previewing.
-inline vec3f eval_li_debug_albedo(const scene* scn, const ray3f& ray,
-    sampler& smp, const trace_params& params, bool& hit) {
-    // intersection
-    auto pt = intersect_scene(scn, ray);
-    hit = pt.ist;
-
-    return pt.fr.rho();
-}
-
-// Debug previewing.
-inline vec3f eval_li_debug_texcoord(const scene* scn, const ray3f& ray,
-    sampler& smp, const trace_params& params, bool& hit) {
-    // intersection
-    auto isec = intersect_ray(scn, ray, false);
-    hit = (bool)isec;
-    if (!hit) return {0, 0, 0};
-
-    // texcoord
-    auto texcoord =
-        eval_texcoord(scn->instances[isec.iid]->shp, isec.eid, isec.euv);
-    return {texcoord.x, texcoord.y, 0};
-}
-
-// Shader function callback.
-using eval_li_fn = vec3f (*)(const scene* scn, const ray3f& ray, sampler& smp,
-    const trace_params& params, bool& hit);
-
-// Get a shader function
-inline eval_li_fn get_shader(const trace_params& params) {
-    switch (params.stype) {
-        case trace_shader_type::eyelight: return eval_li_eyelight;
-        case trace_shader_type::direct: return eval_li_direct;
-        case trace_shader_type::pathtrace: return eval_li_pathtrace;
-        case trace_shader_type::pathtrace_nomis: return eval_li_pathtrace_nomis;
-        case trace_shader_type::debug_albedo: return eval_li_debug_albedo;
-        case trace_shader_type::debug_normal: return eval_li_debug_normal;
-        case trace_shader_type::debug_texcoord: return eval_li_debug_texcoord;
-        default: return nullptr;
-    }
-}
-
-// triangle filter (public domain from stb_image_resize)
-inline float filter_triangle(float x) {
-    x = (float)fabs(x);
-    if (x <= 1.0f) return 1 - x;
-    return 0;
-}
-
-// cubic filter (public domain from stb_image_resize)
-inline float filter_cubic(float x) {
-    x = (float)fabs(x);
-    if (x < 1.0f) return (4 + x * x * (3 * x - 6)) / 6;
-    if (x < 2.0f) return (8 + x * (-12 + x * (6 - x))) / 6;
-    return 0.0f;
-}
-
-// catmull-rom filter (public domain from stb_image_resize)
-inline float filter_catmullrom(float x) {
-    x = (float)fabs(x);
-    if (x < 1.0f) return 1 - x * x * (2.5f - 1.5f * x);
-    if (x < 2.0f) return 2 - x * (4 + x * (0.5f * x - 2.5f));
-    return 0.0f;
-}
-
-// mitchell filter (public domain from stb_image_resize)
-inline float filter_mitchell(float x) {
-    x = (float)fabs(x);
-    if (x < 1.0f) return (16 + x * x * (21 * x - 36)) / 18;
-    if (x < 2.0f) return (32 + x * (-60 + x * (36 - 7 * x))) / 18;
-    return 0.0f;
-}
-
-// filter function
-using filter_fn = float (*)(float);
-
-// Get a filter function
-inline filter_fn get_filter(const trace_params& params) {
-    switch (params.ftype) {
-        case trace_filter_type::box: return nullptr;
-        case trace_filter_type::triangle: return filter_triangle;
-        case trace_filter_type::cubic: return filter_cubic;
-        case trace_filter_type::catmull_rom: return filter_catmullrom;
-        case trace_filter_type::mitchell: return filter_mitchell;
-        default: return nullptr;
-    }
-}
-
-// Get a filter size
-inline int get_filter_size(const trace_params& params) {
-    switch (params.ftype) {
-        case trace_filter_type::box: return 0;
-        case trace_filter_type::triangle: return 1;
-        case trace_filter_type::cubic:
-        case trace_filter_type::catmull_rom:
-        case trace_filter_type::mitchell: return 2;
-        default: return 0;
-    }
-}
-
-// Renders a block of pixels. Public API, see above.
-inline void trace_block(const scene* scn, image4f& img, int block_x,
-    int block_y, int block_width, int block_height, int samples_min,
-    int samples_max, vector<rng_pcg32>& rngs, const trace_params& params) {
-    auto cam = scn->cameras[params.camera_id];
-    auto shade = get_shader(params);
-    for (auto j = block_y; j < block_y + block_height; j++) {
-        for (auto i = block_x; i < block_x + block_width; i++) {
-            auto lp = zero4f;
-            for (auto s = samples_min; s < samples_max; s++) {
-                auto smp = make_sampler(rngs[j * params.width + i], i, j, s,
-                    params.nsamples, params.rtype);
-                auto rn = sample_next2f(smp);
-                auto uv = vec2f{
-                    (i + rn.x) / params.width, 1 - (j + rn.y) / params.height};
-                auto ray = eval_camera(cam, uv, sample_next2f(smp));
-                auto hit = false;
-                auto l = shade(scn, ray, smp, params, hit);
-                if (!hit && params.envmap_invisible) continue;
-                if (!isfinite(l.x) || !isfinite(l.y) || !isfinite(l.z)) {
-                    log_error("NaN detected");
-                    continue;
-                }
-                if (params.pixel_clamp > 0) l = clamplen(l, params.pixel_clamp);
-                lp += {l, 1};
-            }
-            if (samples_min) {
-                img[{i, j}] = (img[{i, j}] * (float)samples_min + lp) /
-                              (float)samples_max;
-            } else {
-                img[{i, j}] = lp / (float)samples_max;
+// Refits a scene BVH
+void refit_bvh(
+    bvh_tree* bvh, const scene* scn, bool do_shapes, float def_radius) {
+    if (do_shapes) {
+        auto sid = 0;
+        for (auto sgr : scn->shapes) {
+            for (auto shp : sgr->shapes) {
+                refit_bvh(get_shape_bvhs(bvh).at(sid), shp->pos, shp->radius,
+                    def_radius);
+                sid++;
             }
         }
     }
-}
-
-// Trace a block of samples
-inline void trace_block(const scene* scn, image4f& img, const vec2i& block_min,
-    const vec2i& block_max, int samples_min, int samples_max,
-    vector<rng_pcg32>& rngs, const trace_params& params) {
-    auto shade = get_shader(params);
-    auto cam = scn->cameras[params.camera_id];
-    for (auto j = block_min.y; j < block_max.y; j++) {
-        for (auto i = block_min.x; i < block_max.x; i++) {
-            auto lp = zero4f;
-            for (auto s = samples_min; s < samples_max; s++) {
-                auto smp = make_sampler(rngs[j * params.width + i], i, j, s,
-                    params.nsamples, params.rtype);
-                auto rn = sample_next2f(smp);
-                auto uv = vec2f{
-                    (i + rn.x) / params.width, 1 - (j + rn.y) / params.height};
-                auto ray = eval_camera(cam, uv, sample_next2f(smp));
-                bool hit = false;
-                auto l = shade(scn, ray, smp, params, hit);
-                if (!hit && params.envmap_invisible) continue;
-                if (!isfinite(l.x) || !isfinite(l.y) || !isfinite(l.z)) {
-                    log_error("NaN detected");
-                    continue;
-                }
-                if (params.pixel_clamp > 0) l = clamplen(l, params.pixel_clamp);
-                lp += {l, 1};
-            }
-            if (samples_min) {
-                img[{i, j}] = (img[{i, j}] * (float)samples_min + lp) /
-                              (float)samples_max;
-            } else {
-                img[{i, j}] = lp / (float)samples_max;
-            }
-        }
+    auto ist_frames = vector<frame3f>();
+    auto ist_frames_inv = vector<frame3f>();
+    for (auto ist : scn->instances) {
+        ist_frames.push_back(ist->frame);
+        ist_frames_inv.push_back(inverse(ist->frame));
     }
+    refit_bvh(bvh, ist_frames, ist_frames_inv);
 }
 
-// Trace a block of samples
-inline void trace_block_filtered(const scene* scn, image4f& img, image4f& acc,
-    image4f& weight, const vec2i& block_min, const vec2i& block_max,
-    int samples_min, int samples_max, vector<rng_pcg32>& rngs,
-    std::mutex& image_mutex, const trace_params& params) {
-    auto shade = get_shader(params);
-    auto cam = scn->cameras[params.camera_id];
-    auto filter = get_filter(params);
-    auto filter_size = get_filter_size(params);
-    static constexpr const int pad = 2;
-    auto block_size =
-        vec2i{block_max.x - block_min.x, block_max.y - block_min.y};
-    auto acc_buffer = image4f(block_size.x + pad * 2, block_size.y + pad * 2);
-    auto weight_buffer =
-        image4f(block_size.x + pad * 2, block_size.y + pad * 2);
-    for (auto j = block_min.y; j < block_max.y; j++) {
-        for (auto i = block_min.x; i < block_max.x; i++) {
-            for (auto s = samples_min; s < samples_max; s++) {
-                auto smp = make_sampler(rngs[j * params.width + i], i, j, s,
-                    params.nsamples, params.rtype);
-                auto rn = sample_next2f(smp);
-                auto uv = vec2f{
-                    (i + rn.x) / params.width, 1 - (j + rn.y) / params.height};
-                auto ray = eval_camera(cam, uv, sample_next2f(smp));
-                auto hit = false;
-                auto l = shade(scn, ray, smp, params, hit);
-                if (!hit && params.envmap_invisible) continue;
-                if (!isfinite(l.x) || !isfinite(l.y) || !isfinite(l.z)) {
-                    log_error("NaN detected");
-                    continue;
-                }
-                if (params.pixel_clamp > 0) l = clamplen(l, params.pixel_clamp);
-                if (params.ftype == trace_filter_type::box) {
-                    auto bi = i - block_min.x, bj = j - block_min.y;
-                    acc_buffer[{bi + pad, bj + pad}] += {l, 1};
-                    weight_buffer[{bi + pad, bj + pad}] += {1, 1, 1, 1};
-                } else {
-                    auto bi = i - block_min.x, bj = j - block_min.y;
-                    for (auto fj = -filter_size; fj <= filter_size; fj++) {
-                        for (auto fi = -filter_size; fi <= filter_size; fi++) {
-                            auto w = filter(fi - uv.x + 0.5f) *
-                                     filter(fj - uv.y + 0.5f);
-                            acc_buffer[{bi + fi + pad, bj + fj + pad}] +=
-                                {l * w, w};
-                            weight_buffer[{bi + fi + pad, bj + fj + pad}] +=
-                                {w, w, w, w};
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if (params.ftype == trace_filter_type::box) {
-        for (auto j = block_min.y; j < block_max.y; j++) {
-            for (auto i = block_min.x; i < block_max.x; i++) {
-                auto bi = i - block_min.x, bj = j - block_min.y;
-                acc[{i, j}] += acc_buffer[{bi + pad, bj + pad}];
-                weight[{i, j}] += weight_buffer[{bi + pad, bj + pad}];
-                img[{i, j}] = acc[{i, j}] / weight[{i, j}];
-            }
-        }
-    } else {
-        std::unique_lock<std::mutex> lock_guard(image_mutex);
-        auto width = acc.width(), height = acc.height();
-        for (auto j = max(block_min.y - filter_size, 0);
-             j < min(block_max.y + filter_size, height); j++) {
-            for (auto i = max(block_min.x - filter_size, 0);
-                 i < min(block_max.x + filter_size, width); i++) {
-                auto bi = i - block_min.x, bj = j - block_min.y;
-                acc[{i, j}] += acc_buffer[{bi + pad, bj + pad}];
-                weight[{i, j}] += weight_buffer[{bi + pad, bj + pad}];
-                img[{i, j}] = acc[{i, j}] / weight[{i, j}];
-            }
-        }
-    }
-}
-
-}  // namespace _impl_trace
-
-// Renders a block of samples
-void trace_block(const scene* scn, image4f& img, const vec2i& block_min,
-    const vec2i& block_max, int samples_min, int samples_max,
-    vector<rng_pcg32>& rngs, const trace_params& params) {
-    _impl_trace::trace_block(
-        scn, img, block_min, block_max, samples_min, samples_max, rngs, params);
-}
-
-// Renders a filtered block of samples
-void trace_block_filtered(const scene* scn, image4f& img, image4f& acc,
-    image4f& weight, const vec2i& block_min, const vec2i& block_max,
-    int samples_min, int samples_max, vector<rng_pcg32>& rngs,
-    std::mutex& image_mutex, const trace_params& params) {
-    _impl_trace::trace_block_filtered(scn, img, acc, weight, block_min,
-        block_max, samples_min, samples_max, rngs, image_mutex, params);
-}
-
-// Trace the next samples in [samples_min, samples_max) range.
-// Samples have to be traced consecutively.
-void trace_samples(const scene* scn, image4f& img, int samples_min,
-    int samples_max, vector<rng_pcg32>& rngs, const trace_params& params) {
-    auto blocks = trace_blocks(params);
-    if (params.parallel) {
-        parallel_for((int)blocks.size(), [&img, scn, samples_min, samples_max,
-                                             &blocks, &params, &rngs](int idx) {
-            trace_block(scn, img, blocks[idx].first, blocks[idx].second,
-                samples_min, samples_max, rngs, params);
-        });
-    } else {
-        for (auto idx = 0; idx < (int)blocks.size(); idx++) {
-            trace_block(scn, img, blocks[idx].first, blocks[idx].second,
-                samples_min, samples_max, rngs, params);
-        }
-    }
-}
-
-// Trace the next samples in [samples_min, samples_max) range.
-// Samples have to be traced consecutively.
-void trace_filtered_samples(const scene* scn, image4f& img, image4f& acc,
-    image4f& weight, int samples_min, int samples_max, vector<rng_pcg32>& rngs,
-    const trace_params& params) {
-    auto blocks = trace_blocks(params);
-    std::mutex image_mutex;
-    if (params.parallel) {
-        parallel_for((int)blocks.size(),
-            [&img, &acc, &weight, scn, samples_min, samples_max, &blocks,
-                &params, &image_mutex, &rngs](int idx) {
-                trace_block_filtered(scn, img, acc, weight, blocks[idx].first,
-                    blocks[idx].second, samples_min, samples_max, rngs,
-                    image_mutex, params);
-            });
-    } else {
-        for (auto idx = 0; idx < (int)blocks.size(); idx++) {
-            trace_block_filtered(scn, img, acc, weight, blocks[idx].first,
-                blocks[idx].second, samples_min, samples_max, rngs, image_mutex,
-                params);
-        }
-    }
-}
-
-// Starts an anyncrhounous renderer with a maximum of 256 samples.
-void trace_async_start(const scene* scn, image4f& img, vector<rng_pcg32>& rngs,
-    const trace_params& params, thread_pool* pool,
-    const function<void(int)>& callback) {
-    auto blocks = trace_blocks(params);
-    for (auto sample = 0; sample < params.nsamples; sample++) {
-        for (auto& block : blocks) {
-            auto is_last = (block == blocks.back());
-            run_async(pool, [&img, scn, sample, block, &params, callback, &rngs,
-                                is_last]() {
-                trace_block(scn, img, block.first, block.second, sample,
-                    sample + 1, rngs, params);
-                if (is_last) callback(sample);
-            });
-        }
-    }
-}
-
-// Stop the asynchronous renderer.
-void trace_async_stop(thread_pool* pool) {
-    if (!pool) return;
-    clear_pool(pool);
-    wait_pool(pool);
-}
-
-}  // namespace ygl
-
-// -----------------------------------------------------------------------------
-// IMPLEMENTATION FOR WAVEFRONT OBJ
-// -----------------------------------------------------------------------------
-namespace ygl {
-
-namespace _impl_obj {
-
-// Parse a value
-template <typename T>
-inline void parse_val(stringstream& ss, T& v) {
-    ss >> v;
-}
-
-// Parse a value
-inline void parse_val(stringstream& ss, vec2f& v) {
-    for (auto i = 0; i < 2; i++) parse_val(ss, v[i]);
-}
-// Parse a value
-inline void parse_val(stringstream& ss, vec3f& v) {
-    for (auto i = 0; i < 3; i++) parse_val(ss, v[i]);
-}
-// Parse a value
-inline void parse_val(stringstream& ss, vec4f& v) {
-    for (auto i = 0; i < 4; i++) parse_val(ss, v[i]);
-}
-
-// Parse a value
-inline void parse_val(stringstream& ss, vec2i& v) {
-    for (auto i = 0; i < 2; i++) parse_val(ss, v[i]);
-}
-// Parse a value
-inline void parse_val(stringstream& ss, vec3i& v) {
-    for (auto i = 0; i < 3; i++) parse_val(ss, v[i]);
-}
-// Parse a value
-inline void parse_val(stringstream& ss, vec4i& v) {
-    for (auto i = 0; i < 4; i++) parse_val(ss, v[i]);
-}
-
-// Parse a value
-inline void parse_val(stringstream& ss, frame3f& v) {
-    parse_val(ss, v.x);
-    parse_val(ss, v.y);
-    parse_val(ss, v.z);
-    parse_val(ss, v.o);
-}
-
-// Parse texture options and name
-inline void parse_texture(stringstream& ss, obj_texture_info& info,
-    vector<string>& textures, unordered_set<string>& texture_set,
-    bool bump = false) {
-    // get tokens
-    auto tokens = vector<string>();
-    while (ss) {
-        auto s = string();
-        ss >> s;
-        if (!s.empty()) tokens.push_back(s);
-    }
-
-    // exit if no tokens
-    if (tokens.empty()) return;
-
-    // texture name
-    info.path = tokens.back();
-    for (auto& c : info.path)
-        if (c == '\\') c = '/';
-
-    // texture options
-    auto last = string();
-    for (auto& tok : tokens) {
-        if (tok == tokens.back()) break;
-        if (tok[0] == '-') {
-            last = tok;
-            info.unknown_props[last] = {};
-        } else {
-            info.unknown_props[last].push_back(tok);
+// Print scene info (call update bounds bes before)
+void print_info(const scene* scn) {
+    auto nverts = 0, nnorms = 0, ntexcoords = 0, npoints = 0, nlines = 0,
+         ntriangles = 0, nquads = 0;
+    for (auto sgr : scn->shapes) {
+        for (auto shp : sgr->shapes) {
+            nverts += shp->pos.size();
+            nnorms += shp->norm.size();
+            ntexcoords += shp->texcoord.size();
+            npoints += shp->points.size();
+            nlines += shp->lines.size();
+            ntriangles += shp->triangles.size();
+            nquads += shp->quads.size();
         }
     }
 
-    // clamp
-    if (info.unknown_props.find("-clamp") != info.unknown_props.end() &&
-        info.unknown_props.at("-clamp").size() > 0) {
-        auto& clamp_vec = info.unknown_props.at("-clamp");
-        auto clamp_str = (clamp_vec.empty()) ? "" : clamp_vec.front();
-        info.clamp = clamp_str == "on" || clamp_str == "1";
-        info.unknown_props.erase("-clamp");
-    }
+    auto bbox = compute_bounds(scn);
+    auto bboxc = vec3f{(bbox.max[0] + bbox.min[0]) / 2,
+        (bbox.max[1] + bbox.min[1]) / 2, (bbox.max[2] + bbox.min[2]) / 2};
+    auto bboxs = vec3f{bbox.max[0] - bbox.min[0], bbox.max[1] - bbox.min[1],
+        bbox.max[2] - bbox.min[2]};
 
-    if (info.unknown_props.find("-bm") != info.unknown_props.end() &&
-        info.unknown_props.at("-bm").size() > 0) {
-        auto& bm_vec = info.unknown_props.at("-bm");
-        auto bm_str = (bm_vec.empty()) ? "" : bm_vec.front();
-        info.scale = std::atof(bm_str.c_str());
-        info.unknown_props.erase("-bm");
-    }
-
-    // insert texture
-    if (!info.path.empty() &&
-        texture_set.find(info.path) == texture_set.end()) {
-        textures.push_back(info.path);
-        texture_set.insert(info.path);
-    }
-}
-
-// Load MTL
-inline vector<obj_material*> load_mtl(
-    const string& filename, bool flip_tr, vector<string>& textures) {
-    // clear materials
-    auto materials = vector<obj_material*>();
-
-    // clear textures
-    textures.clear();
-    auto texture_set = unordered_set<string>();
-
-    // open file
-    auto fs = fstream(filename, ios_base::in);
-    if (!fs) throw runtime_error("cannot open filename " + filename);
-    // fs.exceptions(ios_base::failbit);
-
-    // add a material preemptively to avoid crashes
-    materials.push_back(new obj_material());
-
-    // read the file line by line
-    string line;
-    auto linenum = 0;
-    while (getline(fs, line)) {
-        // prepare to parse
-        linenum += 1;
-        auto ss = stringstream(line);
-        auto cmd = string();
-        ss >> cmd;
-
-        // skip empty and comments
-        if (cmd.empty() || cmd[0] == '#') continue;
-
-        // possible token values
-        if (cmd == "newmtl") {
-            materials.push_back(new obj_material());
-            parse_val(ss, materials.back()->name);
-        } else if (cmd == "illum") {
-            parse_val(ss, materials.back()->illum);
-        } else if (cmd == "Ke") {
-            parse_val(ss, materials.back()->ke);
-        } else if (cmd == "Ka") {
-            parse_val(ss, materials.back()->ka);
-        } else if (cmd == "Kd") {
-            parse_val(ss, materials.back()->kd);
-        } else if (cmd == "Ks") {
-            parse_val(ss, materials.back()->ks);
-        } else if (cmd == "Kr") {
-            parse_val(ss, materials.back()->kr);
-        } else if (cmd == "Kt" || cmd == "Tf") {
-            auto vals = zero3f;
-            auto ntok = 0;
-            while (ss) parse_val(ss, vals[ntok++]);
-            if (ntok >= 3)
-                materials.back()->kt = vals;
-            else
-                materials.back()->kt = {vals.x, vals.x, vals.x};
-        } else if (cmd == "Tr") {
-            auto vals = zero3f;
-            auto ntok = 0;
-            while (ss) parse_val(ss, vals[ntok++]);
-            if (ntok >= 3)
-                materials.back()->kt = vals;
-            else
-                materials.back()->op = (flip_tr) ? 1 - vals.x : vals.x;
-        } else if (cmd == "Ns") {
-            parse_val(ss, materials.back()->ns);
-        } else if (cmd == "d") {
-            parse_val(ss, materials.back()->op);
-        } else if (cmd == "Ni") {
-            parse_val(ss, materials.back()->ior);
-        } else if (cmd == "map_Ke") {
-            parse_texture(ss, materials.back()->ke_txt, textures, texture_set);
-        } else if (cmd == "map_Ka") {
-            parse_texture(ss, materials.back()->ka_txt, textures, texture_set);
-        } else if (cmd == "map_Kd") {
-            parse_texture(ss, materials.back()->kd_txt, textures, texture_set);
-        } else if (cmd == "map_Ks") {
-            parse_texture(ss, materials.back()->ks_txt, textures, texture_set);
-        } else if (cmd == "map_Kr") {
-            parse_texture(ss, materials.back()->kr_txt, textures, texture_set);
-        } else if (cmd == "map_Tr") {
-            parse_texture(ss, materials.back()->kt_txt, textures, texture_set);
-        } else if (cmd == "map_Ns") {
-            parse_texture(ss, materials.back()->ns_txt, textures, texture_set);
-        } else if (cmd == "map_d") {
-            parse_texture(ss, materials.back()->op_txt, textures, texture_set);
-        } else if (cmd == "map_Ni") {
-            parse_texture(ss, materials.back()->ior_txt, textures, texture_set);
-        } else if (cmd == "map_bump" || cmd == "bump") {
-            parse_texture(
-                ss, materials.back()->bump_txt, textures, texture_set);
-        } else if (cmd == "map_disp" || cmd == "disp") {
-            parse_texture(
-                ss, materials.back()->disp_txt, textures, texture_set);
-        } else if (cmd == "map_norm" || cmd == "norm") {
-            parse_texture(
-                ss, materials.back()->norm_txt, textures, texture_set);
-        } else {
-            // copy into strings
-            while (ss) {
-                materials.back()->unknown_props[cmd].push_back({});
-                parse_val(ss, materials.back()->unknown_props[cmd].back());
-            }
-        }
-    }
-
-    // remove first fake material
-    materials.erase(materials.begin());
-
-    // done
-    return materials;
-}
-
-// Loads textures for an scene.
-inline void load_textures(
-    obj_scene* asset, const string& dirname, bool skip_missing) {
-    for (auto txt : asset->textures) {
-        auto filename = dirname + txt->path;
-        for (auto& c : filename)
-            if (c == '\\') c = '/';
-#if YGL_IMAGEIO
-        if (is_hdr_filename(filename)) {
-            txt->dataf =
-                load_imagef(filename, txt->width, txt->height, txt->ncomp);
-        } else {
-            txt->datab =
-                load_image(filename, txt->width, txt->height, txt->ncomp);
-        }
-#endif
-        if (txt->datab.empty() && txt->dataf.empty()) {
-            if (skip_missing) continue;
-            throw runtime_error("cannot laod image " + filename);
-        }
-    }
-}
-
-// Parses an OBJ vertex list. Handles negative values.
-inline void parse_vertlist(
-    stringstream& ss, vector<obj_vertex>& elems, const obj_vertex& vert_size) {
-    elems.clear();
-    while (true) {
-        auto tok = string();
-        parse_val(ss, tok);
-        if (tok.empty()) break;
-        auto toks = split(tok, "/");
-        if (toks.empty()) break;
-        auto v = obj_vertex{-1, -1, -1, -1, -1};
-        for (auto i = 0; i < min(5, (int)toks.size()); i++) {
-            if (toks[i] == "") continue;
-            ((int*)&v)[i] = (int)atoi(toks[i].c_str());
-            ((int*)&v)[i] = (((int*)&v)[i] < 0) ?
-                                ((int*)&vert_size)[i] + ((int*)&v)[i] :
-                                ((int*)&v)[i] - 1;
-        }
-        elems.push_back(v);
-    }
-}
-
-// Loads an OBJ
-inline obj_scene* load_obj(const string& filename, bool load_txt,
-    bool skip_missing, bool flip_texcoord, bool flip_tr) {
-    // clear obj
-    auto asset = unique_ptr<obj_scene>(new obj_scene());
-
-    // open file
-    auto fs = fstream(filename, ios_base::in);
-    if (!fs) throw runtime_error("cannot open filename " + filename);
-    // fs.exceptions(ios_base::failbit);
-
-    // initializing obj
-    asset->objects.push_back(new obj_object());
-    asset->objects.back()->groups.push_back({});
-
-    // allocate buffers to avoid re-allocing
-    auto cur_elems = vector<obj_vertex>();
-    auto cur_matname = string();
-    auto cur_mtllibs = vector<string>();
-
-    // keep track of array lengths
-    auto vert_size = obj_vertex{0, 0, 0, 0, 0};
-
-    // read the file line by line
-    string line;
-    auto linenum = 0;
-    while (getline(fs, line)) {
-        // prepare to parse
-        linenum += 1;
-        auto ss = stringstream(line);
-        auto cmd = string();
-        ss >> cmd;
-
-        // skip empty and comments
-        if (cmd.empty() || cmd[0] == '#') continue;
-
-        // possible token values
-        if (cmd == "v") {
-            vert_size.pos += 1;
-            asset->pos.push_back({});
-            parse_val(ss, asset->pos.back());
-        } else if (cmd == "vn") {
-            vert_size.norm += 1;
-            asset->norm.push_back({});
-            parse_val(ss, asset->norm.back());
-        } else if (cmd == "vt") {
-            vert_size.texcoord += 1;
-            asset->texcoord.push_back({});
-            parse_val(ss, asset->texcoord.back());
-            if (flip_texcoord)
-                asset->texcoord.back().y = 1 - asset->texcoord.back().y;
-        } else if (cmd == "vc") {
-            vert_size.color += 1;
-            asset->color.push_back({});
-            parse_val(ss, asset->color.back());
-        } else if (cmd == "vr") {
-            vert_size.radius += 1;
-            asset->radius.push_back({});
-            parse_val(ss, asset->radius.back());
-        } else if (cmd == "f") {
-            parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(), obj_element_type::face,
-                (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "l") {
-            parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(), obj_element_type::line,
-                (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "p") {
-            parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(),
-                obj_element_type::point, (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "b") {
-            parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(),
-                obj_element_type::bezier, (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "t") {
-            parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(),
-                obj_element_type::tetra, (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "o") {
-            auto name = string();
-            parse_val(ss, name);
-            asset->objects.push_back(new obj_object{name, {}});
-            asset->objects.back()->groups.push_back({});
-            asset->objects.back()->groups.back().matname = cur_matname;
-        } else if (cmd == "usemtl") {
-            auto name = string();
-            parse_val(ss, name);
-            cur_matname = name;
-            asset->objects.back()->groups.push_back({});
-            asset->objects.back()->groups.back().matname = cur_matname;
-        } else if (cmd == "g") {
-            auto name = string();
-            parse_val(ss, name);
-            asset->objects.back()->groups.push_back({});
-            asset->objects.back()->groups.back().matname = cur_matname;
-            asset->objects.back()->groups.back().groupname = name;
-        } else if (cmd == "s") {
-            auto name = string();
-            parse_val(ss, name);
-            auto smoothing = (name == "on");
-            if (asset->objects.back()->groups.empty()) {
-                asset->objects.back()->groups.push_back({});
-                asset->objects.back()->groups.back().matname = cur_matname;
-                asset->objects.back()->groups.back().smoothing = smoothing;
-            } else if (asset->objects.back()->groups.back().smoothing !=
-                       smoothing) {
-                auto gname = asset->objects.back()->groups.back().groupname;
-                asset->objects.back()->groups.push_back({});
-                asset->objects.back()->groups.back().matname = cur_matname;
-                asset->objects.back()->groups.back().groupname = gname;
-                asset->objects.back()->groups.back().smoothing = smoothing;
-            }
-        } else if (cmd == "sl") {
-            auto subdiv = zero2i;
-            parse_val(ss, subdiv);
-            if (asset->objects.back()->groups.empty()) {
-                asset->objects.back()->groups.push_back({});
-                asset->objects.back()->groups.back().matname = cur_matname;
-            }
-            asset->objects.back()->groups.back().subdivision_level = subdiv.x;
-            asset->objects.back()->groups.back().subdivision_catmullclark =
-                (bool)subdiv.y;
-        } else if (cmd == "mtllib") {
-            auto name = string();
-            parse_val(ss, name);
-            if (name != string("")) {
-                auto found = false;
-                for (auto lib : cur_mtllibs) {
-                    if (lib == name) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) cur_mtllibs.push_back(name);
-            }
-        } else if (cmd == "c") {
-            auto cam = new obj_camera();
-            parse_val(ss, cam->name);
-            parse_val(ss, cam->ortho);
-            parse_val(ss, cam->yfov);
-            parse_val(ss, cam->aspect);
-            parse_val(ss, cam->aperture);
-            parse_val(ss, cam->focus);
-            parse_val(ss, cam->frame);
-            asset->cameras.push_back(cam);
-        } else if (cmd == "e") {
-            auto env = new obj_environment();
-            parse_val(ss, env->name);
-            parse_val(ss, env->matname);
-            parse_val(ss, env->frame);
-            asset->environments.push_back(env);
-        } else if (cmd == "i") {
-            auto ist = new obj_instance();
-            parse_val(ss, ist->name);
-            parse_val(ss, ist->objname);
-            parse_val(ss, ist->frame);
-            asset->instances.push_back(ist);
-        } else {
-            // unused
-        }
-    }
-
-    // cleanup unused
-    for (auto o : asset->objects) {
-        auto end = std::remove_if(o->groups.begin(), o->groups.end(),
-            [](const obj_group& x) { return x.verts.empty(); });
-        o->groups.erase(end, o->groups.end());
-    }
-    // TODO: possible memory leak
-    auto end = std::remove_if(asset->objects.begin(), asset->objects.end(),
-        [](const obj_object* x) { return x->groups.empty(); });
-    asset->objects.erase(end, asset->objects.end());
-
-    // parse materials
-    auto dirname = path_dirname(filename);
-    unordered_set<string> texture_set;
-    for (auto mtllib : cur_mtllibs) {
-        auto mtlname = dirname + mtllib;
-        vector<string> textures;
-        auto materials = load_mtl(mtlname, flip_tr, textures);
-        asset->materials.insert(
-            asset->materials.end(), materials.begin(), materials.end());
-        for (auto& txt : textures) {
-            if (texture_set.find(txt) != texture_set.end()) continue;
-            asset->textures.push_back(new obj_texture());
-            asset->textures.back()->path = txt;
-            texture_set.insert(txt);
-        }
-    }
-
-    // load textures
-    if (load_txt) load_textures(asset.get(), dirname, skip_missing);
-
-    // done
-    return asset.release();
-}
-
-// write to stream
-template <typename T>
-inline void dump_val(fstream& fs, const T& v) {
-    fs << v;
-}
-
-// write to stream
-inline void dump_val(fstream& fs, const vec2f& v) {
-    dump_val(fs, v.x);
-    fs << ' ';
-    dump_val(fs, v.y);
-}
-
-// write to stream
-inline void dump_val(fstream& fs, const vec3f& v) {
-    dump_val(fs, v.x);
-    fs << ' ';
-    dump_val(fs, v.y);
-    fs << ' ';
-    dump_val(fs, v.z);
-}
-
-// write to stream
-inline void dump_val(fstream& fs, const vec4f& v) {
-    dump_val(fs, v.x);
-    fs << ' ';
-    dump_val(fs, v.y);
-    fs << ' ';
-    dump_val(fs, v.z);
-    fs << ' ';
-    dump_val(fs, v.w);
-}
-
-// write to stream
-inline void dump_val(fstream& fs, const frame3f& v) {
-    dump_val(fs, v.x);
-    fs << ' ';
-    dump_val(fs, v.y);
-    fs << ' ';
-    dump_val(fs, v.z);
-    fs << ' ';
-    dump_val(fs, v.o);
-}
-
-// write to stream
-inline void dump_val(fstream& fs, const obj_texture_info& v) {
-    for (auto&& kv : v.unknown_props) {
-        dump_val(fs, kv.first + " ");
-        for (auto&& vv : kv.second) dump_val(fs, vv + " ");
-    }
-    if (v.clamp) dump_val(fs, "-clamp on ");
-    dump_val(fs, v.path);
-}
-
-// write to stream
-template <typename T>
-inline void dump_named_val(fstream& fs, const string& name, const T& v) {
-    dump_val(fs, name);
-    fs << ' ';
-    dump_val(fs, v);
-    fs << '\n';
-}
-
-// write to stream
-template <typename T>
-inline void dump_opt_val(
-    fstream& fs, const string& name, const T& v, const T& def = {}) {
-    if (v == def) return;
-    dump_named_val(fs, name, v);
-}
-
-// write an OBJ vertex triplet using only the indices that are active
-inline void dump_objverts(
-    fstream& fs, const char* str, int nv, const obj_vertex* verts) {
-    dump_val(fs, str);
-    for (auto v = 0; v < nv; v++) {
-        auto& vert = verts[v];
-        auto vert_ptr = &vert.pos;
-        auto nto_write = 0;
-        for (auto i = 0; i < 5; i++) {
-            if (vert_ptr[i] >= 0) nto_write = i + 1;
-        }
-        for (auto i = 0; i < nto_write; i++) {
-            if (vert_ptr[i] >= 0) {
-                dump_val(fs, ((i == 0) ? ' ' : '/'));
-                dump_val(fs, vert_ptr[i] + 1);
-            } else {
-                dump_val(fs, '/');
-            }
-        }
-    }
-    dump_val(fs, '\n');
-}
-
-// Save an MTL file
-inline void save_mtl(const string& filename,
-    const vector<obj_material*>& materials, bool flip_tr) {
-    // open file
-    auto fs = fstream(filename, ios_base::out);
-    if (!fs) throw runtime_error("cannot open filename " + filename);
-    fs.exceptions(ios_base::failbit);
-
-    // for each material, dump all the values
-    for (auto mat : materials) {
-        dump_named_val(fs, "newmtl", mat->name);
-        dump_named_val(fs, "  illum", mat->illum);
-        dump_opt_val(fs, "  Ke", mat->ke);
-        dump_opt_val(fs, "  Ka", mat->ka);
-        dump_opt_val(fs, "  Kd", mat->kd);
-        dump_opt_val(fs, "  Ks", mat->ks);
-        dump_opt_val(fs, "  Kr", mat->kr);
-        dump_opt_val(fs, "  Tf", mat->kt);
-        dump_opt_val(fs, "  Ns", mat->ns, 0.0f);
-        dump_opt_val(fs, "  d", mat->op, 1.0f);
-        dump_opt_val(fs, "  Ni", mat->ior, 1.0f);
-        dump_opt_val(fs, "  map_Ke", mat->ke_txt);
-        dump_opt_val(fs, "  map_Ka", mat->ka_txt);
-        dump_opt_val(fs, "  map_Kd", mat->kd_txt);
-        dump_opt_val(fs, "  map_Ks", mat->ks_txt);
-        dump_opt_val(fs, "  map_Kr", mat->kr_txt);
-        dump_opt_val(fs, "  map_Kt", mat->kt_txt);
-        dump_opt_val(fs, "  map_Ns", mat->ns_txt);
-        dump_opt_val(fs, "  map_d", mat->op_txt);
-        dump_opt_val(fs, "  map_Ni", mat->ior_txt);
-        dump_opt_val(fs, "  map_bump", mat->bump_txt);
-        dump_opt_val(fs, "  map_disp", mat->disp_txt);
-        dump_opt_val(fs, "  map_norm", mat->norm_txt);
-        for (auto&& kv : mat->unknown_props) {
-            dump_val(fs, kv.first);
-            for (auto&& v : kv.second) {
-                dump_val(fs, " ");
-                dump_val(fs, v);
-            }
-            dump_val(fs, "\n");
-        }
-        dump_val(fs, "\n");
-    }
-}
-
-// Loads textures for an scene.
-inline void save_textures(
-    const obj_scene* asset, const string& dirname, bool skip_missing) {
-    for (auto txt : asset->textures) {
-        if (txt->datab.empty() && txt->dataf.empty()) continue;
-        auto filename = dirname + txt->path;
-        for (auto& c : filename)
-            if (c == '\\') c = '/';
-        auto ok = false;
-#if YGL_IMAGEIO
-        if (!txt->datab.empty()) {
-            ok = save_image(filename, txt->width, txt->height, txt->ncomp,
-                txt->datab.data());
-        }
-        if (!txt->dataf.empty()) {
-            ok = save_imagef(filename, txt->width, txt->height, txt->ncomp,
-                txt->dataf.data());
-        }
-#endif
-        if (!ok) {
-            if (skip_missing) continue;
-            throw runtime_error("cannot save image " + filename);
-        }
-    }
-}
-
-// Save an OBJ
-inline void save_obj(const string& filename, const obj_scene* asset,
-    bool save_txt, bool skip_missing, bool flip_texcoord, bool flip_tr) {
-    // open file
-    auto fs = fstream(filename, ios_base::out);
-    if (!fs) throw runtime_error("cannot open filename " + filename);
-    fs.exceptions(ios_base::failbit);
-
-    // linkup to mtl
-    auto dirname = path_dirname(filename);
-    auto basename = filename.substr(dirname.length());
-    basename = basename.substr(0, basename.length() - 4);
-    if (!asset->materials.empty()) {
-        dump_named_val(fs, "mtllib", basename + ".mtl");
-    }
-
-    // save cameras
-    for (auto cam : asset->cameras) {
-        dump_val(fs, "c ");
-        dump_val(fs, cam->name);
-        dump_val(fs, " ");
-        dump_val(fs, cam->ortho);
-        dump_val(fs, " ");
-        dump_val(fs, cam->yfov);
-        dump_val(fs, " ");
-        dump_val(fs, cam->aspect);
-        dump_val(fs, " ");
-        dump_val(fs, cam->aperture);
-        dump_val(fs, " ");
-        dump_val(fs, cam->focus);
-        dump_val(fs, " ");
-        dump_val(fs, cam->frame);
-        dump_val(fs, '\n');
-    }
-
-    // save envs
-    for (auto env : asset->environments) {
-        dump_val(fs, "e ");
-        dump_val(fs, env->name);
-        dump_val(fs, " ");
-        dump_val(fs, env->matname);
-        dump_val(fs, " ");
-        dump_val(fs, env->frame);
-        dump_val(fs, '\n');
-    }
-
-    // save instances
-    for (auto ist : asset->instances) {
-        dump_val(fs, "i ");
-        dump_val(fs, ist->name);
-        dump_val(fs, " ");
-        dump_val(fs, ist->objname);
-        dump_val(fs, " ");
-        dump_val(fs, ist->frame);
-        dump_val(fs, '\n');
-    }
-
-    // save all vertex data
-    for (auto& v : asset->pos) dump_named_val(fs, "v", v);
-    if (flip_texcoord) {
-        for (auto& v : asset->texcoord)
-            dump_named_val(fs, "vt", vec2f{v.x, 1 - v.y});
-    } else {
-        for (auto& v : asset->texcoord) dump_named_val(fs, "vt", v);
-    }
-    for (auto& v : asset->norm) dump_named_val(fs, "vn", v);
-    for (auto& v : asset->color) dump_named_val(fs, "vc", v);
-    for (auto& v : asset->radius) dump_named_val(fs, "vr", v);
-
-    // save element data
-    static auto elem_labels =
-        unordered_map<obj_element_type, string>{{obj_element_type::point, "p"},
-            {obj_element_type::line, "l"}, {obj_element_type::face, "f"},
-            {obj_element_type::bezier, "b"}, {obj_element_type::tetra, "t"}};
-    for (auto object : asset->objects) {
-        dump_named_val(fs, "o", object->name);
-        for (auto& group : object->groups) {
-            dump_opt_val(fs, "usemtl", group.matname);
-            dump_opt_val(fs, "g", group.groupname);
-            if (!group.smoothing) dump_named_val(fs, "s", "off");
-            if (group.subdivision_level) {
-                auto sl = vec2i{group.subdivision_level,
-                    (group.subdivision_catmullclark) ? 1 : 0};
-                dump_named_val(fs, "sl", sl);
-            }
-            for (auto elem : group.elems) {
-                auto lbl = "";
-                switch (elem.type) {
-                    case obj_element_type::point: lbl = "p"; break;
-                    case obj_element_type::line: lbl = "l"; break;
-                    case obj_element_type::face: lbl = "f"; break;
-                    case obj_element_type::bezier: lbl = "b"; break;
-                    case obj_element_type::tetra: lbl = "t"; break;
-                    default: throw runtime_error("should not have gotten here");
-                }
-                dump_objverts(
-                    fs, lbl, elem.size, group.verts.data() + elem.start);
-            }
-        }
-    }
-
-    // save materials
-    if (!asset->materials.empty())
-        save_mtl(dirname + basename + ".mtl", asset->materials, flip_tr);
-
-    // save textures
-    if (save_txt) save_textures(asset, dirname, skip_missing);
-}
-
-// A hash function for vecs
-struct vertex_hash {
-    std::hash<int> Th;
-    size_t operator()(const obj_vertex& vv) const {
-        auto v = (const int*)&vv;
-        size_t h = 0;
-        for (auto i = 0; i < sizeof(obj_vertex) / sizeof(int); i++) {
-            // embads hash_combine below
-            h ^= (Th(v[i]) + 0x9e3779b9 + (h << 6) + (h >> 2));
-        }
-        return h;
-    }
-};
-
-// Flattens an scene
-inline obj_mesh* get_mesh(
-    const obj_scene* model, const obj_object& oshape, bool facet_non_smooth) {
-    // convert meshes
-    auto msh = new obj_mesh();
-    msh->name = oshape.name;
-    for (auto& group : oshape.groups) {
-        if (group.verts.empty()) continue;
-        if (group.elems.empty()) continue;
-        msh->shapes.emplace_back();
-        auto prim = &msh->shapes.back();
-        prim->name = group.groupname;
-        prim->matname = group.matname;
-
-        // insert all vertices
-        unordered_map<obj_vertex, int, vertex_hash> vert_map;
-        vector<int> vert_ids;
-        // vert_map.clear();
-        // vert_ids.clear();
-        for (auto& vert : group.verts) {
-            if (vert_map.find(vert) == vert_map.end()) {
-                // split in two to avoid undefined behaviour
-                auto size = (int)vert_map.size();
-                vert_map[vert] = size;
-            }
-            vert_ids.push_back(vert_map.at(vert));
-        }
-
-        // convert elements
-        for (auto& elem : group.elems) {
-            switch (elem.type) {
-                case obj_element_type::point: {
-                    for (auto i = elem.start; i < elem.start + elem.size; i++) {
-                        prim->points.push_back(vert_ids[i]);
-                    }
-                } break;
-                case obj_element_type::line: {
-                    for (auto i = elem.start; i < elem.start + elem.size - 1;
-                         i++) {
-                        prim->lines.push_back({vert_ids[i], vert_ids[i + 1]});
-                    }
-                } break;
-                case obj_element_type::face: {
-                    for (auto i = elem.start + 2; i < elem.start + elem.size;
-                         i++) {
-                        prim->triangles.push_back({vert_ids[elem.start],
-                            vert_ids[i - 1], vert_ids[i]});
-                    }
-                } break;
-                case obj_element_type::bezier: {
-                    if ((elem.size - 1) % 3)
-                        throw runtime_error("bad obj bezier");
-                    for (auto i = elem.start + 1; i < elem.start + elem.size;
-                         i += 3) {
-                        prim->bezier.push_back({vert_ids[i - 1], vert_ids[i],
-                            vert_ids[i + 1], vert_ids[i + 2]});
-                    }
-                } break;
-                case obj_element_type::tetra: {
-                    for (auto i = elem.start; i < elem.start + elem.size;
-                         i += 4) {
-                        if (i + 3 >= vert_ids.size()) continue;
-                        prim->tetras.push_back({vert_ids[i], vert_ids[i + 1],
-                            vert_ids[i + 2], vert_ids[i + 3]});
-                    }
-                } break;
-                default: { assert(false); }
-            }
-        }
-
-        // check for errors
-        // copy vertex data
-        auto v = group.verts[0];
-        if (v.pos >= 0) prim->pos.resize(vert_map.size());
-        if (v.texcoord >= 0) prim->texcoord.resize(vert_map.size());
-        if (v.norm >= 0) prim->norm.resize(vert_map.size());
-        if (v.color >= 0) prim->color.resize(vert_map.size());
-        if (v.radius >= 0) prim->radius.resize(vert_map.size());
-        for (auto& kv : vert_map) {
-            if (v.pos >= 0 && kv.first.pos >= 0) {
-                prim->pos[kv.second] = model->pos[kv.first.pos];
-            }
-            if (v.texcoord >= 0 && kv.first.texcoord >= 0) {
-                prim->texcoord[kv.second] = model->texcoord[kv.first.texcoord];
-            }
-            if (v.norm >= 0 && kv.first.norm >= 0) {
-                prim->norm[kv.second] = model->norm[kv.first.norm];
-            }
-            if (v.color >= 0 && kv.first.color >= 0) {
-                prim->color[kv.second] = model->color[kv.first.color];
-            }
-            if (v.radius >= 0 && kv.first.radius >= 0) {
-                prim->radius[kv.second] = model->radius[kv.first.radius];
-            }
-        }
-
-        // fix smoothing
-        if (!group.smoothing && facet_non_smooth) {
-            auto faceted_ = obj_shape();
-            auto faceted = &faceted_;
-            faceted->name = prim->name;
-            faceted->matname = prim->matname;
-            auto pidx = vector<int>();
-            for (auto point : prim->points) {
-                faceted->points.push_back((int)pidx.size());
-                pidx.push_back(point);
-            }
-            for (auto line : prim->lines) {
-                faceted->lines.push_back(
-                    {(int)pidx.size() + 0, (int)pidx.size() + 1});
-                pidx.push_back(line.x);
-                pidx.push_back(line.y);
-            }
-            for (auto triangle : prim->triangles) {
-                faceted->triangles.push_back({(int)pidx.size() + 0,
-                    (int)pidx.size() + 1, (int)pidx.size() + 2});
-                pidx.push_back(triangle.x);
-                pidx.push_back(triangle.y);
-                pidx.push_back(triangle.z);
-            }
-            for (auto tetra : prim->tetras) {
-                faceted->tetras.push_back(
-                    {(int)pidx.size() + 0, (int)pidx.size() + 1,
-                        (int)pidx.size() + 2, (int)pidx.size() + 3});
-                pidx.push_back(tetra.x);
-                pidx.push_back(tetra.y);
-                pidx.push_back(tetra.z);
-                pidx.push_back(tetra.w);
-            }
-            for (auto idx : pidx) {
-                if (!prim->pos.empty()) faceted->pos.push_back(prim->pos[idx]);
-                if (!prim->norm.empty())
-                    faceted->norm.push_back(prim->norm[idx]);
-                if (!prim->texcoord.empty())
-                    faceted->texcoord.push_back(prim->texcoord[idx]);
-                if (!prim->color.empty())
-                    faceted->color.push_back(prim->color[idx]);
-                if (!prim->radius.empty())
-                    faceted->radius.push_back(prim->radius[idx]);
-            }
-            *prim = *faceted;
-        }
-    }
-
-    // done
-    return msh;
-}
-
-}  // namespace _impl_obj
-
-// Loads an OBJ
-obj_scene* load_obj(const string& filename, bool load_txt, bool skip_missing,
-    bool flip_texcoord, bool flip_tr) {
-    return _impl_obj::load_obj(
-        filename, load_txt, skip_missing, flip_texcoord, flip_tr);
-}
-
-// Save an OBJ
-void save_obj(const string& filename, const obj_scene* asset, bool save_txt,
-    bool skip_missing, bool flip_texcoord, bool flip_tr) {
-    _impl_obj::save_obj(
-        filename, asset, save_txt, skip_missing, flip_texcoord, flip_tr);
+    printf("number of cameras:      %d\n", (int)scn->cameras.size());
+    printf("number of shapes:       %d\n", (int)scn->shapes.size());
+    printf("number of instances:    %d\n", (int)scn->instances.size());
+    printf("number of materials:    %d\n", (int)scn->materials.size());
+    printf("number of textures:     %d\n", (int)scn->textures.size());
+    printf("number of environments: %d\n", (int)scn->environments.size());
+    printf("number of vertices:     %d\n", nverts);
+    printf("number of normals:      %d\n", nnorms);
+    printf("number of texcoords:    %d\n", ntexcoords);
+    printf("number of points:       %d\n", npoints);
+    printf("number of lines:        %d\n", nlines);
+    printf("number of triangles:    %d\n", ntriangles);
+    printf("number of quads:        %d\n", nquads);
+    printf("\n");
+    printf("bbox min:    %g %g %g\n", bbox.min[0], bbox.min[1], bbox.min[2]);
+    printf("bbox max:    %g %g %g\n", bbox.max[0], bbox.max[1], bbox.max[2]);
+    printf("bbox center: %g %g %g\n", bboxc[0], bboxc[1], bboxc[2]);
+    printf("bbox size:   %g %g %g\n", bboxs[0], bboxs[1], bboxs[2]);
+    printf("\n");
 }
 
 // Flattens an scene
-obj_mesh* get_mesh(
-    const obj_scene* model, const obj_object& oshape, bool facet_non_smooth) {
-    return _impl_obj::get_mesh(model, oshape, facet_non_smooth);
-}
-
-}  // namespace ygl
-
-#if YGL_GLTF
-
-// -----------------------------------------------------------------------------
-// IMPLEMENTATION FOR KHRONOS GLTF
-// -----------------------------------------------------------------------------
-namespace ygl {
-
-// Json alias
-using json = nlohmann::json;
-
-// #codegen begin func ---------------------------------------------------------
-
-// Parse int function.
-inline void serialize_from_json(int& val, const json& js) {
-    if (!js.is_number_integer()) throw runtime_error("integer expected");
-    val = js;
-}
-
-// Parse float function.
-inline void serialize_from_json(float& val, const json& js) {
-    if (!js.is_number()) throw runtime_error("number expected");
-    val = js;
-}
-
-// Parse bool function.
-inline void serialize_from_json(bool& val, const json& js) {
-    if (!js.is_boolean()) throw runtime_error("bool expected");
-    val = js;
-}
-
-// Parse std::string function.
-inline void serialize_from_json(string& val, const json& js) {
-    if (!js.is_string()) throw runtime_error("string expected");
-    val = js;
-}
-
-// Parse json function.
-inline void serialize_from_json(json& val, const json& js) { val = js; }
-
-// Parse support function.
-template <typename T>
-inline void serialize_from_json(T*& val, const json& js) {
-    if (js.is_null()) {
-        val = nullptr;
-        return;
-    }
-    if (!js.is_object()) throw runtime_error("object expected");
-    if (!val) val = new T();
-    serialize_from_json(*val, js);
-}
-
-// Parse support function.
-template <typename T>
-inline void serialize_from_json(vector<T>& vals, const json& js) {
-    if (!js.is_array()) throw runtime_error("array expected");
-    vals.resize(js.size());
-    for (auto i = 0; i < js.size(); i++) {
-        // this is contrived to support for vector<bool>
-        auto v = T();
-        serialize_from_json(v, js[i]);
-        vals[i] = v;
-    }
-}
-
-// Parse support function.
-template <typename T>
-inline void serialize_from_json(map<string, T>& vals, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    for (auto kv = js.begin(); kv != js.end(); ++kv) {
-        serialize_from_json(vals[kv.key()], kv.value());
-    }
-}
-
-// Parse support function.
-template <typename T, size_t N>
-inline void serialize_from_json(array<T, N>& vals, const json& js) {
-    if (!js.is_array()) throw runtime_error("array expected");
-    if (N != js.size()) throw runtime_error("wrong array size");
-    for (auto i = 0; i < N; i++) serialize_from_json(vals[i], js.at(i));
-}
-
-// Parse support function.
-template <typename T, typename T1>
-inline void serialize_from_json(
-    T& val, const json& js, const vector<pair<T1, T>>& table) {
-    auto v = T1();
-    serialize_from_json(v, js);
-    auto found = false;
-    for (auto& kv : table) {
-        if (kv.first == v) {
-            val = kv.second;
-            found = true;
-            break;
-        }
-    }
-    if (!found) throw runtime_error("bad enum value");
-}
-
-// Parse support function.
-inline void serialize_from_json(vec2f& vals, const json& js) {
-    serialize_from_json((array<float, 2>&)vals, js);
-}
-
-// Parse support function.
-inline void serialize_from_json(vec3f& vals, const json& js) {
-    serialize_from_json((array<float, 3>&)vals, js);
-}
-
-// Parse support function.
-inline void serialize_from_json(vec4f& vals, const json& js) {
-    serialize_from_json((array<float, 4>&)vals, js);
-}
-
-// Parse support function.
-inline void serialize_from_json(quat4f& vals, const json& js) {
-    serialize_from_json((array<float, 4>&)vals, js);
-}
-
-// Parse support function.
-inline void serialize_from_json(mat4f& vals, const json& js) {
-    serialize_from_json((array<float, 16>&)vals, js);
-}
-
-// Parse id function.
-template <typename T>
-inline void serialize_from_json(glTFid<T>& val, const json& js) {
-    if (!js.is_number_integer()) throw runtime_error("int expected");
-    val = glTFid<T>((int)js);
-}
-
-// Parses a glTFProperty object
-inline void serialize_from_json(glTFProperty& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-#if YGL_GLTFJSON
-    if (js.count("extensions"))
-        serialize_from_json(val.extensions, js.at("extensions"));
-    if (js.count("extras")) serialize_from_json(val.extras, js.at("extras"));
-#endif
-}
-
-// Parses a glTFChildOfRootProperty object
-inline void serialize_from_json(glTFChildOfRootProperty& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (js.count("name")) serialize_from_json(val.name, js.at("name"));
-}
-// Parse a glTFAccessorSparseIndicesComponentType enum
-inline void serialize_from_json(
-    glTFAccessorSparseIndicesComponentType& val, const json& js) {
-    static vector<pair<int, glTFAccessorSparseIndicesComponentType>> table = {
-        {5121, glTFAccessorSparseIndicesComponentType::UnsignedByte},
-        {5123, glTFAccessorSparseIndicesComponentType::UnsignedShort},
-        {5125, glTFAccessorSparseIndicesComponentType::UnsignedInt},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFAccessorSparseIndices object
-inline void serialize_from_json(
-    glTFAccessorSparseIndices& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("bufferView")) throw runtime_error("missing value");
-    serialize_from_json(val.bufferView, js.at("bufferView"));
-    if (js.count("byteOffset"))
-        serialize_from_json(val.byteOffset, js.at("byteOffset"));
-    if (!js.count("componentType")) throw runtime_error("missing value");
-    serialize_from_json(val.componentType, js.at("componentType"));
-}
-
-// Parses a glTFAccessorSparseValues object
-inline void serialize_from_json(glTFAccessorSparseValues& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("bufferView")) throw runtime_error("missing value");
-    serialize_from_json(val.bufferView, js.at("bufferView"));
-    if (js.count("byteOffset"))
-        serialize_from_json(val.byteOffset, js.at("byteOffset"));
-}
-
-// Parses a glTFAccessorSparse object
-inline void serialize_from_json(glTFAccessorSparse& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("count")) throw runtime_error("missing value");
-    serialize_from_json(val.count, js.at("count"));
-    if (!js.count("indices")) throw runtime_error("missing value");
-    serialize_from_json(val.indices, js.at("indices"));
-    if (!js.count("values")) throw runtime_error("missing value");
-    serialize_from_json(val.values, js.at("values"));
-}
-// Parse a glTFAccessorComponentType enum
-inline void serialize_from_json(
-    glTFAccessorComponentType& val, const json& js) {
-    static vector<pair<int, glTFAccessorComponentType>> table = {
-        {5120, glTFAccessorComponentType::Byte},
-        {5121, glTFAccessorComponentType::UnsignedByte},
-        {5122, glTFAccessorComponentType::Short},
-        {5123, glTFAccessorComponentType::UnsignedShort},
-        {5125, glTFAccessorComponentType::UnsignedInt},
-        {5126, glTFAccessorComponentType::Float},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parse a glTFAccessorType enum
-inline void serialize_from_json(glTFAccessorType& val, const json& js) {
-    static vector<pair<string, glTFAccessorType>> table = {
-        {"SCALAR", glTFAccessorType::Scalar},
-        {"VEC2", glTFAccessorType::Vec2},
-        {"VEC3", glTFAccessorType::Vec3},
-        {"VEC4", glTFAccessorType::Vec4},
-        {"MAT2", glTFAccessorType::Mat2},
-        {"MAT3", glTFAccessorType::Mat3},
-        {"MAT4", glTFAccessorType::Mat4},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFAccessor object
-inline void serialize_from_json(glTFAccessor& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("bufferView"))
-        serialize_from_json(val.bufferView, js.at("bufferView"));
-    if (js.count("byteOffset"))
-        serialize_from_json(val.byteOffset, js.at("byteOffset"));
-    if (!js.count("componentType")) throw runtime_error("missing value");
-    serialize_from_json(val.componentType, js.at("componentType"));
-    if (js.count("normalized"))
-        serialize_from_json(val.normalized, js.at("normalized"));
-    if (!js.count("count")) throw runtime_error("missing value");
-    serialize_from_json(val.count, js.at("count"));
-    if (!js.count("type")) throw runtime_error("missing value");
-    serialize_from_json(val.type, js.at("type"));
-    if (js.count("max")) serialize_from_json(val.max, js.at("max"));
-    if (js.count("min")) serialize_from_json(val.min, js.at("min"));
-    if (js.count("sparse")) serialize_from_json(val.sparse, js.at("sparse"));
-}
-// Parse a glTFAnimationChannelTargetPath enum
-inline void serialize_from_json(
-    glTFAnimationChannelTargetPath& val, const json& js) {
-    static vector<pair<string, glTFAnimationChannelTargetPath>> table = {
-        {"translation", glTFAnimationChannelTargetPath::Translation},
-        {"rotation", glTFAnimationChannelTargetPath::Rotation},
-        {"scale", glTFAnimationChannelTargetPath::Scale},
-        {"weights", glTFAnimationChannelTargetPath::Weights},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFAnimationChannelTarget object
-inline void serialize_from_json(
-    glTFAnimationChannelTarget& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("node")) throw runtime_error("missing value");
-    serialize_from_json(val.node, js.at("node"));
-    if (!js.count("path")) throw runtime_error("missing value");
-    serialize_from_json(val.path, js.at("path"));
-}
-
-// Parses a glTFAnimationChannel object
-inline void serialize_from_json(glTFAnimationChannel& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("sampler")) throw runtime_error("missing value");
-    serialize_from_json(val.sampler, js.at("sampler"));
-    if (!js.count("target")) throw runtime_error("missing value");
-    serialize_from_json(val.target, js.at("target"));
-}
-// Parse a glTFAnimationSamplerInterpolation enum
-inline void serialize_from_json(
-    glTFAnimationSamplerInterpolation& val, const json& js) {
-    static vector<pair<string, glTFAnimationSamplerInterpolation>> table = {
-        {"LINEAR", glTFAnimationSamplerInterpolation::Linear},
-        {"STEP", glTFAnimationSamplerInterpolation::Step},
-        {"CATMULLROMSPLINE",
-            glTFAnimationSamplerInterpolation::CatmullRomSpline},
-        {"CUBICSPLINE", glTFAnimationSamplerInterpolation::CubicSpline},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFAnimationSampler object
-inline void serialize_from_json(glTFAnimationSampler& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("input")) throw runtime_error("missing value");
-    serialize_from_json(val.input, js.at("input"));
-    if (js.count("interpolation"))
-        serialize_from_json(val.interpolation, js.at("interpolation"));
-    if (!js.count("output")) throw runtime_error("missing value");
-    serialize_from_json(val.output, js.at("output"));
-}
-
-// Parses a glTFAnimation object
-inline void serialize_from_json(glTFAnimation& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (!js.count("channels")) throw runtime_error("missing value");
-    serialize_from_json(val.channels, js.at("channels"));
-    if (!js.count("samplers")) throw runtime_error("missing value");
-    serialize_from_json(val.samplers, js.at("samplers"));
-}
-
-// Parses a glTFAsset object
-inline void serialize_from_json(glTFAsset& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (js.count("copyright"))
-        serialize_from_json(val.copyright, js.at("copyright"));
-    if (js.count("generator"))
-        serialize_from_json(val.generator, js.at("generator"));
-    if (!js.count("version")) throw runtime_error("missing value");
-    serialize_from_json(val.version, js.at("version"));
-    if (js.count("minVersion"))
-        serialize_from_json(val.minVersion, js.at("minVersion"));
-}
-
-// Parses a glTFBuffer object
-inline void serialize_from_json(glTFBuffer& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("uri")) serialize_from_json(val.uri, js.at("uri"));
-    if (!js.count("byteLength")) throw runtime_error("missing value");
-    serialize_from_json(val.byteLength, js.at("byteLength"));
-}
-// Parse a glTFBufferViewTarget enum
-inline void serialize_from_json(glTFBufferViewTarget& val, const json& js) {
-    static vector<pair<int, glTFBufferViewTarget>> table = {
-        {34962, glTFBufferViewTarget::ArrayBuffer},
-        {34963, glTFBufferViewTarget::ElementArrayBuffer},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFBufferView object
-inline void serialize_from_json(glTFBufferView& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (!js.count("buffer")) throw runtime_error("missing value");
-    serialize_from_json(val.buffer, js.at("buffer"));
-    if (js.count("byteOffset"))
-        serialize_from_json(val.byteOffset, js.at("byteOffset"));
-    if (!js.count("byteLength")) throw runtime_error("missing value");
-    serialize_from_json(val.byteLength, js.at("byteLength"));
-    if (js.count("byteStride"))
-        serialize_from_json(val.byteStride, js.at("byteStride"));
-    if (js.count("target")) serialize_from_json(val.target, js.at("target"));
-}
-
-// Parses a glTFCameraOrthographic object
-inline void serialize_from_json(glTFCameraOrthographic& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("xmag")) throw runtime_error("missing value");
-    serialize_from_json(val.xmag, js.at("xmag"));
-    if (!js.count("ymag")) throw runtime_error("missing value");
-    serialize_from_json(val.ymag, js.at("ymag"));
-    if (!js.count("zfar")) throw runtime_error("missing value");
-    serialize_from_json(val.zfar, js.at("zfar"));
-    if (!js.count("znear")) throw runtime_error("missing value");
-    serialize_from_json(val.znear, js.at("znear"));
-}
-
-// Parses a glTFCameraPerspective object
-inline void serialize_from_json(glTFCameraPerspective& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (js.count("aspectRatio"))
-        serialize_from_json(val.aspectRatio, js.at("aspectRatio"));
-    if (!js.count("yfov")) throw runtime_error("missing value");
-    serialize_from_json(val.yfov, js.at("yfov"));
-    if (js.count("zfar")) serialize_from_json(val.zfar, js.at("zfar"));
-    if (!js.count("znear")) throw runtime_error("missing value");
-    serialize_from_json(val.znear, js.at("znear"));
-}
-// Parse a glTFCameraType enum
-inline void serialize_from_json(glTFCameraType& val, const json& js) {
-    static vector<pair<string, glTFCameraType>> table = {
-        {"perspective", glTFCameraType::Perspective},
-        {"orthographic", glTFCameraType::Orthographic},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFCamera object
-inline void serialize_from_json(glTFCamera& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("orthographic"))
-        serialize_from_json(val.orthographic, js.at("orthographic"));
-    if (js.count("perspective"))
-        serialize_from_json(val.perspective, js.at("perspective"));
-    if (!js.count("type")) throw runtime_error("missing value");
-    serialize_from_json(val.type, js.at("type"));
-}
-// Parse a glTFImageMimeType enum
-inline void serialize_from_json(glTFImageMimeType& val, const json& js) {
-    static vector<pair<string, glTFImageMimeType>> table = {
-        {"image/jpeg", glTFImageMimeType::ImageJpeg},
-        {"image/png", glTFImageMimeType::ImagePng},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFImage object
-inline void serialize_from_json(glTFImage& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("uri")) serialize_from_json(val.uri, js.at("uri"));
-    if (js.count("mimeType"))
-        serialize_from_json(val.mimeType, js.at("mimeType"));
-    if (js.count("bufferView"))
-        serialize_from_json(val.bufferView, js.at("bufferView"));
-}
-
-// Parses a glTFTextureInfo object
-inline void serialize_from_json(glTFTextureInfo& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("index")) throw runtime_error("missing value");
-    serialize_from_json(val.index, js.at("index"));
-    if (js.count("texCoord"))
-        serialize_from_json(val.texCoord, js.at("texCoord"));
-}
-
-// Parses a glTFTexture object
-inline void serialize_from_json(glTFTexture& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("sampler")) serialize_from_json(val.sampler, js.at("sampler"));
-    if (js.count("source")) serialize_from_json(val.source, js.at("source"));
-}
-
-// Parses a glTFMaterialNormalTextureInfo object
-inline void serialize_from_json(
-    glTFMaterialNormalTextureInfo& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFTextureInfo&)val, js);
-    if (js.count("scale")) serialize_from_json(val.scale, js.at("scale"));
-}
-
-// Parses a glTFMaterialOcclusionTextureInfo object
-inline void serialize_from_json(
-    glTFMaterialOcclusionTextureInfo& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFTextureInfo&)val, js);
-    if (js.count("strength"))
-        serialize_from_json(val.strength, js.at("strength"));
-}
-
-// Parses a glTFMaterialPbrMetallicRoughness object
-inline void serialize_from_json(
-    glTFMaterialPbrMetallicRoughness& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (js.count("baseColorFactor"))
-        serialize_from_json(val.baseColorFactor, js.at("baseColorFactor"));
-    if (js.count("baseColorTexture"))
-        serialize_from_json(val.baseColorTexture, js.at("baseColorTexture"));
-    if (js.count("metallicFactor"))
-        serialize_from_json(val.metallicFactor, js.at("metallicFactor"));
-    if (js.count("roughnessFactor"))
-        serialize_from_json(val.roughnessFactor, js.at("roughnessFactor"));
-    if (js.count("metallicRoughnessTexture"))
-        serialize_from_json(
-            val.metallicRoughnessTexture, js.at("metallicRoughnessTexture"));
-}
-
-// Parses a glTFMaterialPbrSpecularGlossiness object
-inline void serialize_from_json(
-    glTFMaterialPbrSpecularGlossiness& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (js.count("diffuseFactor"))
-        serialize_from_json(val.diffuseFactor, js.at("diffuseFactor"));
-    if (js.count("diffuseTexture"))
-        serialize_from_json(val.diffuseTexture, js.at("diffuseTexture"));
-    if (js.count("specularFactor"))
-        serialize_from_json(val.specularFactor, js.at("specularFactor"));
-    if (js.count("glossinessFactor"))
-        serialize_from_json(val.glossinessFactor, js.at("glossinessFactor"));
-    if (js.count("specularGlossinessTexture"))
-        serialize_from_json(
-            val.specularGlossinessTexture, js.at("specularGlossinessTexture"));
-}
-// Parse a glTFMaterialAlphaMode enum
-inline void serialize_from_json(glTFMaterialAlphaMode& val, const json& js) {
-    static vector<pair<string, glTFMaterialAlphaMode>> table = {
-        {"OPAQUE", glTFMaterialAlphaMode::Opaque},
-        {"MASK", glTFMaterialAlphaMode::Mask},
-        {"BLEND", glTFMaterialAlphaMode::Blend},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFMaterial object
-inline void serialize_from_json(glTFMaterial& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("pbrMetallicRoughness"))
-        serialize_from_json(
-            val.pbrMetallicRoughness, js.at("pbrMetallicRoughness"));
-    if (js.count("normalTexture"))
-        serialize_from_json(val.normalTexture, js.at("normalTexture"));
-    if (js.count("occlusionTexture"))
-        serialize_from_json(val.occlusionTexture, js.at("occlusionTexture"));
-    if (js.count("emissiveTexture"))
-        serialize_from_json(val.emissiveTexture, js.at("emissiveTexture"));
-    if (js.count("emissiveFactor"))
-        serialize_from_json(val.emissiveFactor, js.at("emissiveFactor"));
-    if (js.count("alphaMode"))
-        serialize_from_json(val.alphaMode, js.at("alphaMode"));
-    if (js.count("alphaCutoff"))
-        serialize_from_json(val.alphaCutoff, js.at("alphaCutoff"));
-    if (js.count("doubleSided"))
-        serialize_from_json(val.doubleSided, js.at("doubleSided"));
-    if (js.count("extensions")) {
-        auto& js_ext = js["extensions"];
-        if (js_ext.count("KHR_materials_pbrSpecularGlossiness"))
-            serialize_from_json(val.pbrSpecularGlossiness,
-                js_ext.at("KHR_materials_pbrSpecularGlossiness"));
-    }
-}
-// Parse a glTFMeshPrimitiveMode enum
-inline void serialize_from_json(glTFMeshPrimitiveMode& val, const json& js) {
-    static vector<pair<int, glTFMeshPrimitiveMode>> table = {
-        {0, glTFMeshPrimitiveMode::Points},
-        {1, glTFMeshPrimitiveMode::Lines},
-        {2, glTFMeshPrimitiveMode::LineLoop},
-        {3, glTFMeshPrimitiveMode::LineStrip},
-        {4, glTFMeshPrimitiveMode::Triangles},
-        {5, glTFMeshPrimitiveMode::TriangleStrip},
-        {6, glTFMeshPrimitiveMode::TriangleFan},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFMeshPrimitive object
-inline void serialize_from_json(glTFMeshPrimitive& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (!js.count("attributes")) throw runtime_error("missing value");
-    serialize_from_json(val.attributes, js.at("attributes"));
-    if (js.count("indices")) serialize_from_json(val.indices, js.at("indices"));
-    if (js.count("material"))
-        serialize_from_json(val.material, js.at("material"));
-    if (js.count("mode")) serialize_from_json(val.mode, js.at("mode"));
-    if (js.count("targets")) serialize_from_json(val.targets, js.at("targets"));
-}
-
-// Parses a glTFMesh object
-inline void serialize_from_json(glTFMesh& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (!js.count("primitives")) throw runtime_error("missing value");
-    serialize_from_json(val.primitives, js.at("primitives"));
-    if (js.count("weights")) serialize_from_json(val.weights, js.at("weights"));
-}
-
-// Parses a glTFNode object
-inline void serialize_from_json(glTFNode& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("camera")) serialize_from_json(val.camera, js.at("camera"));
-    if (js.count("children"))
-        serialize_from_json(val.children, js.at("children"));
-    if (js.count("skin")) serialize_from_json(val.skin, js.at("skin"));
-    if (js.count("matrix")) serialize_from_json(val.matrix, js.at("matrix"));
-    if (js.count("mesh")) serialize_from_json(val.mesh, js.at("mesh"));
-    if (js.count("rotation"))
-        serialize_from_json(val.rotation, js.at("rotation"));
-    if (js.count("scale")) serialize_from_json(val.scale, js.at("scale"));
-    if (js.count("translation"))
-        serialize_from_json(val.translation, js.at("translation"));
-    if (js.count("weights")) serialize_from_json(val.weights, js.at("weights"));
-}
-// Parse a glTFSamplerMagFilter enum
-inline void serialize_from_json(glTFSamplerMagFilter& val, const json& js) {
-    static vector<pair<int, glTFSamplerMagFilter>> table = {
-        {9728, glTFSamplerMagFilter::Nearest},
-        {9729, glTFSamplerMagFilter::Linear},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parse a glTFSamplerMinFilter enum
-inline void serialize_from_json(glTFSamplerMinFilter& val, const json& js) {
-    static vector<pair<int, glTFSamplerMinFilter>> table = {
-        {9728, glTFSamplerMinFilter::Nearest},
-        {9729, glTFSamplerMinFilter::Linear},
-        {9984, glTFSamplerMinFilter::NearestMipmapNearest},
-        {9985, glTFSamplerMinFilter::LinearMipmapNearest},
-        {9986, glTFSamplerMinFilter::NearestMipmapLinear},
-        {9987, glTFSamplerMinFilter::LinearMipmapLinear},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parse a glTFSamplerWrapS enum
-inline void serialize_from_json(glTFSamplerWrapS& val, const json& js) {
-    static vector<pair<int, glTFSamplerWrapS>> table = {
-        {33071, glTFSamplerWrapS::ClampToEdge},
-        {33648, glTFSamplerWrapS::MirroredRepeat},
-        {10497, glTFSamplerWrapS::Repeat},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parse a glTFSamplerWrapT enum
-inline void serialize_from_json(glTFSamplerWrapT& val, const json& js) {
-    static vector<pair<int, glTFSamplerWrapT>> table = {
-        {33071, glTFSamplerWrapT::ClampToEdge},
-        {33648, glTFSamplerWrapT::MirroredRepeat},
-        {10497, glTFSamplerWrapT::Repeat},
-    };
-    serialize_from_json(val, js, table);
-}
-
-// Parses a glTFSampler object
-inline void serialize_from_json(glTFSampler& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("magFilter"))
-        serialize_from_json(val.magFilter, js.at("magFilter"));
-    if (js.count("minFilter"))
-        serialize_from_json(val.minFilter, js.at("minFilter"));
-    if (js.count("wrapS")) serialize_from_json(val.wrapS, js.at("wrapS"));
-    if (js.count("wrapT")) serialize_from_json(val.wrapT, js.at("wrapT"));
-}
-
-// Parses a glTFScene object
-inline void serialize_from_json(glTFScene& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("nodes")) serialize_from_json(val.nodes, js.at("nodes"));
-}
-
-// Parses a glTFSkin object
-inline void serialize_from_json(glTFSkin& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFChildOfRootProperty&)val, js);
-    if (js.count("inverseBindMatrices"))
-        serialize_from_json(
-            val.inverseBindMatrices, js.at("inverseBindMatrices"));
-    if (js.count("skeleton"))
-        serialize_from_json(val.skeleton, js.at("skeleton"));
-    if (!js.count("joints")) throw runtime_error("missing value");
-    serialize_from_json(val.joints, js.at("joints"));
-}
-
-// Parses a glTF object
-inline void serialize_from_json(glTF& val, const json& js) {
-    if (!js.is_object()) throw runtime_error("object expected");
-    serialize_from_json((glTFProperty&)val, js);
-    if (js.count("extensionsUsed"))
-        serialize_from_json(val.extensionsUsed, js.at("extensionsUsed"));
-    if (js.count("extensionsRequired"))
-        serialize_from_json(
-            val.extensionsRequired, js.at("extensionsRequired"));
-    if (js.count("accessors"))
-        serialize_from_json(val.accessors, js.at("accessors"));
-    if (js.count("animations"))
-        serialize_from_json(val.animations, js.at("animations"));
-    if (!js.count("asset")) throw runtime_error("missing value");
-    serialize_from_json(val.asset, js.at("asset"));
-    if (js.count("buffers")) serialize_from_json(val.buffers, js.at("buffers"));
-    if (js.count("bufferViews"))
-        serialize_from_json(val.bufferViews, js.at("bufferViews"));
-    if (js.count("cameras")) serialize_from_json(val.cameras, js.at("cameras"));
-    if (js.count("images")) serialize_from_json(val.images, js.at("images"));
-    if (js.count("materials"))
-        serialize_from_json(val.materials, js.at("materials"));
-    if (js.count("meshes")) serialize_from_json(val.meshes, js.at("meshes"));
-    if (js.count("nodes")) serialize_from_json(val.nodes, js.at("nodes"));
-    if (js.count("samplers"))
-        serialize_from_json(val.samplers, js.at("samplers"));
-    if (js.count("scene")) serialize_from_json(val.scene, js.at("scene"));
-    if (js.count("scenes")) serialize_from_json(val.scenes, js.at("scenes"));
-    if (js.count("skins")) serialize_from_json(val.skins, js.at("skins"));
-    if (js.count("textures"))
-        serialize_from_json(val.textures, js.at("textures"));
-}
-
-// Converts int to json.
-inline void serialize_to_json(int val, json& js) { js = val; }
-
-// Converts float to json.
-inline void serialize_to_json(float val, json& js) { js = val; }
-
-// Converts bool to json.
-inline void serialize_to_json(bool val, json& js) { js = val; }
-
-// Converts string to json.
-inline void serialize_to_json(const string& val, json& js) { js = val; }
-
-// Converts json to json.
-inline void serialize_to_json(const json& val, json& js) { js = val; }
-
-// Dump support function.
-template <typename T>
-inline void serialize_to_json(const T* val, json& js) {
-    if (!val) {
-        js = nullptr;
-        return;
-    }
-    if (!js.is_object()) js = json::object();
-    serialize_to_json(*val, js);
-}
-
-// Dump support function.
-template <typename T, size_t N>
-inline void serialize_to_json(const array<T, N>& vals, json& js) {
-    js = json::array();
-    for (auto i = 0; i < N; i++) serialize_to_json(vals[i], js[i]);
-}
-
-// Dump support function.
-template <typename T>
-inline void serialize_to_json(const vector<T>& vals, json& js) {
-    js = json::array();
-    for (auto i = 0; i < vals.size(); i++) serialize_to_json(vals[i], js[i]);
-}
-
-// Dump support function.
-template <typename T>
-inline void serialize_to_json(const map<string, T>& vals, json& js) {
-    js = json::object();
-    for (auto& kv : vals) serialize_to_json(kv.second, js[kv.first]);
-}
-
-// Dump support function.
-template <typename T, typename T1>
-inline void serialize_to_json(
-    const T& val, json& js, const vector<pair<T1, T>>& table) {
-    auto found = false;
-    auto v = T1();
-    for (auto& kv : table) {
-        if (kv.second == val) {
-            v = kv.first;
-            found = true;
-            break;
-        }
-    }
-    if (!found) throw runtime_error("invalid value");
-    serialize_to_json(v, js);
-}
-
-// Dump support function.
-inline void serialize_to_json(const vec2f& vals, json& js) {
-    serialize_to_json((const array<float, 2>&)vals, js);
-}
-
-// Dump support function.
-inline void serialize_to_json(const vec3f& vals, json& js) {
-    serialize_to_json((const array<float, 3>&)vals, js);
-}
-
-// Dump support function.
-inline void serialize_to_json(const vec4f& vals, json& js) {
-    serialize_to_json((const array<float, 4>&)vals, js);
-}
-
-// Dump support function.
-inline void serialize_to_json(const quat4f& vals, json& js) {
-    serialize_to_json((const array<float, 4>&)vals, js);
-}
-
-// Dump support function.
-inline void serialize_to_json(const mat4f& vals, json& js) {
-    serialize_to_json((const array<float, 16>&)vals, js);
-}
-
-// Converts glTFid to json.
-template <typename T>
-inline void serialize_to_json(const glTFid<T>& val, json& js) {
-    js = (int)val;
-}
-
-// Check for default value
-template <typename T>
-inline bool operator==(const glTFid<T>& a, const glTFid<T>& b) {
-    return (int)a == (int)b;
-}
-
-// Check for default value
-template <typename T>
-inline bool operator!=(const glTFid<T>& a, const glTFid<T>& b) {
-    return (int)a != (int)b;
-}
-
-// Converts a glTFProperty object to JSON
-inline void serialize_to_json(const glTFProperty& val, json& js) {
-    if (!js.is_object()) js = json::object();
-#if YGL_GLTFJSON
-    if (!val.extensions.empty())
-        serialize_to_json(val.extensions, js["extensions"]);
-    if (!val.extras.is_null()) dump_attr(val.extras, "extras", js);
-#endif
-}
-
-// Converts a glTFChildOfRootProperty object to JSON
-inline void serialize_to_json(const glTFChildOfRootProperty& val, json& js) {
-    static auto def = glTFChildOfRootProperty();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    if (val.name != def.name) serialize_to_json(val.name, js["name"]);
-}
-// Converts a glTFAccessorSparseIndicesComponentType enum to JSON
-inline void serialize_to_json(
-    const glTFAccessorSparseIndicesComponentType& val, json& js) {
-    static vector<pair<int, glTFAccessorSparseIndicesComponentType>> table = {
-        {5121, glTFAccessorSparseIndicesComponentType::UnsignedByte},
-        {5123, glTFAccessorSparseIndicesComponentType::UnsignedShort},
-        {5125, glTFAccessorSparseIndicesComponentType::UnsignedInt},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFAccessorSparseIndices object to JSON
-inline void serialize_to_json(const glTFAccessorSparseIndices& val, json& js) {
-    static auto def = glTFAccessorSparseIndices();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.bufferView, js["bufferView"]);
-    if (val.byteOffset != def.byteOffset)
-        serialize_to_json(val.byteOffset, js["byteOffset"]);
-    serialize_to_json(val.componentType, js["componentType"]);
-}
-
-// Converts a glTFAccessorSparseValues object to JSON
-inline void serialize_to_json(const glTFAccessorSparseValues& val, json& js) {
-    static auto def = glTFAccessorSparseValues();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.bufferView, js["bufferView"]);
-    if (val.byteOffset != def.byteOffset)
-        serialize_to_json(val.byteOffset, js["byteOffset"]);
-}
-
-// Converts a glTFAccessorSparse object to JSON
-inline void serialize_to_json(const glTFAccessorSparse& val, json& js) {
-    static auto def = glTFAccessorSparse();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.count, js["count"]);
-    serialize_to_json(val.indices, js["indices"]);
-    serialize_to_json(val.values, js["values"]);
-}
-// Converts a glTFAccessorComponentType enum to JSON
-inline void serialize_to_json(const glTFAccessorComponentType& val, json& js) {
-    static vector<pair<int, glTFAccessorComponentType>> table = {
-        {5120, glTFAccessorComponentType::Byte},
-        {5121, glTFAccessorComponentType::UnsignedByte},
-        {5122, glTFAccessorComponentType::Short},
-        {5123, glTFAccessorComponentType::UnsignedShort},
-        {5125, glTFAccessorComponentType::UnsignedInt},
-        {5126, glTFAccessorComponentType::Float},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFAccessorType enum to JSON
-inline void serialize_to_json(const glTFAccessorType& val, json& js) {
-    static vector<pair<string, glTFAccessorType>> table = {
-        {"SCALAR", glTFAccessorType::Scalar},
-        {"VEC2", glTFAccessorType::Vec2},
-        {"VEC3", glTFAccessorType::Vec3},
-        {"VEC4", glTFAccessorType::Vec4},
-        {"MAT2", glTFAccessorType::Mat2},
-        {"MAT3", glTFAccessorType::Mat3},
-        {"MAT4", glTFAccessorType::Mat4},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFAccessor object to JSON
-inline void serialize_to_json(const glTFAccessor& val, json& js) {
-    static auto def = glTFAccessor();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.bufferView != def.bufferView)
-        serialize_to_json(val.bufferView, js["bufferView"]);
-    if (val.byteOffset != def.byteOffset)
-        serialize_to_json(val.byteOffset, js["byteOffset"]);
-    serialize_to_json(val.componentType, js["componentType"]);
-    if (val.normalized != def.normalized)
-        serialize_to_json(val.normalized, js["normalized"]);
-    serialize_to_json(val.count, js["count"]);
-    serialize_to_json(val.type, js["type"]);
-    if (val.max != def.max) serialize_to_json(val.max, js["max"]);
-    if (val.min != def.min) serialize_to_json(val.min, js["min"]);
-    if (val.sparse != def.sparse) serialize_to_json(val.sparse, js["sparse"]);
-}
-// Converts a glTFAnimationChannelTargetPath enum to JSON
-inline void serialize_to_json(
-    const glTFAnimationChannelTargetPath& val, json& js) {
-    static vector<pair<string, glTFAnimationChannelTargetPath>> table = {
-        {"translation", glTFAnimationChannelTargetPath::Translation},
-        {"rotation", glTFAnimationChannelTargetPath::Rotation},
-        {"scale", glTFAnimationChannelTargetPath::Scale},
-        {"weights", glTFAnimationChannelTargetPath::Weights},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFAnimationChannelTarget object to JSON
-inline void serialize_to_json(const glTFAnimationChannelTarget& val, json& js) {
-    static auto def = glTFAnimationChannelTarget();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.node, js["node"]);
-    serialize_to_json(val.path, js["path"]);
-}
-
-// Converts a glTFAnimationChannel object to JSON
-inline void serialize_to_json(const glTFAnimationChannel& val, json& js) {
-    static auto def = glTFAnimationChannel();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.sampler, js["sampler"]);
-    serialize_to_json(val.target, js["target"]);
-}
-// Converts a glTFAnimationSamplerInterpolation enum to JSON
-inline void serialize_to_json(
-    const glTFAnimationSamplerInterpolation& val, json& js) {
-    static vector<pair<string, glTFAnimationSamplerInterpolation>> table = {
-        {"LINEAR", glTFAnimationSamplerInterpolation::Linear},
-        {"STEP", glTFAnimationSamplerInterpolation::Step},
-        {"CATMULLROMSPLINE",
-            glTFAnimationSamplerInterpolation::CatmullRomSpline},
-        {"CUBICSPLINE", glTFAnimationSamplerInterpolation::CubicSpline},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFAnimationSampler object to JSON
-inline void serialize_to_json(const glTFAnimationSampler& val, json& js) {
-    static auto def = glTFAnimationSampler();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.input, js["input"]);
-    if (val.interpolation != def.interpolation)
-        serialize_to_json(val.interpolation, js["interpolation"]);
-    serialize_to_json(val.output, js["output"]);
-}
-
-// Converts a glTFAnimation object to JSON
-inline void serialize_to_json(const glTFAnimation& val, json& js) {
-    static auto def = glTFAnimation();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    serialize_to_json(val.channels, js["channels"]);
-    serialize_to_json(val.samplers, js["samplers"]);
-}
-
-// Converts a glTFAsset object to JSON
-inline void serialize_to_json(const glTFAsset& val, json& js) {
-    static auto def = glTFAsset();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    if (val.copyright != def.copyright)
-        serialize_to_json(val.copyright, js["copyright"]);
-    if (val.generator != def.generator)
-        serialize_to_json(val.generator, js["generator"]);
-    serialize_to_json(val.version, js["version"]);
-    if (val.minVersion != def.minVersion)
-        serialize_to_json(val.minVersion, js["minVersion"]);
-}
-
-// Converts a glTFBuffer object to JSON
-inline void serialize_to_json(const glTFBuffer& val, json& js) {
-    static auto def = glTFBuffer();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.uri != def.uri) serialize_to_json(val.uri, js["uri"]);
-    serialize_to_json(val.byteLength, js["byteLength"]);
-}
-// Converts a glTFBufferViewTarget enum to JSON
-inline void serialize_to_json(const glTFBufferViewTarget& val, json& js) {
-    static vector<pair<int, glTFBufferViewTarget>> table = {
-        {34962, glTFBufferViewTarget::ArrayBuffer},
-        {34963, glTFBufferViewTarget::ElementArrayBuffer},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFBufferView object to JSON
-inline void serialize_to_json(const glTFBufferView& val, json& js) {
-    static auto def = glTFBufferView();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    serialize_to_json(val.buffer, js["buffer"]);
-    if (val.byteOffset != def.byteOffset)
-        serialize_to_json(val.byteOffset, js["byteOffset"]);
-    serialize_to_json(val.byteLength, js["byteLength"]);
-    if (val.byteStride != def.byteStride)
-        serialize_to_json(val.byteStride, js["byteStride"]);
-    if (val.target != def.target) serialize_to_json(val.target, js["target"]);
-}
-
-// Converts a glTFCameraOrthographic object to JSON
-inline void serialize_to_json(const glTFCameraOrthographic& val, json& js) {
-    static auto def = glTFCameraOrthographic();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.xmag, js["xmag"]);
-    serialize_to_json(val.ymag, js["ymag"]);
-    serialize_to_json(val.zfar, js["zfar"]);
-    serialize_to_json(val.znear, js["znear"]);
-}
-
-// Converts a glTFCameraPerspective object to JSON
-inline void serialize_to_json(const glTFCameraPerspective& val, json& js) {
-    static auto def = glTFCameraPerspective();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    if (val.aspectRatio != def.aspectRatio)
-        serialize_to_json(val.aspectRatio, js["aspectRatio"]);
-    serialize_to_json(val.yfov, js["yfov"]);
-    if (val.zfar != def.zfar) serialize_to_json(val.zfar, js["zfar"]);
-    serialize_to_json(val.znear, js["znear"]);
-}
-// Converts a glTFCameraType enum to JSON
-inline void serialize_to_json(const glTFCameraType& val, json& js) {
-    static vector<pair<string, glTFCameraType>> table = {
-        {"perspective", glTFCameraType::Perspective},
-        {"orthographic", glTFCameraType::Orthographic},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFCamera object to JSON
-inline void serialize_to_json(const glTFCamera& val, json& js) {
-    static auto def = glTFCamera();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.orthographic != def.orthographic)
-        serialize_to_json(val.orthographic, js["orthographic"]);
-    if (val.perspective != def.perspective)
-        serialize_to_json(val.perspective, js["perspective"]);
-    serialize_to_json(val.type, js["type"]);
-}
-// Converts a glTFImageMimeType enum to JSON
-inline void serialize_to_json(const glTFImageMimeType& val, json& js) {
-    static vector<pair<string, glTFImageMimeType>> table = {
-        {"image/jpeg", glTFImageMimeType::ImageJpeg},
-        {"image/png", glTFImageMimeType::ImagePng},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFImage object to JSON
-inline void serialize_to_json(const glTFImage& val, json& js) {
-    static auto def = glTFImage();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.uri != def.uri) serialize_to_json(val.uri, js["uri"]);
-    if (val.mimeType != def.mimeType)
-        serialize_to_json(val.mimeType, js["mimeType"]);
-    if (val.bufferView != def.bufferView)
-        serialize_to_json(val.bufferView, js["bufferView"]);
-}
-
-// Converts a glTFTextureInfo object to JSON
-inline void serialize_to_json(const glTFTextureInfo& val, json& js) {
-    static auto def = glTFTextureInfo();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.index, js["index"]);
-    if (val.texCoord != def.texCoord)
-        serialize_to_json(val.texCoord, js["texCoord"]);
-}
-
-// Converts a glTFTexture object to JSON
-inline void serialize_to_json(const glTFTexture& val, json& js) {
-    static auto def = glTFTexture();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.sampler != def.sampler)
-        serialize_to_json(val.sampler, js["sampler"]);
-    if (val.source != def.source) serialize_to_json(val.source, js["source"]);
-}
-
-// Converts a glTFMaterialNormalTextureInfo object to JSON
-inline void serialize_to_json(
-    const glTFMaterialNormalTextureInfo& val, json& js) {
-    static auto def = glTFMaterialNormalTextureInfo();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFTextureInfo&)val, js);
-    if (val.scale != def.scale) serialize_to_json(val.scale, js["scale"]);
-}
-
-// Converts a glTFMaterialOcclusionTextureInfo object to JSON
-inline void serialize_to_json(
-    const glTFMaterialOcclusionTextureInfo& val, json& js) {
-    static auto def = glTFMaterialOcclusionTextureInfo();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFTextureInfo&)val, js);
-    if (val.strength != def.strength)
-        serialize_to_json(val.strength, js["strength"]);
-}
-
-// Converts a glTFMaterialPbrMetallicRoughness object to JSON
-inline void serialize_to_json(
-    const glTFMaterialPbrMetallicRoughness& val, json& js) {
-    static auto def = glTFMaterialPbrMetallicRoughness();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    if (val.baseColorFactor != def.baseColorFactor)
-        serialize_to_json(val.baseColorFactor, js["baseColorFactor"]);
-    if (val.baseColorTexture != def.baseColorTexture)
-        serialize_to_json(val.baseColorTexture, js["baseColorTexture"]);
-    if (val.metallicFactor != def.metallicFactor)
-        serialize_to_json(val.metallicFactor, js["metallicFactor"]);
-    if (val.roughnessFactor != def.roughnessFactor)
-        serialize_to_json(val.roughnessFactor, js["roughnessFactor"]);
-    if (val.metallicRoughnessTexture != def.metallicRoughnessTexture)
-        serialize_to_json(
-            val.metallicRoughnessTexture, js["metallicRoughnessTexture"]);
-}
-
-// Converts a glTFMaterialPbrSpecularGlossiness object to JSON
-inline void serialize_to_json(
-    const glTFMaterialPbrSpecularGlossiness& val, json& js) {
-    static auto def = glTFMaterialPbrSpecularGlossiness();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    if (val.diffuseFactor != def.diffuseFactor)
-        serialize_to_json(val.diffuseFactor, js["diffuseFactor"]);
-    if (val.diffuseTexture != def.diffuseTexture)
-        serialize_to_json(val.diffuseTexture, js["diffuseTexture"]);
-    if (val.specularFactor != def.specularFactor)
-        serialize_to_json(val.specularFactor, js["specularFactor"]);
-    if (val.glossinessFactor != def.glossinessFactor)
-        serialize_to_json(val.glossinessFactor, js["glossinessFactor"]);
-    if (val.specularGlossinessTexture != def.specularGlossinessTexture)
-        serialize_to_json(
-            val.specularGlossinessTexture, js["specularGlossinessTexture"]);
-}
-// Converts a glTFMaterialAlphaMode enum to JSON
-inline void serialize_to_json(const glTFMaterialAlphaMode& val, json& js) {
-    static vector<pair<string, glTFMaterialAlphaMode>> table = {
-        {"OPAQUE", glTFMaterialAlphaMode::Opaque},
-        {"MASK", glTFMaterialAlphaMode::Mask},
-        {"BLEND", glTFMaterialAlphaMode::Blend},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFMaterial object to JSON
-inline void serialize_to_json(const glTFMaterial& val, json& js) {
-    static auto def = glTFMaterial();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.pbrMetallicRoughness != def.pbrMetallicRoughness)
-        serialize_to_json(val.pbrMetallicRoughness, js["pbrMetallicRoughness"]);
-    if (val.normalTexture != def.normalTexture)
-        serialize_to_json(val.normalTexture, js["normalTexture"]);
-    if (val.occlusionTexture != def.occlusionTexture)
-        serialize_to_json(val.occlusionTexture, js["occlusionTexture"]);
-    if (val.emissiveTexture != def.emissiveTexture)
-        serialize_to_json(val.emissiveTexture, js["emissiveTexture"]);
-    if (val.emissiveFactor != def.emissiveFactor)
-        serialize_to_json(val.emissiveFactor, js["emissiveFactor"]);
-    if (val.alphaMode != def.alphaMode)
-        serialize_to_json(val.alphaMode, js["alphaMode"]);
-    if (val.alphaCutoff != def.alphaCutoff)
-        serialize_to_json(val.alphaCutoff, js["alphaCutoff"]);
-    if (val.doubleSided != def.doubleSided)
-        serialize_to_json(val.doubleSided, js["doubleSided"]);
-
-    if (val.pbrSpecularGlossiness != nullptr) {
-        auto& js_ext = js["extensions"];
-        serialize_to_json(val.pbrSpecularGlossiness,
-            js_ext["KHR_materials_pbrSpecularGlossiness"]);
-    }
-}
-// Converts a glTFMeshPrimitiveMode enum to JSON
-inline void serialize_to_json(const glTFMeshPrimitiveMode& val, json& js) {
-    static vector<pair<int, glTFMeshPrimitiveMode>> table = {
-        {0, glTFMeshPrimitiveMode::Points},
-        {1, glTFMeshPrimitiveMode::Lines},
-        {2, glTFMeshPrimitiveMode::LineLoop},
-        {3, glTFMeshPrimitiveMode::LineStrip},
-        {4, glTFMeshPrimitiveMode::Triangles},
-        {5, glTFMeshPrimitiveMode::TriangleStrip},
-        {6, glTFMeshPrimitiveMode::TriangleFan},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFMeshPrimitive object to JSON
-inline void serialize_to_json(const glTFMeshPrimitive& val, json& js) {
-    static auto def = glTFMeshPrimitive();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    serialize_to_json(val.attributes, js["attributes"]);
-    if (val.indices != def.indices)
-        serialize_to_json(val.indices, js["indices"]);
-    if (val.material != def.material)
-        serialize_to_json(val.material, js["material"]);
-    if (val.mode != def.mode) serialize_to_json(val.mode, js["mode"]);
-    if (val.targets != def.targets)
-        serialize_to_json(val.targets, js["targets"]);
-}
-
-// Converts a glTFMesh object to JSON
-inline void serialize_to_json(const glTFMesh& val, json& js) {
-    static auto def = glTFMesh();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    serialize_to_json(val.primitives, js["primitives"]);
-    if (val.weights != def.weights)
-        serialize_to_json(val.weights, js["weights"]);
-}
-
-// Converts a glTFNode object to JSON
-inline void serialize_to_json(const glTFNode& val, json& js) {
-    static auto def = glTFNode();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.camera != def.camera) serialize_to_json(val.camera, js["camera"]);
-    if (val.children != def.children)
-        serialize_to_json(val.children, js["children"]);
-    if (val.skin != def.skin) serialize_to_json(val.skin, js["skin"]);
-    if (val.matrix != def.matrix) serialize_to_json(val.matrix, js["matrix"]);
-    if (val.mesh != def.mesh) serialize_to_json(val.mesh, js["mesh"]);
-    if (val.rotation != def.rotation)
-        serialize_to_json(val.rotation, js["rotation"]);
-    if (val.scale != def.scale) serialize_to_json(val.scale, js["scale"]);
-    if (val.translation != def.translation)
-        serialize_to_json(val.translation, js["translation"]);
-    if (val.weights != def.weights)
-        serialize_to_json(val.weights, js["weights"]);
-}
-// Converts a glTFSamplerMagFilter enum to JSON
-inline void serialize_to_json(const glTFSamplerMagFilter& val, json& js) {
-    static vector<pair<int, glTFSamplerMagFilter>> table = {
-        {9728, glTFSamplerMagFilter::Nearest},
-        {9729, glTFSamplerMagFilter::Linear},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFSamplerMinFilter enum to JSON
-inline void serialize_to_json(const glTFSamplerMinFilter& val, json& js) {
-    static vector<pair<int, glTFSamplerMinFilter>> table = {
-        {9728, glTFSamplerMinFilter::Nearest},
-        {9729, glTFSamplerMinFilter::Linear},
-        {9984, glTFSamplerMinFilter::NearestMipmapNearest},
-        {9985, glTFSamplerMinFilter::LinearMipmapNearest},
-        {9986, glTFSamplerMinFilter::NearestMipmapLinear},
-        {9987, glTFSamplerMinFilter::LinearMipmapLinear},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFSamplerWrapS enum to JSON
-inline void serialize_to_json(const glTFSamplerWrapS& val, json& js) {
-    static vector<pair<int, glTFSamplerWrapS>> table = {
-        {33071, glTFSamplerWrapS::ClampToEdge},
-        {33648, glTFSamplerWrapS::MirroredRepeat},
-        {10497, glTFSamplerWrapS::Repeat},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFSamplerWrapT enum to JSON
-inline void serialize_to_json(const glTFSamplerWrapT& val, json& js) {
-    static vector<pair<int, glTFSamplerWrapT>> table = {
-        {33071, glTFSamplerWrapT::ClampToEdge},
-        {33648, glTFSamplerWrapT::MirroredRepeat},
-        {10497, glTFSamplerWrapT::Repeat},
-    };
-    serialize_to_json(val, js, table);
-}
-
-// Converts a glTFSampler object to JSON
-inline void serialize_to_json(const glTFSampler& val, json& js) {
-    static auto def = glTFSampler();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.magFilter != def.magFilter)
-        serialize_to_json(val.magFilter, js["magFilter"]);
-    if (val.minFilter != def.minFilter)
-        serialize_to_json(val.minFilter, js["minFilter"]);
-    if (val.wrapS != def.wrapS) serialize_to_json(val.wrapS, js["wrapS"]);
-    if (val.wrapT != def.wrapT) serialize_to_json(val.wrapT, js["wrapT"]);
-}
-
-// Converts a glTFScene object to JSON
-inline void serialize_to_json(const glTFScene& val, json& js) {
-    static auto def = glTFScene();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.nodes != def.nodes) serialize_to_json(val.nodes, js["nodes"]);
-}
-
-// Converts a glTFSkin object to JSON
-inline void serialize_to_json(const glTFSkin& val, json& js) {
-    static auto def = glTFSkin();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFChildOfRootProperty&)val, js);
-    if (val.inverseBindMatrices != def.inverseBindMatrices)
-        serialize_to_json(val.inverseBindMatrices, js["inverseBindMatrices"]);
-    if (val.skeleton != def.skeleton)
-        serialize_to_json(val.skeleton, js["skeleton"]);
-    serialize_to_json(val.joints, js["joints"]);
-}
-
-// Converts a glTF object to JSON
-inline void serialize_to_json(const glTF& val, json& js) {
-    static auto def = glTF();
-    if (!js.is_object()) js = json::object();
-    serialize_to_json((const glTFProperty&)val, js);
-    if (val.extensionsUsed != def.extensionsUsed)
-        serialize_to_json(val.extensionsUsed, js["extensionsUsed"]);
-    if (val.extensionsRequired != def.extensionsRequired)
-        serialize_to_json(val.extensionsRequired, js["extensionsRequired"]);
-    if (val.accessors != def.accessors)
-        serialize_to_json(val.accessors, js["accessors"]);
-    if (val.animations != def.animations)
-        serialize_to_json(val.animations, js["animations"]);
-    serialize_to_json(val.asset, js["asset"]);
-    if (val.buffers != def.buffers)
-        serialize_to_json(val.buffers, js["buffers"]);
-    if (val.bufferViews != def.bufferViews)
-        serialize_to_json(val.bufferViews, js["bufferViews"]);
-    if (val.cameras != def.cameras)
-        serialize_to_json(val.cameras, js["cameras"]);
-    if (val.images != def.images) serialize_to_json(val.images, js["images"]);
-    if (val.materials != def.materials)
-        serialize_to_json(val.materials, js["materials"]);
-    if (val.meshes != def.meshes) serialize_to_json(val.meshes, js["meshes"]);
-    if (val.nodes != def.nodes) serialize_to_json(val.nodes, js["nodes"]);
-    if (val.samplers != def.samplers)
-        serialize_to_json(val.samplers, js["samplers"]);
-    if (val.scene != def.scene) serialize_to_json(val.scene, js["scene"]);
-    if (val.scenes != def.scenes) serialize_to_json(val.scenes, js["scenes"]);
-    if (val.skins != def.skins) serialize_to_json(val.skins, js["skins"]);
-    if (val.textures != def.textures)
-        serialize_to_json(val.textures, js["textures"]);
-}
-// #codegen end func
-
-namespace _impl_gltf {
-
-// Get directory name (including '/').
-inline string _get_dirname(const string& filename) {
-    auto pos = filename.rfind('/');
-    if (pos == string::npos) pos = filename.rfind('\\');
-    if (pos == string::npos) return "";
-    return filename.substr(0, pos + 1);
-}
-
-// Get extension name
-static inline string _get_extension(const string& filename) {
-    auto pos = filename.rfind(".");
-    if (pos == string::npos) return "";
-    return filename.substr(pos);
-}
-
-// Get base name.
-inline string _get_basename(const string& filename) {
-    auto dirname = _get_dirname(filename);
-    auto extension = _get_extension(filename);
-    return filename.substr(
-        dirname.size(), filename.size() - dirname.size() - extension.size());
-}
-
-/// Encode in base64
-inline string base64_encode(
-    unsigned char const* bytes_to_encode, unsigned int in_len) {
-    static const string base64_chars =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "abcdefghijklmnopqrstuvwxyz"
-        "0123456789+/";
-
-    string ret;
-    int i = 0;
-    int j = 0;
-    unsigned char char_array_3[3];
-    unsigned char char_array_4[4];
-
-    while (in_len--) {
-        char_array_3[i++] = *(bytes_to_encode++);
-        if (i == 3) {
-            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) +
-                              ((char_array_3[1] & 0xf0) >> 4);
-            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) +
-                              ((char_array_3[2] & 0xc0) >> 6);
-            char_array_4[3] = char_array_3[2] & 0x3f;
-
-            for (i = 0; (i < 4); i++) ret += base64_chars[char_array_4[i]];
-            i = 0;
-        }
-    }
-
-    if (i) {
-        for (j = i; j < 3; j++) char_array_3[j] = '\0';
-
-        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-        char_array_4[1] =
-            ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-        char_array_4[2] =
-            ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-        char_array_4[3] = char_array_3[2] & 0x3f;
-
-        for (j = 0; (j < i + 1); j++) ret += base64_chars[char_array_4[j]];
-
-        while ((i++ < 3)) ret += '=';
-    }
-
-    return ret;
-}
-
-/// Decode from base64
-inline string base64_decode(string const& encoded_string) {
-    static const string base64_chars =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "abcdefghijklmnopqrstuvwxyz"
-        "0123456789+/";
-
-    auto is_base64 = [](unsigned char c) -> bool {
-        return (isalnum(c) || (c == '+') || (c == '/'));
-    };
-
-    int in_len = (int)encoded_string.size();
-    int i = 0;
-    int j = 0;
-    int in_ = 0;
-    unsigned char char_array_4[4], char_array_3[3];
-    string ret;
-
-    while (in_len-- && (encoded_string[in_] != '=') &&
-           is_base64(encoded_string[in_])) {
-        char_array_4[i++] = encoded_string[in_];
-        in_++;
-        if (i == 4) {
-            for (i = 0; i < 4; i++)
-                char_array_4[i] = base64_chars.find(char_array_4[i]);
-
-            char_array_3[0] =
-                (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) +
-                              ((char_array_4[2] & 0x3c) >> 2);
-            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-
-            for (i = 0; (i < 3); i++) ret += char_array_3[i];
-            i = 0;
-        }
-    }
-
-    if (i) {
-        for (j = i; j < 4; j++) char_array_4[j] = 0;
-
-        for (j = 0; j < 4; j++)
-            char_array_4[j] = base64_chars.find(char_array_4[j]);
-
-        char_array_3[0] =
-            (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-        char_array_3[1] =
-            ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-
-        for (j = 0; (j < i - 1); j++) ret += char_array_3[j];
-    }
-
-    return ret;
-}
-
-// Fix path
-inline string _fix_path(const string& path_) {
-    auto path = path_;
-    for (auto& c : path)
-        if (c == '\\') c = '/';
-    return path;
-}
-
-// Load a binary file in memory
-// http://stackoverflow.com/questions/116038/what-is-the-best-way-to-read-an-entire-file-into-a-stdstring-in-c
-vector<unsigned char> load_binfile(const string& filename, bool skip_missing) {
-    std::ifstream ifs(
-        filename.c_str(), std::ios::in | std::ios::binary | std::ios::ate);
-    if (!ifs) {
-        if (skip_missing) return {};
-        throw runtime_error("could not open file " + filename);
-    }
-    std::ifstream::pos_type fileSize = ifs.tellg();
-    ifs.seekg(0, std::ios::beg);
-    vector<unsigned char> bytes(fileSize);
-    ifs.read((char*)&bytes[0], fileSize);
-    return bytes;
-}
-
-// Saves text.
-void save_textfile(const string& filename, const string& txt) {
-    auto f = fopen(filename.c_str(), "wt");
-    if (!f) throw runtime_error("cannot write file " + filename);
-    fwrite(txt.c_str(), 1, (int)txt.size(), f);
-    fclose(f);
-}
-
-// Saves binary.
-void save_binfile(const string& filename, const vector<unsigned char>& bin,
-    bool skip_missing) {
-    auto f = fopen(filename.c_str(), "wb");
-    if (!f && !skip_missing)
-        throw runtime_error("cannot write file " + filename);
-    fwrite(bin.data(), 1, (int)bin.size(), f);
-    fclose(f);
-}
-
-// Check if a string starts with a prefix
-static inline bool startsiwith(const string& str, const string& prefix) {
-    if (str.length() < prefix.length()) return false;
-    return str.substr(0, prefix.length()) == prefix;
-}
-
-// Load buffer data.
-void load_buffers(glTF* gltf, const string& dirname, bool skip_missing) {
-    for (auto buffer : gltf->buffers) {
-        if (buffer->uri == "") continue;
-        if (startsiwith(buffer->uri, "data:")) {
-            // assume it is base64 and find ','
-            auto pos = buffer->uri.find(',');
-            if (pos == buffer->uri.npos) {
-                if (skip_missing) continue;
-                throw runtime_error("could not decode base64 data");
-            }
-            // decode
-            auto data = base64_decode(buffer->uri.substr(pos + 1));
-            buffer->data = vector<unsigned char>((unsigned char*)data.c_str(),
-                (unsigned char*)data.c_str() + data.length());
-        } else {
-            buffer->data =
-                load_binfile(_fix_path(dirname + buffer->uri), skip_missing);
-            if (buffer->data.empty()) {
-                if (skip_missing) continue;
-                throw runtime_error("could not load binary file " +
-                                    _fix_path(dirname + buffer->uri));
-            }
-        }
-        if (buffer->byteLength != buffer->data.size()) {
-            if (skip_missing) continue;
-            throw runtime_error("mismatched buffer size");
-        }
-    }
-}
-
-// Loads images.
-void load_images(glTF* gltf, const string& dirname, bool skip_missing) {
-    for (auto image : gltf->images) {
-        image->data = image_data();
-        auto filename = string();
-#if YGL_IMAGEIO
-        if (image->bufferView || startsiwith(image->uri, "data:")) {
-            auto buffer = string();
-            auto data = (unsigned char*)nullptr;
-            auto data_size = 0;
-            if (image->bufferView) {
-                auto view = gltf->get(image->bufferView);
-                auto buffer = gltf->get(view->buffer);
-                if (!view || !buffer || view->byteStride) {
-                    if (skip_missing) continue;
-                    throw runtime_error("invalid image buffer view");
-                }
-                if (image->mimeType == glTFImageMimeType::ImagePng)
-                    filename = "internal_data.png";
-                else if (image->mimeType == glTFImageMimeType::ImageJpeg)
-                    filename = "internal_data.jpg";
-                else {
-                    if (skip_missing) continue;
-                    throw runtime_error("unsupported image format");
-                }
-                data = buffer->data.data() + view->byteOffset;
-                data_size = view->byteLength;
-            } else {
-                // assume it is base64 and find ','
-                auto pos = image->uri.find(',');
-                if (pos == image->uri.npos) {
-                    if (skip_missing) continue;
-                    throw runtime_error("could not decode base64 data");
-                }
-                auto header = image->uri.substr(0, pos);
-                for (auto format : {"png", "jpg", "jpeg", "tga", "ppm", "hdr"})
-                    if (header.find(format) != header.npos)
-                        filename = string("fake.") + format;
-                if (is_hdr_filename(filename)) {
-                    if (skip_missing) continue;
-                    throw runtime_error("unsupported embedded image format " +
-                                        header.substr(0, pos));
-                }
-                // decode
-                buffer = base64_decode(image->uri.substr(pos + 1));
-                data_size = (int)buffer.size();
-                data = (unsigned char*)buffer.data();
-            }
-            if (is_hdr_filename(filename)) {
-                image->data.dataf = load_imagef_from_memory(filename, data,
-                    data_size, image->data.width, image->data.height,
-                    image->data.ncomp);
-            } else {
-                image->data.datab = load_image_from_memory(filename, data,
-                    data_size, image->data.width, image->data.height,
-                    image->data.ncomp);
-            }
-        } else {
-            filename = _fix_path(dirname + image->uri);
-            if (is_hdr_filename(filename)) {
-                image->data.dataf = load_imagef(filename, image->data.width,
-                    image->data.height, image->data.ncomp);
-            } else {
-                image->data.datab = load_image(filename, image->data.width,
-                    image->data.height, image->data.ncomp);
-            }
-        }
-#endif
-        if (image->data.dataf.empty() && image->data.datab.empty()) {
-            if (skip_missing) continue;
-            throw runtime_error("cannot load image " + filename);
-        }
-    }
-}
-
-// Loads a gltf.
-glTF* load_gltf(
-    const string& filename, bool load_bin, bool load_image, bool skip_missing) {
-    // clear data
-    auto gltf = unique_ptr<glTF>(new glTF());
-
-    // load json
-    std::ifstream stream(filename.c_str());
-    if (!stream) throw runtime_error("could not load json " + filename);
-    auto js = json();
-    try {
-        stream >> js;
-    } catch (const exception& e) {
-        throw runtime_error(
-            string("could not load json with error ") + e.what());
-    }
-
-    // parse json
-    auto gltf_ = gltf.get();
-    try {
-        serialize_from_json(gltf_, js);
-    } catch (const exception& e) {
-        throw runtime_error("error parsing gltf " + string(e.what()));
-    }
-
-    // load external resources
-    auto dirname = _get_dirname(filename);
-    if (load_bin) load_buffers(gltf.get(), dirname, skip_missing);
-    if (load_image) load_images(gltf.get(), dirname, skip_missing);
-
-    // done
-    return gltf.release();
-}
-
-// Save buffer data.
-void save_buffers(const glTF* gltf, const string& dirname, bool skip_missing) {
-    for (auto buffer : gltf->buffers) {
-        if (startsiwith(buffer->uri, "data:")) {
-            if (skip_missing) continue;
-            throw runtime_error("saving of embedded data not supported");
-        }
-        save_binfile(dirname + buffer->uri, buffer->data, skip_missing);
-    }
-}
-
-// Save images.
-void save_images(const glTF* gltf, const string& dirname, bool skip_missing) {
-    for (auto image : gltf->images) {
-        if (startsiwith(image->uri, "data:")) {
-            if (skip_missing) continue;
-            throw runtime_error("saving of embedded data not supported");
-        }
-        auto filename = dirname + image->uri;
-        auto ok = false;
-#if YGL_IMAGEIO
-        if (!image->data.datab.empty()) {
-            ok = save_image(filename, image->data.width, image->data.height,
-                image->data.ncomp, image->data.datab.data());
-        }
-        if (!image->data.dataf.empty()) {
-            ok = save_imagef(filename, image->data.width, image->data.height,
-                image->data.ncomp, image->data.dataf.data());
-        }
-#endif
-        if (!ok) {
-            if (skip_missing) continue;
-            throw runtime_error("cannot save image " + filename);
-        }
-    }
-}
-
-// Saves a gltf.
-void save_gltf(
-    const string& filename, const glTF* gltf, bool save_bin, bool save_image) {
-    // dumps json
-    auto js = json();
-    serialize_to_json(gltf, js);
-
-    // save json
-    save_textfile(filename, js.dump(2));
-
-    // save external resources
-    auto dirname = _get_dirname(filename);
-    if (save_bin) save_buffers(gltf, dirname, false);
-    if (save_image) save_images(gltf, dirname, false);
-}
-
-// reading shortcut
-template <typename T>
-inline void read(FILE* f, T* v, int count) {
-    if (fread(v, sizeof(T), count, f) != count)
-        throw runtime_error("could not read binary file");
-}
-
-// writing shortcut
-template <typename T>
-inline void fwrite(FILE* f, const T* v, int count) {
-    if (fwrite(v, sizeof(T), count, f) != count)
-        runtime_error("could not write binary file");
-}
-
-// Loads a binary gltf.
-glTF* load_binary_gltf(
-    const string& filename, bool load_bin, bool load_image, bool skip_missing) {
-    // clear data
-    auto gltf = unique_ptr<glTF>(new glTF());
-
-    // opens binary file
-    auto f = fopen(filename.c_str(), "rb");
-    if (!f) throw runtime_error("could not load binary file " + filename);
-
-    // read magic
-    uint32_t magic;
-    read(f, &magic, 1);
-    if (magic != 0x46546C67) throw runtime_error("corrupted glb format");
-
-    // read version
-    uint32_t version;
-    read(f, &version, 1);
-    if (version != 1 && version != 2)
-        throw runtime_error("unsupported glb version");
-
-    // read length
-    uint32_t length;
-    read(f, &length, 1);
-
-    // data
-    auto json_bytes = vector<char>();
-    auto buffer_bytes = vector<unsigned char>();
-    uint32_t buffer_length = 0;
-
-    if (version == 1) {
-        // read content length and format
-        uint32_t json_length, json_format;
-        read(f, &json_length, 1);
-        read(f, &json_format, 1);
-
-        // read json bytes
-        json_bytes.resize(json_length);
-        read(f, json_bytes.data(), json_length);
-
-        // read buffer bytes
-        if (load_bin) {
-            buffer_bytes.resize(length - json_length - 20);
-            read(f, buffer_bytes.data(), (int)buffer_bytes.size());
-            buffer_length = (int)buffer_bytes.size();
-        }
-    }
-
-    if (version == 2) {
-        // read content length and format
-        uint32_t json_length, json_format;
-        read(f, &json_length, 1);
-        read(f, &json_format, 1);
-        if (json_format != 0x4E4F534A) {
-            throw runtime_error("corrupt binary format");
-            return nullptr;
-        }
-
-        // read json bytes
-        json_bytes.resize(json_length);
-        read(f, json_bytes.data(), (int)json_bytes.size());
-
-        // read content length and format
-        uint32_t buffer_format;
-        read(f, &buffer_length, 1);
-        read(f, &buffer_format, 1);
-        if (buffer_format != 0x004E4942)
-            throw runtime_error("corrupt binary format");
-
-        // read buffer bytes
-        if (load_bin) {
-            buffer_bytes.resize(buffer_length);
-            read(f, buffer_bytes.data(), (int)buffer_bytes.size());
-        }
-    }
-
-    // load json
-    auto js = json();
-    try {
-        json_bytes.push_back(0);
-        js = json::parse(json_bytes.data());
-    } catch (const exception& e) {
-        throw runtime_error(
-            string("could not load json with error ") + e.what());
-    }
-
-    // parse json
-    auto gltf_ = gltf.get();
-    try {
-        serialize_from_json(gltf_, js);
-    } catch (const exception& e) {
-        throw runtime_error("cannot parse gltf json " + string(e.what()));
-        return nullptr;
-    }
-
-    // fix internal buffer
-    auto buffer = gltf->buffers.at(0);
-    buffer->byteLength = buffer_length;
-    if (version == 2) buffer->uri = "";
-    if (load_bin) { buffer->data = buffer_bytes; }
-
-    // load external resources
-    auto dirname = _get_dirname(filename);
-    if (load_bin) load_buffers(gltf.get(), dirname, skip_missing);
-    if (load_image) load_images(gltf.get(), dirname, skip_missing);
-
-    // close
-    fclose(f);
-
-    // done
-    return gltf.release();
-}
-
-// Saves a binary gltf.
-void save_binary_gltf(
-    const string& filename, const glTF* gltf, bool save_bin, bool save_image) {
-    // opens binary file
-    auto f = fopen(filename.c_str(), "wb");
-    if (!f) throw runtime_error("could not write binary file");
-
-    // dumps json
-    auto js = json();
-    serialize_to_json(gltf, js);
-
-    // fix string
-    auto js_str = js.dump(2);
-    while (js_str.length() % 4) js_str += " ";
-    uint32_t json_length = (uint32_t)js_str.size();
-
-    // internal buffer
-    auto buffer = gltf->buffers.at(0);
-    uint32_t buffer_length = buffer->byteLength;
-    if (buffer_length % 4) buffer_length += 4 - buffer_length % 4;
-
-    // write header
-    uint32_t magic = 0x46546C67;
-    fwrite(f, &magic, 1);
-    uint32_t version = 2;
-    fwrite(f, &version, 1);
-    uint32_t length = 12 + 8 + json_length + 8 + buffer_length;
-    fwrite(f, &length, 1);
-
-    // write json
-    uint32_t json_type = 0x4E4F534A;
-    fwrite(f, &json_length, 1);
-    fwrite(f, &json_type, 1);
-    fwrite(f, js_str.data(), (int)json_length);
-
-    if (save_bin) {
-        uint32_t buffer_type = 0x004E4942;
-        fwrite(f, &buffer_length, 1);
-        fwrite(f, &buffer_type, 1);
-        fwrite(f, buffer->data.data(), (int)buffer->data.size());
-        char pad = 0;
-        for (auto i = 0; i < buffer_length - buffer->data.size(); i++)
-            fwrite(f, &pad, 1);
-    }
-
-    // close
-    fclose(f);
-
-    // save external resources
-    auto dirname = _get_dirname(filename);
-    if (save_bin) save_buffers(gltf, dirname, false);
-    if (save_image) save_images(gltf, dirname, false);
-}
-
-}  // namespace _impl_gltf
-
-// Loads a gltf file from disk
-glTF* load_gltf(
-    const string& filename, bool load_bin, bool load_img, bool skip_missing) {
-    return _impl_gltf::load_gltf(filename, load_bin, load_img, skip_missing);
-}
-
-// Loads a binary gltf file from disk
-glTF* load_binary_gltf(
-    const string& filename, bool load_bin, bool load_img, bool skip_missing) {
-    return _impl_gltf::load_binary_gltf(
-        filename, load_bin, load_img, skip_missing);
-}
-
-// Saves a scene to disk
-void save_gltf(
-    const string& filename, const glTF* gltf, bool save_bin, bool save_images) {
-    _impl_gltf::save_gltf(filename, gltf, save_bin, save_images);
-}
-
-// Saves a scene to disk
-void save_binary_gltf(
-    const string& filename, const glTF* gltf, bool save_bin, bool save_images) {
-    _impl_gltf::save_binary_gltf(filename, gltf, save_bin, save_images);
-}
-
-accessor_view::accessor_view(const glTF* gltf, const glTFAccessor* accessor) {
-    _size = accessor->count;
-    _ncomp = _num_components(accessor->type);
-    _ctype = accessor->componentType;
-    _normalize = accessor->normalized;
-    auto buffer_view = gltf->get(accessor->bufferView);
-    _stride = (buffer_view->byteStride) ? buffer_view->byteStride :
-                                          (_ctype_size(_ctype) * _ncomp);
-    auto buffer = gltf->get(buffer_view->buffer);
-    _data =
-        buffer->data.data() + accessor->byteOffset + buffer_view->byteOffset;
-    auto remaining_buffer_bytes =
-        buffer->data.size() - (_data - buffer->data.data());
-    auto view_bytes = _size * _stride;
-    _valid = remaining_buffer_bytes >= view_bytes;
-    if (!_valid) throw runtime_error("corrupted glTF accessor view");
-}
-
-float accessor_view::get(int idx, int c) const {
-    auto i = min(max(c, 0), ncomp() - 1);
-    auto valb = _data + _stride * idx + i * _ctype_size(_ctype);
-    // use double for integer conversion to attempt to maintain precision
-    if (!_normalize) {
-        switch (_ctype) {
-            case glTFAccessorComponentType::Float:
-                return (float)(*(float*)valb);
-            case glTFAccessorComponentType::Byte: return (float)(*(char*)valb);
-            case glTFAccessorComponentType::UnsignedByte:
-                return (float)(*(unsigned char*)valb);
-            case glTFAccessorComponentType::Short:
-                return (float)(*(short*)valb);
-            case glTFAccessorComponentType::UnsignedShort:
-                return (float)(*(unsigned short*)valb);
-            case glTFAccessorComponentType::UnsignedInt:
-                return (float)(*(unsigned int*)valb);
-            case glTFAccessorComponentType::NotSet:
-                throw runtime_error("bad enum value");
-                break;
-        }
-
-    } else {
-        switch (_ctype) {
-            case glTFAccessorComponentType::Float:
-                return (float)(*(float*)valb);
-            case glTFAccessorComponentType::Byte:
-                return (float)max((float)(c / 127.0), -1.0f);
-            case glTFAccessorComponentType::UnsignedByte:
-                return (float)(c / 255.0);
-            case glTFAccessorComponentType::Short:
-                return (float)(max((float)(c / 32767.0), -1.0f));
-            case glTFAccessorComponentType::UnsignedShort:
-                return (float)(c / 65535.0);
-            case glTFAccessorComponentType::UnsignedInt:
-                return (float)(max((float)(c / 2147483647.0), -1.0f));
-            case glTFAccessorComponentType::NotSet:
-                throw runtime_error("bad enum value");
-                break;
-        }
-    }
-    return 0;
-}
-
-int accessor_view::geti(int idx, int c) const {
-    auto i = min(max(c, 0), ncomp() - 1);
-    auto valb = _data + _stride * idx + i * _ctype_size(_ctype);
-    // use double for integer conversion to attempt to maintain precision
-    switch (_ctype) {
-        case glTFAccessorComponentType::Float: return (int)(*(float*)valb);
-        case glTFAccessorComponentType::Byte: return (int)(*(char*)valb);
-        case glTFAccessorComponentType::UnsignedByte:
-            return (int)(*(unsigned char*)valb);
-        case glTFAccessorComponentType::Short: return (int)(*(short*)valb);
-        case glTFAccessorComponentType::UnsignedShort:
-            return (int)(*(unsigned short*)valb);
-        case glTFAccessorComponentType::UnsignedInt:
-            return (int)(*(unsigned int*)valb);
-        case glTFAccessorComponentType::NotSet:
-            throw runtime_error("bad enum value");
-            break;
-    }
-    return 0;
-}
-
-int accessor_view::_num_components(glTFAccessorType type) {
-    switch (type) {
-        case glTFAccessorType::Scalar: return 1;
-        case glTFAccessorType::Vec2: return 2;
-        case glTFAccessorType::Vec3: return 3;
-        case glTFAccessorType::Vec4: return 4;
-        case glTFAccessorType::Mat2: return 4;
-        case glTFAccessorType::Mat3: return 9;
-        case glTFAccessorType::Mat4: return 16;
-        default: assert(false); return 0;
-    }
-}
-
-int accessor_view::_ctype_size(glTFAccessorComponentType componentType) {
-    switch (componentType) {
-        case glTFAccessorComponentType::Byte: return 1;
-        case glTFAccessorComponentType::UnsignedByte: return 1;
-        case glTFAccessorComponentType::Short: return 2;
-        case glTFAccessorComponentType::UnsignedShort: return 2;
-        case glTFAccessorComponentType::UnsignedInt: return 4;
-        case glTFAccessorComponentType::Float: return 4;
-        default: assert(false); return 0;
-    }
-}
-
-}  // namespace ygl
-
-#endif
-
-#if YGL_SVG
-
-// -----------------------------------------------------------------------------
-// IMPLEMENTATION FOR SVG
-// -----------------------------------------------------------------------------
-namespace ygl {
-
-namespace _impl_svg {
-
-// Load SVG
-inline svg_scene* load_svg(const string& filename) {
-    auto svg = nsvgParseFromFile(filename.c_str(), "mm", 96);
-    if (!svg) throw runtime_error("cannot load SVG");
-    auto scn = new svg_scene();
-    for (auto shape = svg->shapes; shape != nullptr; shape = shape->next) {
-        auto shp = new svg_shape();
-        scn->shapes += shp;
-        for (auto path = shape->paths; path != nullptr; path = path->next) {
-            auto pth = new svg_path();
-            shp->paths += pth;
-            pth->pos.resize(path->npts);
-            for (int i = 0; i < path->npts; i += 1) {
-                pth->pos[i] = {path->pts[i * 2 + 0], path->pts[i * 2 + 1]};
-            }
-        }
-    }
-    nsvgDelete(svg);
-    return scn;
-}
-
-// Save SVG
-inline void save_svg(const string& filename, const vector<svg_path>& paths) {
-    throw runtime_error("not implemented yet");
-}
-
-}  // namespace _impl_svg
-
-// Load SVG
-svg_scene* load_svg(const string& filename) {
-    return _impl_svg::load_svg(filename);
-}
-
-// Save SVG
-void save_svg(const string& filename, const vector<svg_path>& paths) {
-    return _impl_svg::save_svg(filename, paths);
-}
-
-}  // namespace ygl
-
-#endif
-
-// -----------------------------------------------------------------------------
-// IMPLEMENTATION FOR SIMPLE SCENE
-// -----------------------------------------------------------------------------
-namespace ygl {
-
-namespace _impl_scn {
-
-// Flattens an scene
-inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
+scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
     // clear scene
     auto scn = new scene();
 
-    struct obj_vertex_hash {
+    struct obj_obj_vertex_hash {
         std::hash<int> Th;
         size_t operator()(const obj_vertex& vv) const {
             auto v = (const int*)&vv;
@@ -5286,7 +3794,7 @@ inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
     for (auto omat : obj->materials) {
         auto mat = new material();
         mat->name = omat->name;
-        mat->mtype = material_type::specular_roughness;
+        mat->type = material_type::specular_roughness;
         mat->ke = {omat->ke.x, omat->ke.y, omat->ke.z};
         mat->kd = {omat->kd.x, omat->kd.y, omat->kd.z};
         mat->ks = {omat->ks.x, omat->ks.y, omat->ks.z};
@@ -5336,15 +3844,16 @@ inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
     }
 
     // convert meshes
-    auto omap = unordered_map<string, vector<shape*>>{{"", {}}};
+    auto omap = unordered_map<string, shape_group*>{{"", nullptr}};
     for (auto omsh : obj->objects) {
-        omap[omsh->name] = {};
+        auto sgr = new shape_group();
+        sgr->name = omsh->name;
         for (auto& oshp : omsh->groups) {
             if (oshp.verts.empty()) continue;
             if (oshp.elems.empty()) continue;
 
             auto shp = new shape();
-            shp->name = omsh->name + oshp.groupname;
+            shp->name = oshp.groupname;
             shp->mat = mmap[oshp.matname];
             shp->subdivision_level = oshp.subdivision_level;
             shp->subdivision_catmullclark = oshp.subdivision_catmullclark;
@@ -5387,7 +3896,7 @@ inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
 
             if (!as_facevarying) {
                 // insert all vertices
-                unordered_map<obj_vertex, int, obj_vertex_hash> vert_map;
+                unordered_map<obj_vertex, int, obj_obj_vertex_hash> vert_map;
                 vector<int> vert_ids;
                 for (auto& vert : oshp.verts) {
                     if (vert_map.find(vert) == vert_map.end()) {
@@ -5595,12 +4104,14 @@ inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                 // fix smoothing
                 if (!oshp.smoothing && opts.obj_facet_non_smooth) {}
             }
-            scn->shapes.push_back(shp);
-            omap[omsh->name].push_back(shp);
+            sgr->shapes.push_back(shp);
         }
+        scn->shapes.push_back(sgr);
+        omap[omsh->name] = sgr;
     }
 
     // convert cameras
+    auto cmap = unordered_map<string, camera*>{{"", nullptr}};
     for (auto ocam : obj->cameras) {
         auto cam = new camera();
         cam->name = ocam->name;
@@ -5611,10 +4122,12 @@ inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
         cam->focus = ocam->focus;
         cam->frame = ocam->frame;
         scn->cameras.push_back(cam);
+        cmap[cam->name] = cam;
     }
 
     // convert envs
     unordered_set<material*> env_mat;
+    auto emap = unordered_map<string, environment*>{{"", nullptr}};
     for (auto oenv : obj->environments) {
         auto env = new environment();
         env->name = oenv->name;
@@ -5627,10 +4140,12 @@ inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
         }
         env->frame = oenv->frame;
         scn->environments.push_back(env);
+        emap[env->name] = env;
     }
 
     // remove env materials
-    for (auto shp : scn->shapes) env_mat.erase(shp->mat);
+    for (auto sgr : scn->shapes)
+        for (auto shp : sgr->shapes) env_mat.erase(shp->mat);
     for (auto mat : env_mat) {
         auto end =
             std::remove(scn->materials.begin(), scn->materials.end(), mat);
@@ -5638,15 +4153,50 @@ inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
         delete mat;
     }
 
-    // convert instances
-    for (auto oist : obj->instances) {
-        for (auto shp : omap[oist->objname]) {
-            auto ist = new instance();
-            ist->name = oist->name;
-            ist->shp = shp;
-            ist->frame = oist->frame;
-            scn->instances.push_back(ist);
+    if (!obj->nodes.empty()) {
+        // convert nodes
+        for (auto onde : obj->nodes) {
+            auto nde = new node();
+            nde->name = onde->name;
+            nde->cam = cmap.at(onde->camname);
+            if (!onde->objname.empty()) {
+                auto ist = new instance();
+                ist->name = onde->name;
+                ist->shp = omap.at(onde->objname);
+                nde->ist = ist;
+                scn->instances.push_back(ist);
+            }
+            nde->env = emap.at(onde->envname);
+            nde->translation = onde->translation;
+            nde->rotation = onde->rotation;
+            nde->scaling = onde->scaling;
+            nde->frame = onde->frame;
+            scn->nodes.push_back(nde);
         }
+
+        // set up parent pointers
+        for (auto nid = 0; nid < obj->nodes.size(); nid++) {
+            auto onde = obj->nodes[nid];
+            if (onde->parent.empty()) continue;
+            auto nde = scn->nodes[nid];
+            for (auto parent : scn->nodes) {
+                if (parent->name == onde->parent) {
+                    nde->parent = parent;
+                    break;
+                }
+            }
+        }
+    }
+
+    // update transforms
+    update_transforms(scn);
+
+    // remove hierarchy if necessary
+    if (!opts.preserve_hierarchy) {
+        for (auto nde : scn->nodes) delete nde;
+        scn->nodes.clear();
+        for (auto anm : scn->animations) delete anm;
+        scn->animations.clear();
     }
 
     // done
@@ -5654,7 +4204,7 @@ inline scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
 }
 
 // Load an obj scene
-inline scene* load_obj_scene(const string& filename, const load_options& opts) {
+scene* load_obj_scene(const string& filename, const load_options& opts) {
     auto oscn = unique_ptr<obj_scene>(load_obj(filename, opts.load_textures,
         opts.skip_missing, opts.obj_flip_texcoord, opts.obj_flip_tr));
     auto scn = unique_ptr<scene>(obj_to_scene(oscn.get(), opts));
@@ -5662,7 +4212,7 @@ inline scene* load_obj_scene(const string& filename, const load_options& opts) {
 }
 
 // Save an scene
-inline obj_scene* scene_to_obj(const scene* scn) {
+obj_scene* scene_to_obj(const scene* scn) {
     auto obj = new obj_scene();
 
     auto add_texture = [](const texture_info& info, bool bump = false) {
@@ -5682,16 +4232,16 @@ inline obj_scene* scene_to_obj(const scene* scn) {
             otxt->width = txt->hdr.width();
             otxt->height = txt->hdr.height();
             otxt->ncomp = 4;
-            otxt->dataf.assign((float*)txt->hdr.data(),
-                (float*)txt->hdr.data() +
+            otxt->dataf.assign((float*)data(txt->hdr),
+                (float*)data(txt->hdr) +
                     txt->hdr.width() * txt->hdr.height() * 4);
         }
         if (txt->ldr) {
             otxt->width = txt->ldr.width();
             otxt->height = txt->ldr.height();
             otxt->ncomp = 4;
-            otxt->datab.assign((uint8_t*)txt->ldr.data(),
-                (uint8_t*)txt->ldr.data() +
+            otxt->datab.assign((uint8_t*)data(txt->ldr),
+                (uint8_t*)data(txt->ldr) +
                     txt->ldr.width() * txt->ldr.height() * 4);
         }
         obj->textures.push_back(otxt);
@@ -5703,7 +4253,7 @@ inline obj_scene* scene_to_obj(const scene* scn) {
         omat->name = mat->name;
         omat->ke = {mat->ke.x, mat->ke.y, mat->ke.z};
         omat->ke_txt = add_texture(mat->ke_txt);
-        switch (mat->mtype) {
+        switch (mat->type) {
             case material_type::specular_roughness: {
                 omat->kd = {mat->kd.x, mat->kd.y, mat->kd.z};
                 omat->ks = {mat->ks.x, mat->ks.y, mat->ks.z};
@@ -5757,78 +4307,41 @@ inline obj_scene* scene_to_obj(const scene* scn) {
     }
 
     // convert shapes
-    for (auto shp : scn->shapes) {
-        auto offset = obj_vertex{(int)obj->pos.size(),
-            (int)obj->texcoord.size(), (int)obj->norm.size(),
-            (int)obj->color.size(), (int)obj->radius.size()};
-        for (auto& v : shp->pos) obj->pos.push_back({v.x, v.y, v.z});
-        for (auto& v : shp->norm) obj->norm.push_back({v.x, v.y, v.z});
-        for (auto& v : shp->texcoord) obj->texcoord.push_back({v.x, v.y});
-        for (auto& v : shp->color) obj->color.push_back({v.x, v.y, v.z, v.w});
-        for (auto& v : shp->radius) obj->radius.push_back(v);
-        auto object = new obj_object();
-        object->name = shp->name;
-        object->groups.emplace_back();
-        auto group = &object->groups.back();
-        group->matname = (shp->mat) ? shp->mat->name : "";
-        group->subdivision_level = shp->subdivision_level;
-        group->subdivision_catmullclark = shp->subdivision_catmullclark;
-        for (auto point : shp->points) {
-            group->elems.push_back(
-                {(uint32_t)group->verts.size(), obj_element_type::point, 1});
-            auto vert = obj_vertex{-1, -1, -1, -1, -1};
-            if (!shp->pos.empty()) vert.pos = offset.pos + point;
-            if (!shp->texcoord.empty()) vert.texcoord = offset.texcoord + point;
-            if (!shp->norm.empty()) vert.norm = offset.norm + point;
-            if (!shp->color.empty()) vert.color = offset.color + point;
-            if (!shp->radius.empty()) vert.radius = offset.radius + point;
-            group->verts.push_back(vert);
-        }
-        for (auto line : shp->lines) {
-            group->elems.push_back(
-                {(uint32_t)group->verts.size(), obj_element_type::line, 2});
-            for (auto vid : line) {
+    for (auto sgr : scn->shapes) {
+        auto oobj = new obj_object();
+        oobj->name = sgr->name;
+        for (auto shp : sgr->shapes) {
+            auto offset = obj_vertex{(int)obj->pos.size(),
+                (int)obj->texcoord.size(), (int)obj->norm.size(),
+                (int)obj->color.size(), (int)obj->radius.size()};
+            for (auto& v : shp->pos) obj->pos.push_back({v.x, v.y, v.z});
+            for (auto& v : shp->norm) obj->norm.push_back({v.x, v.y, v.z});
+            for (auto& v : shp->texcoord) obj->texcoord.push_back({v.x, v.y});
+            for (auto& v : shp->color)
+                obj->color.push_back({v.x, v.y, v.z, v.w});
+            for (auto& v : shp->radius) obj->radius.push_back(v);
+            oobj->groups.push_back({});
+            auto group = &oobj->groups.back();
+            group->groupname = shp->name;
+            group->matname = (shp->mat) ? shp->mat->name : "";
+            group->subdivision_level = shp->subdivision_level;
+            group->subdivision_catmullclark = shp->subdivision_catmullclark;
+            for (auto point : shp->points) {
+                group->elems.push_back({(uint32_t)group->verts.size(),
+                    obj_element_type::point, 1});
                 auto vert = obj_vertex{-1, -1, -1, -1, -1};
-                if (!shp->pos.empty()) vert.pos = offset.pos + vid;
+                if (!shp->pos.empty()) vert.pos = offset.pos + point;
                 if (!shp->texcoord.empty())
-                    vert.texcoord = offset.texcoord + vid;
-                if (!shp->norm.empty()) vert.norm = offset.norm + vid;
-                if (!shp->color.empty()) vert.color = offset.color + vid;
-                if (!shp->radius.empty()) vert.radius = offset.radius + vid;
+                    vert.texcoord = offset.texcoord + point;
+                if (!shp->norm.empty()) vert.norm = offset.norm + point;
+                if (!shp->color.empty()) vert.color = offset.color + point;
+                if (!shp->radius.empty()) vert.radius = offset.radius + point;
                 group->verts.push_back(vert);
             }
-        }
-        for (auto triangle : shp->triangles) {
-            group->elems.push_back(
-                {(uint32_t)group->verts.size(), obj_element_type::face, 3});
-            for (auto vid : triangle) {
-                auto vert = obj_vertex{-1, -1, -1, -1, -1};
-                if (!shp->pos.empty()) vert.pos = offset.pos + vid;
-                if (!shp->texcoord.empty())
-                    vert.texcoord = offset.texcoord + vid;
-                if (!shp->norm.empty()) vert.norm = offset.norm + vid;
-                if (!shp->color.empty()) vert.color = offset.color + vid;
-                if (!shp->radius.empty()) vert.radius = offset.radius + vid;
-                group->verts.push_back(vert);
-            }
-        }
-        for (auto quad : shp->quads) {
-            group->elems.push_back(
-                {(uint32_t)group->verts.size(), obj_element_type::face,
-                    (uint16_t)((quad.z == quad.w) ? 3 : 4)});
-            if (group->elems.back().size == 3) {
-                for (auto vid : quad.xyz()) {
-                    auto vert = obj_vertex{-1, -1, -1, -1, -1};
-                    if (!shp->pos.empty()) vert.pos = offset.pos + vid;
-                    if (!shp->texcoord.empty())
-                        vert.texcoord = offset.texcoord + vid;
-                    if (!shp->norm.empty()) vert.norm = offset.norm + vid;
-                    if (!shp->color.empty()) vert.color = offset.color + vid;
-                    if (!shp->radius.empty()) vert.radius = offset.radius + vid;
-                    group->verts.push_back(vert);
-                }
-            } else {
-                for (auto vid : quad) {
+            for (auto line : shp->lines) {
+                group->elems.push_back(
+                    {(uint32_t)group->verts.size(), obj_element_type::line, 2});
+                for (auto vid : line) {
                     auto vert = obj_vertex{-1, -1, -1, -1, -1};
                     if (!shp->pos.empty()) vert.pos = offset.pos + vid;
                     if (!shp->texcoord.empty())
@@ -5839,40 +4352,86 @@ inline obj_scene* scene_to_obj(const scene* scn) {
                     group->verts.push_back(vert);
                 }
             }
-        }
-        for (auto fid = 0; fid < shp->quads_pos.size(); fid++) {
-            group->elems.push_back(
-                {(uint32_t)group->verts.size(), obj_element_type::face, 4});
-            auto last_vid = -1;
-            for (auto i = 0; i < 4; i++) {
-                if (last_vid == shp->quads_pos[fid][i]) continue;
-                auto vert = obj_vertex{-1, -1, -1, -1, -1};
-                if (!shp->pos.empty() && !shp->quads_pos.empty())
-                    vert.pos = offset.pos + shp->quads_pos[fid][i];
-                if (!shp->texcoord.empty() && !shp->quads_texcoord.empty())
-                    vert.texcoord =
-                        offset.texcoord + shp->quads_texcoord[fid][i];
-                if (!shp->norm.empty() && !shp->quads_norm.empty())
-                    vert.norm = offset.norm + shp->quads_norm[fid][i];
-                group->verts.push_back(vert);
-                last_vid = shp->quads_pos[fid][i];
+            for (auto triangle : shp->triangles) {
+                group->elems.push_back(
+                    {(uint32_t)group->verts.size(), obj_element_type::face, 3});
+                for (auto vid : triangle) {
+                    auto vert = obj_vertex{-1, -1, -1, -1, -1};
+                    if (!shp->pos.empty()) vert.pos = offset.pos + vid;
+                    if (!shp->texcoord.empty())
+                        vert.texcoord = offset.texcoord + vid;
+                    if (!shp->norm.empty()) vert.norm = offset.norm + vid;
+                    if (!shp->color.empty()) vert.color = offset.color + vid;
+                    if (!shp->radius.empty()) vert.radius = offset.radius + vid;
+                    group->verts.push_back(vert);
+                }
+            }
+            for (auto quad : shp->quads) {
+                group->elems.push_back(
+                    {(uint32_t)group->verts.size(), obj_element_type::face,
+                        (uint16_t)((quad.z == quad.w) ? 3 : 4)});
+                if (group->elems.back().size == 3) {
+                    for (auto vid : quad.xyz()) {
+                        auto vert = obj_vertex{-1, -1, -1, -1, -1};
+                        if (!shp->pos.empty()) vert.pos = offset.pos + vid;
+                        if (!shp->texcoord.empty())
+                            vert.texcoord = offset.texcoord + vid;
+                        if (!shp->norm.empty()) vert.norm = offset.norm + vid;
+                        if (!shp->color.empty())
+                            vert.color = offset.color + vid;
+                        if (!shp->radius.empty())
+                            vert.radius = offset.radius + vid;
+                        group->verts.push_back(vert);
+                    }
+                } else {
+                    for (auto vid : quad) {
+                        auto vert = obj_vertex{-1, -1, -1, -1, -1};
+                        if (!shp->pos.empty()) vert.pos = offset.pos + vid;
+                        if (!shp->texcoord.empty())
+                            vert.texcoord = offset.texcoord + vid;
+                        if (!shp->norm.empty()) vert.norm = offset.norm + vid;
+                        if (!shp->color.empty())
+                            vert.color = offset.color + vid;
+                        if (!shp->radius.empty())
+                            vert.radius = offset.radius + vid;
+                        group->verts.push_back(vert);
+                    }
+                }
+            }
+            for (auto fid = 0; fid < shp->quads_pos.size(); fid++) {
+                group->elems.push_back(
+                    {(uint32_t)group->verts.size(), obj_element_type::face, 4});
+                auto last_vid = -1;
+                for (auto i = 0; i < 4; i++) {
+                    if (last_vid == shp->quads_pos[fid][i]) continue;
+                    auto vert = obj_vertex{-1, -1, -1, -1, -1};
+                    if (!shp->pos.empty() && !shp->quads_pos.empty())
+                        vert.pos = offset.pos + shp->quads_pos[fid][i];
+                    if (!shp->texcoord.empty() && !shp->quads_texcoord.empty())
+                        vert.texcoord =
+                            offset.texcoord + shp->quads_texcoord[fid][i];
+                    if (!shp->norm.empty() && !shp->quads_norm.empty())
+                        vert.norm = offset.norm + shp->quads_norm[fid][i];
+                    group->verts.push_back(vert);
+                    last_vid = shp->quads_pos[fid][i];
+                }
+            }
+            for (auto bezier : shp->beziers) {
+                group->elems.push_back({(uint32_t)group->verts.size(),
+                    obj_element_type::bezier, 4});
+                for (auto vid : bezier) {
+                    auto vert = obj_vertex{-1, -1, -1, -1, -1};
+                    if (!shp->pos.empty()) vert.pos = offset.pos + vid;
+                    if (!shp->texcoord.empty())
+                        vert.texcoord = offset.texcoord + vid;
+                    if (!shp->norm.empty()) vert.norm = offset.norm + vid;
+                    if (!shp->color.empty()) vert.color = offset.color + vid;
+                    if (!shp->radius.empty()) vert.radius = offset.radius + vid;
+                    group->verts.push_back(vert);
+                }
             }
         }
-        for (auto bezier : shp->beziers) {
-            group->elems.push_back(
-                {(uint32_t)group->verts.size(), obj_element_type::bezier, 4});
-            for (auto vid : bezier) {
-                auto vert = obj_vertex{-1, -1, -1, -1, -1};
-                if (!shp->pos.empty()) vert.pos = offset.pos + vid;
-                if (!shp->texcoord.empty())
-                    vert.texcoord = offset.texcoord + vid;
-                if (!shp->norm.empty()) vert.norm = offset.norm + vid;
-                if (!shp->color.empty()) vert.color = offset.color + vid;
-                if (!shp->radius.empty()) vert.radius = offset.radius + vid;
-                group->verts.push_back(vert);
-            }
-        }
-        obj->objects.emplace_back(object);
+        obj->objects.push_back(oobj);
     }
 
     // convert cameras
@@ -5902,20 +4461,43 @@ inline obj_scene* scene_to_obj(const scene* scn) {
         obj->environments.push_back(oenv);
     }
 
-    // convert instances
-    for (auto ist : scn->instances) {
-        auto oist = new obj_instance();
-        oist->name = ist->name;
-        oist->objname = (ist->shp) ? ist->shp->name : "<undefined>";
-        oist->frame = ist->frame;
-        obj->instances.emplace_back(oist);
+    // convert hierarchy
+    if (!obj->nodes.empty()) {
+        for (auto nde : scn->nodes) {
+            auto onde = new obj_node();
+            onde->name = nde->name;
+            if (nde->cam) onde->camname = nde->cam->name;
+            if (nde->ist) onde->objname = nde->ist->name;
+            if (nde->env) onde->envname = nde->env->name;
+            onde->frame = to_mat(nde->frame);
+            onde->translation = nde->translation;
+            onde->rotation = nde->rotation;
+            onde->scaling = nde->scaling;
+            obj->nodes.push_back(onde);
+        }
+
+        // parent
+        for (auto idx = 0; idx < scn->nodes.size(); idx++) {
+            auto nde = scn->nodes.at(idx);
+            if (!nde->parent) continue;
+            auto onde = obj->nodes.at(idx);
+            onde->parent = nde->parent->name;
+        }
+    } else {
+        for (auto ist : scn->instances) {
+            auto onde = new obj_node();
+            onde->name = ist->name;
+            onde->objname = (ist->shp) ? ist->shp->name : "<undefined>";
+            onde->frame = ist->frame;
+            obj->nodes.push_back(onde);
+        }
     }
 
     return obj;
 }
 
 // Save an obj scene
-inline void save_obj_scene(
+void save_obj_scene(
     const string& filename, const scene* scn, const save_options& opts) {
     auto oscn = unique_ptr<obj_scene>(scene_to_obj(scn));
     save_obj(filename, oscn.get(), opts.save_textures, opts.skip_missing,
@@ -5924,32 +4506,8 @@ inline void save_obj_scene(
 
 #if YGL_GLTF
 
-// Instance gltf cameras and meshes
-inline void gltf_node_to_instances(scene* scn, const vector<camera>& cameras,
-    const vector<vector<shape*>>& meshes, const glTF* gltf,
-    glTFid<glTFNode> nid, const mat4f& xf) {
-    auto nde = gltf->get(nid);
-    auto xform = xf * node_transform(nde);
-    if (nde->camera) {
-        auto cam = new camera(cameras[(int)nde->camera]);
-        cam->frame = to_frame3f(xform);
-        scn->cameras.push_back(cam);
-    }
-    if (nde->mesh) {
-        for (auto shp : meshes[(int)nde->mesh]) {
-            auto ist = new instance();
-            ist->name = nde->name;
-            ist->frame = to_frame3f(xform);
-            ist->shp = shp;
-            scn->instances.push_back(ist);
-        }
-    }
-    for (auto cid : nde->children)
-        gltf_node_to_instances(scn, cameras, meshes, gltf, cid, xform);
-}
-
 // Flattens a gltf file into a flattened asset.
-inline scene* gltf_to_scene(const glTF* gltf) {
+scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
     // clear asset
     auto scn = new scene();
 
@@ -6041,7 +4599,7 @@ inline scene* gltf_to_scene(const glTF* gltf) {
         mat->ke = gmat->emissiveFactor;
         mat->ke_txt = add_texture(gmat->emissiveTexture);
         if (gmat->pbrMetallicRoughness) {
-            mat->mtype = material_type::metallic_roughness;
+            mat->type = material_type::metallic_roughness;
             auto gmr = gmat->pbrMetallicRoughness;
             mat->kd = {gmr->baseColorFactor[0], gmr->baseColorFactor[1],
                 gmr->baseColorFactor[2]};
@@ -6053,7 +4611,7 @@ inline scene* gltf_to_scene(const glTF* gltf) {
             mat->ks_txt = add_texture(gmr->metallicRoughnessTexture);
         }
         if (gmat->pbrSpecularGlossiness) {
-            mat->mtype = material_type::specular_glossiness;
+            mat->type = material_type::specular_glossiness;
             auto gsg = gmat->pbrSpecularGlossiness;
             mat->kd = {gsg->diffuseFactor[0], gsg->diffuseFactor[1],
                 gsg->diffuseFactor[2]};
@@ -6070,12 +4628,14 @@ inline scene* gltf_to_scene(const glTF* gltf) {
     }
 
     // convert meshes
-    auto meshes = vector<vector<shape*>>();
     for (auto gmesh : gltf->meshes) {
-        meshes.push_back({});
+        auto sgr = new shape_group();
+        sgr->name = gmesh->name;
         // primitives
+        auto gid = 0;
         for (auto gprim : gmesh->primitives) {
             auto shp = new shape();
+            shp->name = gmesh->name + "_" + to_string(gid++);
             if (gprim->material) {
                 shp->mat = scn->materials[(int)gprim->material];
             }
@@ -6221,9 +4781,9 @@ inline scene* gltf_to_scene(const glTF* gltf) {
                     } break;
                 }
             }
-            scn->shapes.push_back(shp);
-            meshes.back().push_back(shp);
+            sgr->shapes.push_back(shp);
         }
+        scn->shapes.push_back(sgr);
     }
 
     // convert cameras
@@ -6249,35 +4809,150 @@ inline scene* gltf_to_scene(const glTF* gltf) {
         }
     }
 
-    // instance meshes and cameras
-    if (gltf->scene) {
-        for (auto nid : gltf->get(gltf->scene)->nodes) {
-            gltf_node_to_instances(
-                scn, cameras, meshes, gltf, nid, identity_mat4f);
+    // convert nodes
+    for (auto gnde : gltf->nodes) {
+        auto nde = new node();
+        nde->name = gnde->name;
+        if (gnde->camera) {
+            auto cam = new camera(cameras[(int)gnde->camera]);
+            nde->cam = cam;
+            scn->cameras.push_back(cam);
         }
-    } else if (!gltf->nodes.empty()) {
-        // set up node children and root nodes
-        auto is_root = vector<bool>(gltf->nodes.size(), true);
-        for (auto nid = 0; nid < gltf->nodes.size(); nid++) {
-            for (auto cid : gltf->get(glTFid<glTFNode>(nid))->children)
-                is_root[(int)cid] = false;
+        if (gnde->mesh) {
+            auto ist = new instance();
+            ist->name = gnde->name;
+            ist->shp = scn->shapes[(int)gnde->mesh];
+            nde->ist = ist;
+            scn->instances.push_back(ist);
+#if 0
+            for (auto shp : node->msh->shapes) {
+                if (node->morph_weights.size() < shp->morph_targets.size()) {
+                    node->morph_weights.resize(shp->morph_targets.size());
+                }
+            }
+#endif
         }
-        for (auto nid = 0; nid < gltf->nodes.size(); nid++) {
-            if (!is_root[nid]) continue;
-            gltf_node_to_instances(scn, cameras, meshes, gltf,
-                glTFid<glTFNode>(nid), identity_mat4f);
+        nde->translation = gnde->translation;
+        nde->rotation = gnde->rotation;
+        nde->scaling = gnde->scale;
+        nde->frame = to_frame(gnde->matrix);
+#if 0
+        nde->weights = gnde->weights;
+#endif
+        scn->nodes.push_back(nde);
+    }
+
+    // set up parent pointers
+    for (auto nid = 0; nid < gltf->nodes.size(); nid++) {
+        auto gnde = gltf->nodes[nid];
+        auto nde = scn->nodes[nid];
+        for (auto cid : gnde->children) scn->nodes[(int)cid]->parent = nde;
+    }
+
+    // keyframe type conversion
+    static auto keyframe_types =
+        unordered_map<glTFAnimationSamplerInterpolation, keyframe_type>{
+            {glTFAnimationSamplerInterpolation::NotSet, keyframe_type::linear},
+            {glTFAnimationSamplerInterpolation::Linear, keyframe_type::linear},
+            {glTFAnimationSamplerInterpolation::Step, keyframe_type::step},
+            {glTFAnimationSamplerInterpolation::CubicSpline,
+                keyframe_type::bezier},
+            {glTFAnimationSamplerInterpolation::CatmullRomSpline,
+                keyframe_type::catmull_rom},
+        };
+
+    // convert animations
+    for (auto ganm : gltf->animations) {
+        auto agr = new animation_group();
+        agr->name = ganm->name;
+        auto sampler_map = unordered_map<vec2i, animation*>();
+        for (auto gchannel : ganm->channels) {
+            if (sampler_map.find({(int)gchannel->sampler,
+                    (int)gchannel->target->path}) == sampler_map.end()) {
+                auto gsampler = ganm->get(gchannel->sampler);
+                auto anm = new animation();
+                auto input_view =
+                    accessor_view(gltf, gltf->get(gsampler->input));
+                anm->times.resize(input_view.size());
+                for (auto i = 0; i < input_view.size(); i++)
+                    anm->times[i] = input_view.get(i);
+                anm->type = keyframe_types.at(gsampler->interpolation);
+                auto output_view =
+                    accessor_view(gltf, gltf->get(gsampler->output));
+                switch (gchannel->target->path) {
+                    case glTFAnimationChannelTargetPath::Translation: {
+                        anm->translation.reserve(output_view.size());
+                        for (auto i = 0; i < output_view.size(); i++)
+                            anm->translation.push_back(output_view.getv3f(i));
+                    } break;
+                    case glTFAnimationChannelTargetPath::Rotation: {
+                        anm->rotation.reserve(output_view.size());
+                        for (auto i = 0; i < output_view.size(); i++)
+                            anm->rotation.push_back(
+                                (quat4f)output_view.getv4f(i));
+                    } break;
+                    case glTFAnimationChannelTargetPath::Scale: {
+                        anm->scaling.reserve(output_view.size());
+                        for (auto i = 0; i < output_view.size(); i++)
+                            anm->scaling.push_back(output_view.getv3f(i));
+                    } break;
+                    case glTFAnimationChannelTargetPath::Weights: {
+                        // get a node that it refers to
+                        auto ncomp = 0;
+                        auto gnode = gltf->get(gchannel->target->node);
+                        auto gmesh = gltf->get(gnode->mesh);
+                        if (gmesh) {
+                            for (auto gshp : gmesh->primitives) {
+                                ncomp = max((int)gshp->targets.size(), ncomp);
+                            }
+                        }
+                        if (ncomp) {
+                            auto values = std::vector<float>();
+                            values.reserve(output_view.size());
+                            for (auto i = 0; i < output_view.size(); i++)
+                                values.push_back(output_view.get(i));
+                            anm->weights.resize(values.size() / ncomp);
+                            for (auto i = 0; i < anm->weights.size(); i++) {
+                                anm->weights[i].resize(ncomp);
+                                for (auto j = 0; j < ncomp; j++)
+                                    anm->weights[i][j] = values[i * ncomp + j];
+                            }
+                        }
+                    } break;
+                    default: {
+                        throw runtime_error("should not have gotten here");
+                    }
+                }
+                sampler_map[{
+                    (int)gchannel->sampler, (int)gchannel->target->path}] = anm;
+                agr->animations.push_back(anm);
+            }
+            agr->targets.push_back({sampler_map.at({(int)gchannel->sampler,
+                                        (int)gchannel->target->path}),
+                scn->nodes[(int)gchannel->target->node]});
         }
+        scn->animations.push_back(agr);
+    }
+
+    // compute transforms
+    update_transforms(scn, 0);
+
+    // remove hierarchy if necessary
+    if (!opts.preserve_hierarchy) {
+        for (auto nde : scn->nodes) delete nde;
+        scn->nodes.clear();
+        for (auto anm : scn->animations) delete anm;
+        scn->animations.clear();
     }
 
     return scn;
 }
 
 // Load an gltf scene
-inline scene* load_gltf_scene(
-    const string& filename, const load_options& opts) {
+scene* load_gltf_scene(const string& filename, const load_options& opts) {
     auto gscn = unique_ptr<glTF>(
         load_gltf(filename, true, opts.load_textures, opts.skip_missing));
-    auto scn = unique_ptr<scene>(gltf_to_scene(gscn.get()));
+    auto scn = unique_ptr<scene>(gltf_to_scene(gscn.get(), opts));
     if (!scn) {
         throw runtime_error("could not convert gltf scene");
         return nullptr;
@@ -6286,7 +4961,7 @@ inline scene* load_gltf_scene(
 }
 
 // Unflattnes gltf
-inline glTF* scene_to_gltf(
+glTF* scene_to_gltf(
     const scene* scn, const string& buffer_uri, bool separate_buffers) {
     auto gltf = unique_ptr<glTF>(new glTF());
 
@@ -6327,16 +5002,16 @@ inline glTF* scene_to_gltf(
             gimg->data.width = txt->hdr.width();
             gimg->data.height = txt->hdr.height();
             gimg->data.ncomp = 4;
-            gimg->data.dataf.assign((float*)txt->hdr.data(),
-                (float*)txt->hdr.data() +
+            gimg->data.dataf.assign((float*)data(txt->hdr),
+                (float*)data(txt->hdr) +
                     txt->hdr.width() * txt->hdr.height() * 4);
         }
         if (txt->ldr) {
             gimg->data.width = txt->ldr.width();
             gimg->data.height = txt->ldr.height();
             gimg->data.ncomp = 4;
-            gimg->data.datab.assign((uint8_t*)txt->ldr.data(),
-                (uint8_t*)txt->ldr.data() +
+            gimg->data.datab.assign((uint8_t*)data(txt->ldr),
+                (uint8_t*)data(txt->ldr) +
                     txt->ldr.width() * txt->ldr.height() * 4);
         }
         gltf->images.push_back(gimg);
@@ -6399,7 +5074,7 @@ inline glTF* scene_to_gltf(
         gmat->name = mat->name;
         gmat->emissiveFactor = mat->ke;
         gmat->emissiveTexture = add_texture(mat->ke_txt);
-        switch (mat->mtype) {
+        switch (mat->type) {
             case material_type::specular_roughness: {
                 gmat->pbrSpecularGlossiness =
                     new glTFMaterialPbrSpecularGlossiness();
@@ -6493,9 +5168,9 @@ inline glTF* scene_to_gltf(
             ctype == glTFAccessorComponentType::Float) {
             switch (type) {
                 case glTFAccessorType::Scalar: {
-                    auto bbox = make_bbox(count, (float*)data);
-                    accessor->min = {bbox.min};
-                    accessor->max = {bbox.max};
+                    auto bbox = make_bbox(count, (vec1f*)data);
+                    accessor->min = {bbox.min.x};
+                    accessor->max = {bbox.max.x};
                 } break;
                 case glTFAccessorType::Vec2: {
                     auto bbox = make_bbox(count, (vec2f*)data);
@@ -6521,108 +5196,239 @@ inline glTF* scene_to_gltf(
     };
 
     // convert meshes
-    for (auto shp : scn->shapes) {
-        auto gbuffer = add_opt_buffer(shp->path);
+    for (auto sgr : scn->shapes) {
         auto gmesh = new glTFMesh();
-        gmesh->name = shp->name;
-        auto gprim = new glTFMeshPrimitive();
-        gprim->material = glTFid<glTFMaterial>(index(scn->materials, shp->mat));
-        if (!shp->pos.empty())
-            gprim->attributes["POSITION"] =
-                add_accessor(gbuffer, shp->name + "_pos",
-                    glTFAccessorType::Vec3, glTFAccessorComponentType::Float,
-                    (int)shp->pos.size(), sizeof(vec3f), shp->pos.data(), true);
-        if (!shp->norm.empty())
-            gprim->attributes["NORMAL"] = add_accessor(gbuffer,
-                shp->name + "_norm", glTFAccessorType::Vec3,
-                glTFAccessorComponentType::Float, (int)shp->norm.size(),
-                sizeof(vec3f), shp->norm.data(), false);
-        if (!shp->texcoord.empty())
-            gprim->attributes["TEXCOORD_0"] = add_accessor(gbuffer,
-                shp->name + "_texcoord", glTFAccessorType::Vec2,
-                glTFAccessorComponentType::Float, (int)shp->texcoord.size(),
-                sizeof(vec2f), shp->texcoord.data(), false);
-        if (!shp->texcoord1.empty())
-            gprim->attributes["TEXCOORD_1"] = add_accessor(gbuffer,
-                shp->name + "_texcoord1", glTFAccessorType::Vec2,
-                glTFAccessorComponentType::Float, (int)shp->texcoord1.size(),
-                sizeof(vec2f), shp->texcoord1.data(), false);
-        if (!shp->color.empty())
-            gprim->attributes["COLOR_0"] = add_accessor(gbuffer,
-                shp->name + "_color", glTFAccessorType::Vec4,
-                glTFAccessorComponentType::Float, (int)shp->color.size(),
-                sizeof(vec4f), shp->color.data(), false);
-        if (!shp->radius.empty())
-            gprim->attributes["RADIUS"] = add_accessor(gbuffer,
-                shp->name + "_radius", glTFAccessorType::Scalar,
-                glTFAccessorComponentType::Float, (int)shp->radius.size(),
-                sizeof(float), shp->radius.data(), false);
-        // auto elem_as_uint = shp->pos.size() >
-        // numeric_limits<unsigned short>::max();
-        if (!shp->points.empty()) {
-            gprim->indices = add_accessor(gbuffer, shp->name + "_points",
-                glTFAccessorType::Scalar,
-                glTFAccessorComponentType::UnsignedInt, (int)shp->points.size(),
-                sizeof(int), (int*)shp->points.data(), false);
-            gprim->mode = glTFMeshPrimitiveMode::Points;
-        } else if (!shp->lines.empty()) {
-            gprim->indices = add_accessor(gbuffer, shp->name + "_lines",
-                glTFAccessorType::Scalar,
-                glTFAccessorComponentType::UnsignedInt,
-                (int)shp->lines.size() * 2, sizeof(int),
-                (int*)shp->lines.data(), false);
-            gprim->mode = glTFMeshPrimitiveMode::Lines;
-        } else if (!shp->triangles.empty()) {
-            gprim->indices = add_accessor(gbuffer, shp->name + "_triangles",
-                glTFAccessorType::Scalar,
-                glTFAccessorComponentType::UnsignedInt,
-                (int)shp->triangles.size() * 3, sizeof(int),
-                (int*)shp->triangles.data(), false);
-            gprim->mode = glTFMeshPrimitiveMode::Triangles;
-        } else if (!shp->quads.empty()) {
-            auto triangles = convert_quads_to_triangles(shp->quads);
-            gprim->indices = add_accessor(gbuffer, shp->name + "_quads",
-                glTFAccessorType::Scalar,
-                glTFAccessorComponentType::UnsignedInt,
-                (int)triangles.size() * 3, sizeof(int), (int*)triangles.data(),
-                false);
-            gprim->mode = glTFMeshPrimitiveMode::Triangles;
-        } else if (!shp->quads_pos.empty()) {
-            throw runtime_error("face varying not supported in glTF");
-        } else {
-            throw runtime_error("empty mesh");
+        gmesh->name = sgr->name;
+        auto gbuffer = add_opt_buffer(sgr->path);
+        for (auto shp : sgr->shapes) {
+            auto gprim = new glTFMeshPrimitive();
+            gprim->material =
+                glTFid<glTFMaterial>(index(scn->materials, shp->mat));
+            if (!shp->pos.empty())
+                gprim->attributes["POSITION"] = add_accessor(gbuffer,
+                    shp->name + "_pos", glTFAccessorType::Vec3,
+                    glTFAccessorComponentType::Float, (int)shp->pos.size(),
+                    sizeof(vec3f), shp->pos.data(), true);
+            if (!shp->norm.empty())
+                gprim->attributes["NORMAL"] = add_accessor(gbuffer,
+                    shp->name + "_norm", glTFAccessorType::Vec3,
+                    glTFAccessorComponentType::Float, (int)shp->norm.size(),
+                    sizeof(vec3f), shp->norm.data(), false);
+            if (!shp->texcoord.empty())
+                gprim->attributes["TEXCOORD_0"] = add_accessor(gbuffer,
+                    shp->name + "_texcoord", glTFAccessorType::Vec2,
+                    glTFAccessorComponentType::Float, (int)shp->texcoord.size(),
+                    sizeof(vec2f), shp->texcoord.data(), false);
+            if (!shp->texcoord1.empty())
+                gprim->attributes["TEXCOORD_1"] = add_accessor(gbuffer,
+                    shp->name + "_texcoord1", glTFAccessorType::Vec2,
+                    glTFAccessorComponentType::Float,
+                    (int)shp->texcoord1.size(), sizeof(vec2f),
+                    shp->texcoord1.data(), false);
+            if (!shp->color.empty())
+                gprim->attributes["COLOR_0"] = add_accessor(gbuffer,
+                    shp->name + "_color", glTFAccessorType::Vec4,
+                    glTFAccessorComponentType::Float, (int)shp->color.size(),
+                    sizeof(vec4f), shp->color.data(), false);
+            if (!shp->radius.empty())
+                gprim->attributes["RADIUS"] = add_accessor(gbuffer,
+                    shp->name + "_radius", glTFAccessorType::Scalar,
+                    glTFAccessorComponentType::Float, (int)shp->radius.size(),
+                    sizeof(float), shp->radius.data(), false);
+            // auto elem_as_uint = shp->pos.size() >
+            // numeric_limits<unsigned short>::max();
+            if (!shp->points.empty()) {
+                gprim->indices = add_accessor(gbuffer, shp->name + "_points",
+                    glTFAccessorType::Scalar,
+                    glTFAccessorComponentType::UnsignedInt,
+                    (int)shp->points.size(), sizeof(int),
+                    (int*)shp->points.data(), false);
+                gprim->mode = glTFMeshPrimitiveMode::Points;
+            } else if (!shp->lines.empty()) {
+                gprim->indices = add_accessor(gbuffer, shp->name + "_lines",
+                    glTFAccessorType::Scalar,
+                    glTFAccessorComponentType::UnsignedInt,
+                    (int)shp->lines.size() * 2, sizeof(int),
+                    (int*)shp->lines.data(), false);
+                gprim->mode = glTFMeshPrimitiveMode::Lines;
+            } else if (!shp->triangles.empty()) {
+                gprim->indices = add_accessor(gbuffer, shp->name + "_triangles",
+                    glTFAccessorType::Scalar,
+                    glTFAccessorComponentType::UnsignedInt,
+                    (int)shp->triangles.size() * 3, sizeof(int),
+                    (int*)shp->triangles.data(), false);
+                gprim->mode = glTFMeshPrimitiveMode::Triangles;
+            } else if (!shp->quads.empty()) {
+                auto triangles = convert_quads_to_triangles(shp->quads);
+                gprim->indices = add_accessor(gbuffer, shp->name + "_quads",
+                    glTFAccessorType::Scalar,
+                    glTFAccessorComponentType::UnsignedInt,
+                    (int)triangles.size() * 3, sizeof(int),
+                    (int*)triangles.data(), false);
+                gprim->mode = glTFMeshPrimitiveMode::Triangles;
+            } else if (!shp->quads_pos.empty()) {
+                throw runtime_error("face varying not supported in glTF");
+            } else {
+                throw runtime_error("empty mesh");
+            }
+            gmesh->primitives.push_back(gprim);
         }
-        gmesh->primitives.push_back(gprim);
         gltf->meshes.push_back(gmesh);
     }
 
-    // instances
-    for (auto ist : scn->instances) {
-        auto gnode = new glTFNode();
-        gnode->name = ist->name;
-        gnode->mesh = glTFid<glTFMesh>(index(scn->shapes, ist->shp));
-        gnode->matrix = to_mat4f(ist->frame);
-        gltf->nodes.push_back(gnode);
-    }
+    // hierarchy
+    if (scn->nodes.empty()) {
+        // instances
+        for (auto ist : scn->instances) {
+            auto gnode = new glTFNode();
+            gnode->name = ist->name;
+            gnode->mesh = glTFid<glTFMesh>(index(scn->shapes, ist->shp));
+            gnode->matrix = to_mat(ist->frame);
+            gltf->nodes.push_back(gnode);
+        }
 
-    // cameras
-    for (auto cam : scn->cameras) {
-        auto gnode = new glTFNode();
-        gnode->name = cam->name;
-        gnode->camera = glTFid<glTFCamera>(index(scn->cameras, cam));
-        gnode->matrix = to_mat4f(cam->frame);
-        gltf->nodes.push_back(gnode);
-    }
+        // cameras
+        for (auto cam : scn->cameras) {
+            auto gnode = new glTFNode();
+            gnode->name = cam->name;
+            gnode->camera = glTFid<glTFCamera>(index(scn->cameras, cam));
+            gnode->matrix = to_mat(cam->frame);
+            gltf->nodes.push_back(gnode);
+        }
 
-    // scenes
-    if (!gltf->nodes.empty()) {
+        // scenes
+        if (!gltf->nodes.empty()) {
+            auto gscene = new glTFScene();
+            gscene->name = "scene";
+            for (auto i = 0; i < gltf->nodes.size(); i++) {
+                gscene->nodes.push_back(glTFid<glTFNode>(i));
+            }
+            gltf->scenes.push_back(gscene);
+            gltf->scene = glTFid<glTFScene>(0);
+        }
+    } else {
+        // nodes
+        for (auto nde : scn->nodes) {
+            auto gnode = new glTFNode();
+            gnode->name = nde->name;
+            if (nde->cam) {
+                gnode->camera =
+                    glTFid<glTFCamera>(index(scn->cameras, nde->cam));
+            }
+            if (nde->ist) {
+                gnode->mesh =
+                    glTFid<glTFMesh>(index(scn->shapes, nde->ist->shp));
+            }
+            gnode->matrix = to_mat(nde->frame);
+            gnode->translation = nde->translation;
+            gnode->rotation = nde->rotation;
+            gnode->scale = nde->scaling;
+            gltf->nodes.push_back(gnode);
+        }
+
+        // children
+        for (auto idx = 0; idx < scn->nodes.size(); idx++) {
+            auto nde = scn->nodes.at(idx);
+            if (!nde->parent) continue;
+            auto gnde = gltf->nodes.at(index(scn->nodes, nde->parent));
+            gnde->children.push_back(glTFid<glTFNode>(idx));
+        }
+
+        // root nodes
+        auto is_root = vector<bool>(gltf->nodes.size(), true);
+        for (auto idx = 0; idx < gltf->nodes.size(); idx++) {
+            auto gnde = gltf->nodes.at(idx);
+            for (auto idx1 = 0; idx1 < gnde->children.size(); idx1++) {
+                is_root[(int)gnde->children.at(idx1)] = false;
+            }
+        }
+
+        // scene with root nodes
         auto gscene = new glTFScene();
         gscene->name = "scene";
-        for (auto i = 0; i < gltf->nodes.size(); i++) {
-            gscene->nodes.push_back(glTFid<glTFNode>(i));
+        for (auto idx = 0; idx < gltf->nodes.size(); idx++) {
+            if (is_root[idx]) gscene->nodes.push_back(glTFid<glTFNode>(idx));
         }
         gltf->scenes.push_back(gscene);
         gltf->scene = glTFid<glTFScene>(0);
+    }
+
+    // interpolation map
+    static const auto interpolation_map =
+        std::map<keyframe_type, glTFAnimationSamplerInterpolation>{
+            {keyframe_type::step, glTFAnimationSamplerInterpolation::Step},
+            {keyframe_type::linear, glTFAnimationSamplerInterpolation::Linear},
+            {keyframe_type::bezier,
+                glTFAnimationSamplerInterpolation::CubicSpline},
+            {keyframe_type::catmull_rom,
+                glTFAnimationSamplerInterpolation::CatmullRomSpline},
+        };
+
+    // animation
+    for (auto agr : scn->animations) {
+        auto ganm = new glTFAnimation();
+        ganm->name = agr->name;
+        auto gbuffer = add_opt_buffer(agr->path);
+        auto count = 0;
+        auto paths =
+            unordered_map<animation*, glTFAnimationChannelTargetPath>();
+        for (auto anm : agr->animations) {
+            auto aid = ganm->name + "_" + std::to_string(count++);
+            auto gsmp = new glTFAnimationSampler();
+            gsmp->input =
+                add_accessor(gbuffer, aid + "_time", glTFAccessorType::Scalar,
+                    glTFAccessorComponentType::Float, (int)anm->times.size(),
+                    sizeof(float), anm->times.data(), false);
+            auto path = glTFAnimationChannelTargetPath::NotSet;
+            if (!anm->translation.empty()) {
+                gsmp->output = add_accessor(gbuffer, aid + "_translation",
+                    glTFAccessorType::Vec3, glTFAccessorComponentType::Float,
+                    (int)anm->translation.size(), sizeof(vec3f),
+                    anm->translation.data(), false);
+                path = glTFAnimationChannelTargetPath::Translation;
+            } else if (!anm->rotation.empty()) {
+                gsmp->output = add_accessor(gbuffer, aid + "_rotation",
+                    glTFAccessorType::Vec4, glTFAccessorComponentType::Float,
+                    (int)anm->rotation.size(), sizeof(vec4f),
+                    anm->rotation.data(), false);
+                path = glTFAnimationChannelTargetPath::Rotation;
+            } else if (!anm->scaling.empty()) {
+                gsmp->output = add_accessor(gbuffer, aid + "_scale",
+                    glTFAccessorType::Vec3, glTFAccessorComponentType::Float,
+                    (int)anm->scaling.size(), sizeof(vec3f),
+                    anm->scaling.data(), false);
+                path = glTFAnimationChannelTargetPath::Scale;
+            } else if (!anm->weights.empty()) {
+                auto values = std::vector<float>();
+                values.reserve(anm->weights.size() * anm->weights[0].size());
+                for (auto i = 0; i < anm->weights.size(); i++) {
+                    values.insert(values.end(), anm->weights[i].begin(),
+                        anm->weights[i].end());
+                }
+                gsmp->output = add_accessor(gbuffer, aid + "_weights",
+                    glTFAccessorType::Scalar, glTFAccessorComponentType::Float,
+                    (int)values.size(), sizeof(float), values.data(), false);
+                path = glTFAnimationChannelTargetPath::Weights;
+            } else {
+                throw runtime_error("should not have gotten here");
+            }
+            gsmp->interpolation = interpolation_map.at(anm->type);
+            ganm->samplers.push_back(gsmp);
+            paths[anm] = path;
+        }
+        for (auto target : agr->targets) {
+            auto kfr = target.first;
+            auto node = target.second;
+            auto gchan = new glTFAnimationChannel();
+            gchan->sampler =
+                glTFid<glTFAnimationSampler>{index(agr->animations, kfr)};
+            gchan->target = new glTFAnimationChannelTarget();
+            gchan->target->node = glTFid<glTFNode>{index(scn->nodes, node)};
+            gchan->target->path = paths.at(kfr);
+            ganm->channels.push_back(gchan);
+        }
+
+        gltf->animations.push_back(ganm);
     }
 
     // done
@@ -6630,7 +5436,7 @@ inline glTF* scene_to_gltf(
 }
 
 // Save a gltf scene
-inline void save_gltf_scene(
+void save_gltf_scene(
     const string& filename, const scene* scn, const save_options& opts) {
     auto buffer_uri = path_basename(filename) + ".bin";
     auto gscn = unique_ptr<glTF>(
@@ -6643,37 +5449,45 @@ inline void save_gltf_scene(
 #if YGL_SVG
 
 // Converts an svg scene
-inline scene* svg_to_scene(const svg_scene* sscn, const load_options& opts) {
+scene* svg_to_scene(const svg_scene* sscn, const load_options& opts) {
     auto scn = new scene();
     auto sid = 0;
     for (auto sshp : sscn->shapes) {
+        // TODO: recursive shape
+        auto sgr = new shape_group();
+        sgr->name = "shape" + to_string(sid++);
         auto shp = new shape();
-        shp->name = "shape" + to_string(sid++);
+        shp->name = sgr->name;
         for (auto spth : sshp->paths) {
             auto o = (int)shp->pos.size();
-            for (auto p : spth->pos) shp->pos += {p.x, p.y, 0};
+            for (auto p : spth->pos) shp->pos.push_back({p.x, p.y, 0});
             for (auto vid = 1; vid < spth->pos.size(); vid += 3)
-                shp->beziers +=
-                    {o + vid - 1, o + vid + 0, o + vid + 1, o + vid + 2};
+                shp->beziers.push_back(
+                    {o + vid - 1, o + vid + 0, o + vid + 1, o + vid + 2});
         }
-        scn->shapes += shp;
+        sgr->shapes.push_back(shp);
+        scn->shapes.push_back(sgr);
     }
     auto miny = flt_max, maxy = -flt_max;
-    for (auto shp : scn->shapes) {
-        for (auto& p : shp->pos) {
-            miny = min(miny, p.y);
-            maxy = max(maxy, p.y);
+    for (auto sgr : scn->shapes) {
+        for (auto shp : sgr->shapes) {
+            for (auto& p : shp->pos) {
+                miny = min(miny, p.y);
+                maxy = max(maxy, p.y);
+            }
         }
     }
     auto mdly = (maxy + miny) / 2;
-    for (auto shp : scn->shapes) {
-        for (auto& p : shp->pos) p.y = -(p.y - mdly) + mdly;
+    for (auto sgr : scn->shapes) {
+        for (auto shp : sgr->shapes) {
+            for (auto& p : shp->pos) p.y = -(p.y - mdly) + mdly;
+        }
     }
     return scn;
 }
 
 // Load an svg scene
-inline scene* load_svg_scene(const string& filename, const load_options& opts) {
+scene* load_svg_scene(const string& filename, const load_options& opts) {
     auto sscn = unique_ptr<svg_scene>(load_svg(filename));
     auto scn = unique_ptr<scene>(svg_to_scene(sscn.get(), opts));
     return scn.release();
@@ -6682,7 +5496,7 @@ inline scene* load_svg_scene(const string& filename, const load_options& opts) {
 #endif
 
 // Load a scene
-inline scene* load_scene(const string& filename, const load_options& opts) {
+scene* load_scene(const string& filename, const load_options& opts) {
     auto ext = path_extension(filename);
     if (ext == ".obj" || ext == ".OBJ") return load_obj_scene(filename, opts);
 #if YGL_GLTF
@@ -6697,7 +5511,7 @@ inline scene* load_scene(const string& filename, const load_options& opts) {
 }
 
 // Save a scene
-inline void save_scene(
+void save_scene(
     const string& filename, const scene* scn, const save_options& opts) {
     auto ext = path_extension(filename);
     if (ext == ".obj" || ext == ".OBJ")
@@ -6709,277 +5523,3603 @@ inline void save_scene(
     throw runtime_error("unsupported extension " + ext);
 }
 
-// Add missing values and elements
-inline void add_elements(scene* scn, const add_elements_options& opts) {
-    if (opts.smooth_normals) {
-        for (auto shp : scn->shapes) {
-            if (!shp->norm.empty()) continue;
-            shp->norm.resize(shp->pos.size(), {0, 0, 1});
-            if (!shp->lines.empty() || !shp->triangles.empty() ||
-                !shp->quads.empty()) {
-                shp->norm = compute_normals(
-                    shp->lines, shp->triangles, shp->quads, shp->pos);
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR PATH TRACING SUPPORT FUNCTION
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Phong exponent to roughness. Public API, see above.
+float specular_exponent_to_roughness(float n) { return sqrtf(2 / (n + 2)); }
+
+// Specular to fresnel eta. Public API, see above.
+void specular_fresnel_from_ks(const vec3f& ks, vec3f& es, vec3f& esk) {
+    es = {(1 + sqrt(ks.x)) / (1 - sqrt(ks.x)),
+        (1 + sqrt(ks.y)) / (1 - sqrt(ks.y)),
+        (1 + sqrt(ks.z)) / (1 - sqrt(ks.z))};
+    esk = {0, 0, 0};
+}
+
+// Compute the fresnel term for dielectrics. Implementation from
+// https://seblagarde.wordpress.com/2013/04/29/memo-on-fresnel-equations/
+vec3f fresnel_dielectric(float cosw, const vec3f& eta_) {
+    auto eta = eta_;
+    if (cosw < 0) {
+        eta = 1.0f / eta;
+        cosw = -cosw;
+    }
+
+    auto sin2 = 1 - cosw * cosw;
+    auto eta2 = eta * eta;
+
+    auto cos2t = vec3f{1, 1, 1} - sin2 / eta2;
+    if (cos2t.x < 0 || cos2t.y < 0 || cos2t.z < 0)
+        return vec3f{1, 1, 1};  // tir
+
+    auto t0 = vec3f{sqrt(cos2t.x), sqrt(cos2t.y), sqrt(cos2t.z)};
+    auto t1 = eta * t0;
+    auto t2 = eta * cosw;
+
+    auto rs = (vec3f{cosw, cosw, cosw} - t1) / (vec3f{cosw, cosw, cosw} + t1);
+    auto rp = (t0 - t2) / (t0 + t2);
+
+    return (rs * rs + rp * rp) / 2.0f;
+}
+
+// Compute the fresnel term for metals. Implementation from
+// https://seblagarde.wordpress.com/2013/04/29/memo-on-fresnel-equations/
+vec3f fresnel_metal(float cosw, const vec3f& eta, const vec3f& etak) {
+    if (etak == zero3f) return fresnel_dielectric(cosw, eta);
+
+    cosw = clamp(cosw, (float)-1, (float)1);
+    auto cos2 = cosw * cosw;
+    auto sin2 = clamp(1 - cos2, (float)0, (float)1);
+    auto eta2 = eta * eta;
+    auto etak2 = etak * etak;
+
+    auto t0 = eta2 - etak2 - vec3f{sin2, sin2, sin2};
+    auto a2plusb2_2 = t0 * t0 + 4.0f * eta2 * etak2;
+    auto a2plusb2 =
+        vec3f{sqrt(a2plusb2_2.x), sqrt(a2plusb2_2.y), sqrt(a2plusb2_2.z)};
+    auto t1 = a2plusb2 + vec3f{cos2, cos2, cos2};
+    auto a_2 = (a2plusb2 + t0) / 2.0f;
+    auto a = vec3f{sqrt(a_2.x), sqrt(a_2.y), sqrt(a_2.z)};
+    auto t2 = 2.0f * a * cosw;
+    auto rs = (t1 - t2) / (t1 + t2);
+
+    auto t3 = vec3f{cos2, cos2, cos2} * a2plusb2 +
+              vec3f{sin2, sin2, sin2} * vec3f{sin2, sin2, sin2};
+    auto t4 = t2 * sin2;
+    auto rp = rs * (t3 - t4) / (t3 + t4);
+
+    return (rp + rs) / 2.0f;
+}
+
+// Schlick approximation of Fresnel term
+vec3f fresnel_schlick(const vec3f& ks, float cosw) {
+    return ks +
+           (vec3f{1, 1, 1} - ks) * pow(clamp(1.0f - cosw, 0.0f, 1.0f), 5.0f);
+}
+
+// Schlick approximation of Fresnel term weighted by roughness.
+// This is a hack, but works better than not doing it.
+vec3f fresnel_schlick(const vec3f& ks, float cosw, float rs) {
+    auto fks = fresnel_schlick(ks, cosw);
+    return lerp(ks, fks, rs);
+}
+
+// Evaluates the GGX distribution and geometric term
+float eval_ggx(float rs, float ndh, float ndi, float ndo) {
+    // evaluate GGX
+    auto alpha2 = rs * rs;
+    auto di = (ndh * ndh) * (alpha2 - 1) + 1;
+    auto d = alpha2 / (pif * di * di);
+#ifndef YGL_GGX_SMITH
+    auto lambda_o = (-1 + sqrt(1 + alpha2 * (1 - ndo * ndo) / (ndo * ndo))) / 2;
+    auto lambda_i = (-1 + sqrt(1 + alpha2 * (1 - ndi * ndi) / (ndi * ndi))) / 2;
+    auto g = 1 / (1 + lambda_o + lambda_i);
+#else
+    auto go = (2 * ndo) / (ndo + sqrt(alpha2 + (1 - alpha2) * ndo * ndo));
+    auto gi = (2 * ndi) / (ndi + sqrt(alpha2 + (1 - alpha2) * ndi * ndi));
+    auto g = go * gi;
+#endif
+    return d * g;
+}
+
+// Evaluates the GGX pdf
+float sample_ggx_pdf(float rs, float ndh) {
+    auto cos2 = ndh * ndh;
+    auto tan2 = (1 - cos2) / cos2;
+    auto alpha2 = rs * rs;
+    auto d = alpha2 / (pif * cos2 * cos2 * (alpha2 + tan2) * (alpha2 + tan2));
+    return d;
+}
+
+// Sample the GGX distribution
+vec3f sample_ggx(float rs, const vec2f& rn) {
+    auto tan2 = rs * rs * rn.y / (1 - rn.y);
+    auto rz = sqrt(1 / (tan2 + 1)), rr = sqrt(1 - rz * rz),
+         rphi = 2 * pif * rn.x;
+    // set to wh
+    auto wh_local = vec3f{rr * cos(rphi), rr * sin(rphi), rz};
+    return wh_local;
+}
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR PATH TRACING
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Generates a 1-dimensional sample.
+float sample_next1f(trace_pixel& pxl, trace_rng_type type, int nsamples) {
+    switch (type) {
+        case trace_rng_type::uniform: {
+            return clamp(next_rand1f(pxl.rng), 0.0f, 1 - flt_eps);
+        } break;
+        case trace_rng_type::stratified: {
+            auto p = hash_uint64_32((uint64_t)pxl.i | (uint64_t)pxl.j << 16 |
+                                    (uint64_t)pxl.dimension << 32);
+            auto s = hash_permute(pxl.sample, nsamples, p);
+            pxl.dimension += 1;
+            return clamp(
+                (s + next_rand1f(pxl.rng)) / nsamples, 0.0f, 1 - flt_eps);
+        } break;
+        default: {
+            assert(false);
+            return 0;
+        }
+    }
+}
+
+// Generates a 2-dimensional sample.
+vec2f sample_next2f(trace_pixel& pxl, trace_rng_type type, int nsamples) {
+    switch (type) {
+        case trace_rng_type::uniform: {
+            return {next_rand1f(pxl.rng), next_rand1f(pxl.rng)};
+        } break;
+        case trace_rng_type::stratified: {
+            auto p = hash_uint64_32((uint64_t)pxl.i | (uint64_t)pxl.j << 16 |
+                                    (uint64_t)pxl.dimension << 32);
+            auto s = hash_permute(pxl.sample, nsamples, p);
+            auto nsamples2 = (int)round(sqrt(nsamples));
+            pxl.dimension += 2;
+            return {clamp((s % nsamples2 + next_rand1f(pxl.rng)) / nsamples2,
+                        0.0f, 1 - flt_eps),
+                clamp((s / nsamples2 + next_rand1f(pxl.rng)) / nsamples2, 0.0f,
+                    1 - flt_eps)};
+        } break;
+        default: {
+            assert(false);
+            return {0, 0};
+        }
+    }
+}
+
+// Surface point with geometry and material data. Supports point on envmap too.
+// This is the key data manipulated in the path tracer.
+struct trace_point {
+    const shape* shp = nullptr;        // shape
+    const environment* env = nullptr;  // environment
+    vec3f pos = zero3f;                // pos
+    vec3f norm = {0, 0, 1};            // norm
+    vec2f texcoord = zero2f;           // texcoord
+    vec3f ke = zero3f;                 // emission
+    vec3f kd = {0, 0, 0};              // diffuse
+    vec3f ks = {0, 0, 0};              // specular
+    float rs = 0;                      // specular roughness
+    vec3f kt = {0, 0, 0};              // transmission (thin glass)
+    bool has_brdf() const { return shp && kd + ks + kt != zero3f; }
+    vec3f rho() const { return kd + ks + kt; }
+    vec3f brdf_weights() const {
+        auto w = vec3f{max_element_value(kd), max_element_value(ks),
+            max_element_value(kt)};
+        auto sw = w.x + w.y + w.z;
+        if (!sw) return zero3f;
+        return w / sw;
+    }
+};
+
+// Evaluates emission.
+vec3f eval_emission(const trace_point& pt, const vec3f& wo) {
+    if (pt.shp && !pt.shp->triangles.empty() && dot(pt.norm, wo) <= 0)
+        return zero3f;
+    return pt.ke;
+}
+
+// Evaluates the BRDF scaled by the cosine of the incoming direction.
+// - ggx from [Heitz 2014] and [Walter 2007] and [Lagarde 2014]
+// "Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs"
+// http://jcgt.org/published/0003/02/03/
+// - "Microfacet Models for Refraction through Rough Surfaces" EGSR 07
+// https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
+vec3f eval_ggx_brdfcos(const trace_point& pt, const vec3f& wo, const vec3f& wi,
+    bool delta = false) {
+    auto brdfcos = zero3f;
+    auto wh = normalize(wo + wi);
+
+    auto ndo = dot(pt.norm, wo), ndi = dot(pt.norm, wi),
+         ndh = clamp(dot(wh, pt.norm), -1.0f, 1.0f);
+
+    if (ndi > 0 && ndo > 0) {
+        brdfcos += pt.kd * ndi / pif;
+        if (ndh > 0 && pt.rs) {
+            auto dg = eval_ggx(pt.rs, ndh, ndi, ndo);
+            auto odh = clamp(dot(wo, wh), 0.0f, 1.0f);
+            auto ks = fresnel_schlick(pt.ks, odh, pt.rs);
+            brdfcos += ks * ndi * dg / (4 * ndi * ndo);
+        }
+        if (!pt.rs && delta) {
+            auto ks = fresnel_schlick(pt.ks, ndo, pt.rs);
+            brdfcos += ks;
+        }
+    }
+    if (wo == -wi && delta) brdfcos += pt.kt;
+
+    assert(isfinite(brdfcos.x) && isfinite(brdfcos.y) && isfinite(brdfcos.z));
+    return brdfcos;
+}
+
+// Evaluates the BRDF scaled by the cosine of the incoming direction.
+// - uses Kajiya-Kay for hair
+vec3f eval_kajiyakay_brdfcos(const trace_point& pt, const vec3f& wo,
+    const vec3f& wi, bool delta = false) {
+    auto brdfcos = zero3f;
+    auto wh = normalize(wo + wi);
+
+    auto ndo = dot(pt.norm, wo), ndi = dot(pt.norm, wi),
+         ndh = clamp(dot(pt.norm, wh), 0.0f, 1.0f);
+    auto so = sqrt(clamp(1 - ndo * ndo, 0.0f, 1.0f)),
+         si = sqrt(clamp(1 - ndi * ndi, 0.0f, 1.0f)),
+         sh = sqrt(clamp(1 - ndh * ndh, 0.0f, 1.0f));
+
+    if (si > 0 && so > 0) {
+        brdfcos += pt.kd * si / pif;
+        if (sh > 0 && pt.rs) {
+            auto ns = 2 / (pt.rs * pt.rs) - 2;
+            auto d = (ns + 2) * pow(sh, ns) / (2 + pif);
+            brdfcos += pt.ks * si * d / (4.0f * si * so);
+        }
+    }
+    if (wo == -wi && delta) brdfcos += pt.kt;
+
+    assert(isfinite(brdfcos.x) && isfinite(brdfcos.y) && isfinite(brdfcos.z));
+    return brdfcos;
+}
+
+// Evaluates the BRDF scaled by the cosine of the incoming direction.
+// - uses a hack for points
+vec3f eval_point_brdfcos(const trace_point& pt, const vec3f& wo,
+    const vec3f& wi, bool delta = false) {
+    auto brdfcos = zero3f;
+
+    auto ido = dot(wo, wi);
+    brdfcos += pt.kd * (2 * ido + 1) / (2 * pif);
+    if (wo == -wi && delta) brdfcos += pt.kt;
+
+    assert(isfinite(brdfcos.x) && isfinite(brdfcos.y) && isfinite(brdfcos.z));
+    return brdfcos;
+}
+
+// Evaluates the BRDF scaled by the cosine of the incoming direction.
+vec3f eval_brdfcos(const trace_point& pt, const vec3f& wo, const vec3f& wi,
+    bool delta = false) {
+    if (!pt.has_brdf()) return zero3f;
+    if (!pt.shp->triangles.empty())
+        return eval_ggx_brdfcos(pt, wo, wi, delta);
+    else if (!pt.shp->lines.empty())
+        return eval_kajiyakay_brdfcos(pt, wo, wi, delta);
+    else if (!pt.shp->points.empty())
+        return eval_point_brdfcos(pt, wo, wi, delta);
+    else
+        return zero3f;
+}
+
+// Compute the weight for sampling the BRDF
+float weight_ggx_brdfcos(const trace_point& pt, const vec3f& wo,
+    const vec3f& wi, bool delta = false) {
+    auto weights = pt.brdf_weights();
+    auto wh = normalize(wi + wo);
+    auto ndo = dot(pt.norm, wo), ndi = dot(pt.norm, wi), ndh = dot(pt.norm, wh);
+
+    auto pdf = 0.0f;
+    if (ndo > 0 && ndi > 0) {
+        pdf += weights.x * ndi / pif;
+        if (ndh > 0 && pt.rs) {
+            auto d = sample_ggx_pdf(pt.rs, ndh);
+            auto hdo = dot(wo, wh);
+            pdf += weights.y * d / (4 * hdo);
+        }
+        if (!pt.rs && delta) pdf += weights.y;
+    }
+    if (wi == -wo && delta) pdf += weights.z;
+
+    assert(isfinite(pdf));
+    if (!pdf) return 0;
+    return 1 / pdf;
+}
+
+// Compute the weight for sampling the BRDF
+float weight_kajiyakay_brdfcos(const trace_point& pt, const vec3f& wo,
+    const vec3f& wi, bool delta = false) {
+    auto weights = pt.brdf_weights();
+
+    auto pdf = 0.0f;
+    pdf += (weights.x + weights.y) / (4 * pif);
+    if (wi == -wo && delta) pdf += weights.z;
+
+    assert(isfinite(pdf));
+    if (!pdf) return 0;
+    return 1 / pdf;
+}
+
+// Compute the weight for sampling the BRDF
+float weight_point_brdfcos(const trace_point& pt, const vec3f& wo,
+    const vec3f& wi, bool delta = false) {
+    auto weights = pt.brdf_weights();
+
+    auto pdf = 0.0f;
+    pdf += (weights.x + weights.y) / (4 * pif);
+    if (wi == -wo && delta) pdf += weights.z;
+
+    assert(isfinite(pdf));
+    if (!pdf) return 0;
+    return 1 / pdf;
+}
+
+// Compute the weight for sampling the BRDF
+float weight_brdfcos(const trace_point& pt, const vec3f& wo, const vec3f& wi,
+    bool delta = false) {
+    if (!pt.has_brdf()) return 0;
+    if (!pt.shp->triangles.empty())
+        return weight_ggx_brdfcos(pt, wo, wi, delta);
+    else if (!pt.shp->lines.empty())
+        return weight_kajiyakay_brdfcos(pt, wo, wi, delta);
+    else if (!pt.shp->points.empty())
+        return weight_point_brdfcos(pt, wo, wi, delta);
+    else
+        return 0;
+}
+
+// Picks a direction based on the BRDF
+tuple<vec3f, bool> sample_ggx_brdfcos(
+    const trace_point& pt, const vec3f& wo, float rnl, const vec2f& rn) {
+    auto weights = pt.brdf_weights();
+    auto ndo = dot(pt.norm, wo);
+    if (ndo <= 0) return {zero3f, false};
+
+    // sample according to diffuse
+    if (rnl < weights.x) {
+        auto fp = make_frame_fromz(pt.pos, pt.norm);
+        auto rz = sqrtf(rn.y), rr = sqrtf(1 - rz * rz), rphi = 2 * pif * rn.x;
+        auto wi_local = vec3f{rr * cosf(rphi), rr * sinf(rphi), rz};
+        return {transform_direction(fp, wi_local), false};
+    }
+    // sample according to specular GGX
+    else if (rnl < weights.x + weights.y && pt.rs) {
+        auto fp = make_frame_fromz(pt.pos, pt.norm);
+        auto wh_local = sample_ggx(pt.rs, rn);
+        auto wh = transform_direction(fp, wh_local);
+        return {normalize(wh * 2.0f * dot(wo, wh) - wo), false};
+    }
+    // sample according to specular mirror
+    else if (rnl < weights.x + weights.y && !pt.rs) {
+        return {normalize(pt.norm * 2.0f * dot(wo, pt.norm) - wo), true};
+    }
+    // transmission hack
+    else if (rnl < weights.x + weights.y + weights.z) {
+        return {-wo, true};
+    } else
+        assert(false);
+
+    return {zero3f, false};
+}
+
+// Picks a direction based on the BRDF
+tuple<vec3f, bool> sample_kajiyakay_brdfcos(
+    const trace_point& pt, const vec3f& wo, float rnl, const vec2f& rn) {
+    auto weights = pt.brdf_weights();
+    // diffuse and specular: samnple a uniform spherical direction
+    if (rnl < weights.x + weights.y) {
+        auto fp = make_frame_fromz(pt.pos, pt.norm);
+        auto rz = 2 * rn.y - 1, rr = sqrtf(1 - rz * rz), rphi = 2 * pif * rn.x;
+        auto wi_local = vec3f{rr * cosf(rphi), rr * sinf(rphi), rz};
+        return {transform_direction(fp, wi_local), false};
+    }
+    // transmission hack
+    else if (rnl < weights.x + weights.y + weights.z) {
+        return {-wo, true};
+    } else
+        assert(false);
+    return {zero3f, false};
+}
+
+// Picks a direction based on the BRDF
+tuple<vec3f, bool> sample_point_brdfcos(
+    const trace_point& pt, const vec3f& wo, float rnl, const vec2f& rn) {
+    auto weights = pt.brdf_weights();
+    // diffuse and specular: samnple a uniform spherical direction
+    if (rnl < weights.x + weights.y) {
+        auto fp = make_frame_fromz(pt.pos, pt.norm);
+        auto rz = 2 * rn.y - 1, rr = sqrtf(1 - rz * rz), rphi = 2 * pif * rn.x;
+        auto wi_local = vec3f{rr * cosf(rphi), rr * sinf(rphi), rz};
+        return {transform_direction(fp, wi_local), false};
+    }
+    // transmission hack
+    else if (rnl < weights.x + weights.y + weights.z) {
+        // continue ray direction
+        return {-wo, true};
+    } else
+        assert(false);
+    return {zero3f, false};
+}
+
+// Picks a direction based on the BRDF
+tuple<vec3f, bool> sample_brdfcos(
+    const trace_point& pt, const vec3f& wo, float rnl, const vec2f& rn) {
+    if (!pt.has_brdf()) return {zero3f, false};
+    if (!pt.shp->triangles.empty())
+        return sample_ggx_brdfcos(pt, wo, rnl, rn);
+    else if (!pt.shp->lines.empty())
+        return sample_kajiyakay_brdfcos(pt, wo, rnl, rn);
+    else if (!pt.shp->points.empty())
+        return sample_point_brdfcos(pt, wo, rnl, rn);
+    else
+        return {zero3f, false};
+}
+
+// Create a point for an environment map. Resolves material with textures.
+trace_point eval_point(const environment* env, const vec3f& wo) {
+    auto pt = trace_point();
+    pt.env = env;
+    pt.pos = wo * flt_max;
+    pt.norm = -wo;
+    pt.ke = env->ke;
+    if (env->ke_txt) {
+        auto w = transform_direction_inverse(env->frame, -wo);
+        auto theta = acos(clamp(w.y, -1.0f, 1.0f));
+        auto phi = atan2(w.z, w.x);
+        auto texcoord = vec2f{0.5f + phi / (2 * pif), theta / pif};
+        pt.ke *= eval_texture(env->ke_txt, texcoord).xyz();
+    }
+    return pt;
+}
+
+// Create a point for a shape. Resolves geometry and material with textures.
+trace_point eval_point(
+    const instance* ist, int sid, int eid, const vec4f& euv, const vec3f& wo) {
+    // default material
+    static auto def_material = (material*)nullptr;
+    if (!def_material) {
+        def_material = new material();
+        def_material->kd = {0.2f, 0.2f, 0.2f};
+        def_material->rs = 1;
+    }
+
+    // point
+    auto pt = trace_point();
+    pt.shp = ist->shp->shapes.at(sid);
+    pt.pos = eval_pos(pt.shp, eid, euv);
+    pt.norm = eval_norm(pt.shp, eid, euv);
+    pt.texcoord = eval_texcoord(pt.shp, eid, euv);
+    // shortcuts
+    auto mat = (pt.shp->mat) ? pt.shp->mat : def_material;
+
+    // handle normal map
+    if (mat->norm_txt) {
+        auto tangsp = eval_tangsp(pt.shp, eid, euv);
+        auto txt =
+            eval_texture(mat->norm_txt, pt.texcoord, false).xyz() * 2.0f -
+            vec3f{1, 1, 1};
+        auto ntxt = normalize(vec3f{txt.x, -txt.y, txt.z});
+        auto frame = make_frame_fromzx(
+            {0, 0, 0}, pt.norm, {tangsp.x, tangsp.y, tangsp.z});
+        frame.y *= tangsp.w;
+        pt.norm = transform_direction(frame, ntxt);
+    }
+
+    // move to world coordinates
+    pt.pos = transform_point(ist->frame, pt.pos);
+    pt.norm = transform_direction(ist->frame, pt.norm);
+
+    // correct for double sided
+    if (mat->double_sided && dot(pt.norm, wo) < 0) pt.norm = -pt.norm;
+
+    // handle color
+    auto kx_scale = vec4f{1, 1, 1, 1};
+    if (!pt.shp->color.empty()) kx_scale *= eval_color(pt.shp, eid, euv);
+
+    // handle occlusion
+    if (mat->occ_txt)
+        kx_scale.xyz() *= eval_texture(mat->occ_txt, pt.texcoord).xyz();
+
+    // sample emission
+    pt.ke =
+        mat->ke * kx_scale.xyz() * eval_texture(mat->ke_txt, pt.texcoord).xyz();
+
+    // sample reflectance
+    auto kd = zero4f, ks = zero4f, kt = zero4f;
+    switch (mat->type) {
+        case material_type::specular_roughness: {
+            kd = vec4f{mat->kd, mat->op} * kx_scale *
+                 eval_texture(mat->kd_txt, pt.texcoord);
+            ks = vec4f{mat->ks, mat->rs} * vec4f{kx_scale.xyz(), 1} *
+                 eval_texture(mat->ks_txt, pt.texcoord);
+            kt = vec4f{mat->kt, mat->rs} * vec4f{kx_scale.xyz(), 1} *
+                 eval_texture(mat->kt_txt, pt.texcoord);
+        } break;
+        case material_type::metallic_roughness: {
+            auto kb = vec4f{mat->kd, mat->op} * kx_scale *
+                      eval_texture(mat->kd_txt, pt.texcoord);
+            auto km = vec2f{mat->ks.x, mat->rs};
+            if (mat->ks_txt) {
+                auto ks_txt = eval_texture(mat->ks_txt, pt.texcoord);
+                km.x *= ks_txt.y;
+                km.y *= ks_txt.z;
             }
-            if (!shp->quads_pos.empty()) {
-                if (!shp->quads_norm.empty())
-                    throw runtime_error("bad normals");
-                shp->quads_norm = shp->quads_pos;
-                shp->norm = compute_normals({}, {}, shp->quads_pos, shp->pos);
-            }
-        }
+            kd = vec4f{kb.xyz() * (1 - km.x), kb.w};
+            ks =
+                vec4f{kb.xyz() * km.x + vec3f{0.04f, 0.04f, 0.04f} * (1 - km.x),
+                    km.y};
+        } break;
+        case material_type::specular_glossiness: {
+            kd = vec4f{mat->kd, mat->op} * kx_scale *
+                 eval_texture(mat->kd_txt, pt.texcoord);
+            ks = vec4f{mat->ks, mat->rs} * vec4f{kx_scale.xyz(), 1} *
+                 eval_texture(mat->ks_txt, pt.texcoord);
+            ks.w = 1 - ks.w;  // glossiness -> roughness
+        } break;
     }
 
-    if (opts.tangent_space) {
-        for (auto shp : scn->shapes) {
-            if (!shp->tangsp.empty() || shp->triangles.empty() ||
-                shp->texcoord.empty() || (shp->mat))
-                continue;
-            shp->tangsp = compute_tangent_frames(
-                shp->triangles, shp->pos, shp->norm, shp->texcoord);
+    // TODO: fix emission for opacity
+
+    // set up final values
+    pt.kd = kd.xyz() * kd.w;
+    pt.ks = (ks.xyz() != zero3f && ks.w < 0.9999f) ? ks.xyz() * kd.w : zero3f;
+    pt.rs = (ks.xyz() != zero3f && ks.w < 0.9999f) ? ks.w * ks.w : 0;
+    pt.kt = {1 - kd.w, 1 - kd.w, 1 - kd.w};
+    if (kt.xyz() != zero3f) pt.kt *= kt.xyz();
+
+    // done
+    return pt;
+}
+
+// Sample weight for a light point.
+float weight_light(
+    const trace_lights& lights, const trace_point& lpt, const trace_point& pt) {
+    if (lpt.shp) {
+        auto dist = length(lpt.pos - pt.pos);
+        auto area = lights.shape_areas.at(lpt.shp);
+        if (!lpt.shp->triangles.empty()) {
+            return area * abs(dot(lpt.norm, normalize(lpt.pos - pt.pos))) /
+                   (dist * dist);
+        } else if (!lpt.shp->lines.empty()) {
+            // TODO: fixme
+            return 0;
+        } else if (!lpt.shp->points.empty()) {
+            return area / (dist * dist);
         }
     }
+    if (lpt.env) { return 4 * pif; }
+    return 0;
+}
 
-    if (opts.pointline_radius > 0) {
-        for (auto shp : scn->shapes) {
-            if ((shp->points.empty() && shp->lines.empty()) ||
-                !shp->radius.empty())
-                continue;
-            shp->radius.resize(shp->pos.size(), opts.pointline_radius);
-        }
-    }
+// Sample weight for a light point.
+float weight_lights(
+    const trace_lights& lights, const trace_point& lpt, const trace_point& pt) {
+    return lights.lights.size() * weight_light(lights, lpt, pt);
+}
 
-    if (opts.texture_data) {
-        for (auto txt : scn->textures) {
-            if (!txt->hdr && !txt->ldr) {
-                printf("unable to load texture %s\n", txt->path.c_str());
-                txt->ldr = image4b(1, 1, {255, 255, 255, 255});
-            }
-        }
-    }
-
-    if (opts.shape_instances) {
-        if (!scn->instances.empty()) return;
-        for (auto shp : scn->shapes) {
-            auto ist = new instance();
-            ist->name = shp->name;
-            ist->shp = shp;
-            scn->instances.push_back(ist);
-        }
-    }
-
-    if (opts.default_names || opts.default_paths) {
-        auto cid = 0;
-        for (auto cam : scn->cameras) {
-            if (cam->name.empty())
-                cam->name = "unnamed_camera_" + std::to_string(cid);
-            cid++;
-        }
-
-        auto tid = 0;
-        for (auto txt : scn->textures) {
-            if (txt->name.empty())
-                txt->name = "unnamed_texture_" + std::to_string(tid);
-            tid++;
-        }
-
-        auto mid = 0;
-        for (auto mat : scn->materials) {
-            if (mat->name.empty())
-                mat->name = "unnamed_material_" + std::to_string(mid);
-            mid++;
-        }
-
-        auto sid = 0;
-        for (auto shp : scn->shapes) {
-            if (shp->name.empty())
-                shp->name = "unnamed_shape_" + std::to_string(sid);
-            sid++;
-        }
-
-        auto iid = 0;
-        for (auto ist : scn->instances) {
-            if (ist->name.empty())
-                ist->name = "unnamed_instance_" + std::to_string(iid);
-            iid++;
-        }
-
+// Picks a point on a light.
+trace_point sample_light(const trace_lights& lights, const trace_light& lgt,
+    const trace_point& pt, float rne, const vec2f& rn) {
+    if (lgt.ist) {
+        auto shp = lgt.ist->shp->shapes.at(0);
         auto eid = 0;
-        for (auto env : scn->environments) {
-            if (env->name.empty())
-                env->name = "unnamed_environment_" + std::to_string(eid);
-            eid++;
+        auto euv = zero4f;
+        if (!shp->points.empty()) {
+            eid = sample_points(lights.shape_cdfs.at(shp), rne);
+            euv = {1, 0, 0, 0};
+        } else if (!shp->lines.empty()) {
+            std::tie(eid, (vec2f&)euv) =
+                sample_lines(lights.shape_cdfs.at(shp), rne, rn.x);
+        } else if (!shp->triangles.empty()) {
+            std::tie(eid, (vec3f&)euv) =
+                sample_triangles(lights.shape_cdfs.at(shp), rne, rn);
+        } else if (!shp->quads.empty()) {
+            std::tie(eid, (vec4f&)euv) =
+                sample_quads(lights.shape_cdfs.at(shp), rne, rn);
+        } else {
+            assert(false);
         }
+        return eval_point(lgt.ist, 0, eid, euv, zero3f);
     }
-
-    if (opts.default_paths) {
-        for (auto txt : scn->textures) {
-            if (txt->path != "") continue;
-            txt->path = txt->name + ".png";
-        }
-        for (auto shp : scn->shapes) {
-            if (shp->path != "") continue;
-            shp->path = shp->name + ".bin";
-        }
+    if (lgt.env) {
+        auto z = -1 + 2 * rn.y;
+        auto rr = sqrt(clamp(1 - z * z, 0.0f, 1.0f));
+        auto phi = 2 * pif * rn.x;
+        auto wo = vec3f{cos(phi) * rr, z, sin(phi) * rr};
+        return eval_point(lgt.env, wo);
     }
+    return {};
+}
 
-    if (opts.default_camera && scn->cameras.empty()) {
-        update_bounds(scn);
-        auto bbox = scn->bbox;
-        auto bbox_center = (bbox.max + bbox.min) / 2.0f;
-        auto bbox_size = bbox.max - bbox.min;
-        auto bbox_msize = max(bbox_size[0], max(bbox_size[1], bbox_size[2]));
-        // set up camera
-        auto cam = new camera();
-        cam->name = "default_camera";
-        auto camera_dir = vec3f{1, 0.4f, 1};
-        auto from = camera_dir * bbox_msize + bbox_center;
-        auto to = bbox_center;
-        auto up = vec3f{0, 1, 0};
-        cam->frame = lookat_frame3f(from, to, up);
-        cam->ortho = false;
-        cam->aspect = 16.0f / 9.0f;
-        cam->yfov = 2 * atanf(0.5f);
-        cam->aperture = 0;
-        cam->focus = length(to - from);
-        scn->cameras.push_back(cam);
-    }
+// Picks a point on a light.
+trace_point sample_lights(const trace_lights& lights, const trace_point& pt,
+    float rnl, float rne, const vec2f& ruv) {
+    auto& lgt = lights.lights.at(
+        clamp((int)(rnl * lights.lights.size()), 0, (int)lights.lights.size()));
+    return sample_light(lights, lgt, pt, rne, ruv);
+}
 
-    // default environment
-    if (opts.default_environment && scn->environments.empty()) {
-        auto env = new environment();
-        env->name = "default_environment";
-        scn->environments.push_back(env);
+// Intersects a ray with the scn and return the point (or env
+// point).
+trace_point intersect_scene(
+    const scene* scn, const bvh_tree* bvh, const ray3f& ray) {
+    auto iid = 0, sid = 0, eid = 0;
+    auto euv = zero4f;
+    auto ray_t = 0.0f;
+    if (intersect_bvh(bvh, ray, false, ray_t, iid, sid, eid, euv)) {
+        return eval_point(scn->instances[iid], sid, eid, euv, -ray.d);
+    } else if (!scn->environments.empty()) {
+        return eval_point(scn->environments[0], -ray.d);
+    } else {
+        return {};
     }
 }
 
-// Merge scene into one another
-inline void merge_into(scene* merge_into, scene* merge_from) {
-    merge_into->cameras.insert(merge_from->cameras.begin(),
-        merge_from->cameras.end(), merge_into->cameras.end());
-    merge_from->cameras.clear();
-    merge_into->textures.insert(merge_from->textures.begin(),
-        merge_from->textures.end(), merge_into->textures.end());
-    merge_from->textures.clear();
-    merge_into->materials.insert(merge_from->materials.begin(),
-        merge_from->materials.end(), merge_into->materials.end());
-    merge_from->materials.clear();
-    merge_into->shapes.insert(merge_from->shapes.begin(),
-        merge_from->shapes.end(), merge_into->shapes.end());
-    merge_from->shapes.clear();
-    merge_into->instances.insert(merge_from->instances.begin(),
-        merge_from->instances.end(), merge_into->instances.end());
-    merge_from->instances.clear();
-    merge_into->environments.insert(merge_from->environments.begin(),
-        merge_from->environments.end(), merge_into->environments.end());
-    merge_from->environments.clear();
+// Test occlusion
+vec3f eval_transmission(const scene* scn, const bvh_tree* bvh,
+    const trace_point& pt, const trace_point& lpt, const trace_params& params) {
+    if (params.shadow_notransmission) {
+        auto ray = make_segment(pt.pos, lpt.pos);
+        return (intersect_bvh(bvh, ray, true)) ? zero3f : vec3f{1, 1, 1};
+    } else {
+        auto cpt = pt;
+        auto weight = vec3f{1, 1, 1};
+        for (auto bounce = 0; bounce < params.max_depth; bounce++) {
+            auto ray = make_segment(cpt.pos, lpt.pos);
+            cpt = intersect_scene(scn, bvh, ray);
+            if (!cpt.shp) break;
+            weight *= cpt.kt;
+            if (weight == zero3f) break;
+        }
+        return weight;
+    }
 }
 
-// Initialize the lights
-inline void update_lights(scene* scn, bool include_env, bool sampling_cdf) {
-    for (auto lgt : scn->lights) delete lgt;
-    scn->lights.clear();
+// Mis weight
+float weight_mis(float w0, float w1) {
+    if (!w0 || !w1) return 1;
+    return (1 / w0) / (1 / w0 + 1 / w1);
+}
 
-    for (auto ist : scn->instances) {
-        if (!ist->shp->mat) continue;
-        if (ist->shp->mat->ke == zero3f) continue;
-        auto lgt = new light();
-        lgt->ist = ist;
-        scn->lights.push_back(lgt);
-        if (!sampling_cdf) continue;
-        auto shp = ist->shp;
-        if (shp->elem_cdf.empty()) {
-            if (!shp->points.empty()) {
-                shp->elem_cdf = sample_points_cdf(shp->points.size());
-            } else if (!ist->shp->lines.empty()) {
-                shp->elem_cdf = sample_lines_cdf(shp->lines, shp->pos);
-            } else if (!shp->triangles.empty()) {
-                shp->elem_cdf = sample_triangles_cdf(shp->triangles, shp->pos);
+// Recursive path tracing.
+vec3f trace_path(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt_, const vec3f& wo_,
+    trace_pixel& pxl, const trace_params& params) {
+    auto pt = pt_;
+    auto wo = wo_;
+
+    // emission
+    auto l = eval_emission(pt, wo);
+    if (!pt.has_brdf() || lights.empty()) return l;
+
+    // trace path
+    auto weight = vec3f{1, 1, 1};
+    auto emission = false;
+    for (auto bounce = 0; bounce < params.max_depth; bounce++) {
+        // emission
+        if (emission) l += weight * eval_emission(pt, wo);
+
+        // direct – light
+        auto rll = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rle = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rluv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto& lgt = lights.lights[(int)(rll * lights.lights.size())];
+        auto lpt = sample_light(lights, lgt, pt, rle, rluv);
+        auto lw = weight_light(lights, lpt, pt) * (float)lights.size();
+        auto lwi = normalize(lpt.pos - pt.pos);
+        auto lke = eval_emission(lpt, -lwi);
+        auto lbc = eval_brdfcos(pt, wo, lwi);
+        auto lld = lke * lbc * lw;
+        if (lld != zero3f) {
+            l += weight * lld * eval_transmission(scn, bvh, pt, lpt, params) *
+                 weight_mis(lw, weight_brdfcos(pt, wo, lwi));
+        }
+
+        // direct – brdf
+        auto rbl = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rbuv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto bwi = zero3f;
+        auto bdelta = false;
+        std::tie(bwi, bdelta) = sample_brdfcos(pt, wo, rbl, rbuv);
+        auto bpt = intersect_scene(scn, bvh, make_ray(pt.pos, bwi));
+        auto bw = weight_brdfcos(pt, wo, bwi, bdelta);
+        auto bke = eval_emission(bpt, -bwi);
+        auto bbc = eval_brdfcos(pt, wo, bwi, bdelta);
+        auto bld = bke * bbc * bw;
+        if (bld != zero3f) {
+            l += weight * bld * weight_mis(bw, weight_light(lights, bpt, pt));
+        }
+
+        // skip recursion if path ends
+        if (bounce == params.max_depth - 1) break;
+        if (!bpt.has_brdf()) break;
+
+        // continue path
+        weight *= eval_brdfcos(pt, wo, bwi) * weight_brdfcos(pt, wo, bwi);
+        if (weight == zero3f) break;
+
+        // roussian roulette
+        if (bounce > 2) {
+            auto rrprob = 1.0f - min(max_element_value(pt.rho()), 0.95f);
+            if (sample_next1f(pxl, params.rtype, params.nsamples) < rrprob)
+                break;
+            weight *= 1 / (1 - rrprob);
+        }
+
+        // continue path
+        pt = bpt;
+        wo = -bwi;
+        emission = false;
+    }
+
+    return l;
+}
+
+// Recursive path tracing.
+vec3f trace_path_nomis(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt_, const vec3f& wo_,
+    trace_pixel& pxl, const trace_params& params) {
+    // emission
+    auto pt = pt_;
+    auto wo = wo_;
+
+    auto l = eval_emission(pt, wo);
+    if (!pt.has_brdf() || lights.empty()) return l;
+
+    // trace path
+    auto weight = vec3f{1, 1, 1};
+    auto emission = false;
+    for (auto bounce = 0; bounce < params.max_depth; bounce++) {
+        // emission
+        if (emission) l += weight * eval_emission(pt, wo);
+
+        // direct
+        auto rll = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rle = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rluv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto& lgt = lights.lights[(int)(rll * lights.lights.size())];
+        auto lpt = sample_light(lights, lgt, pt, rle, rluv);
+        auto lwi = normalize(lpt.pos - pt.pos);
+        auto ld = eval_emission(lpt, -lwi) * eval_brdfcos(pt, wo, lwi) *
+                  weight_light(lights, lpt, pt) * (float)lights.size();
+        if (ld != zero3f) {
+            l += weight * ld * eval_transmission(scn, bvh, pt, lpt, params);
+        }
+
+        // skip recursion if path ends
+        if (bounce == params.max_depth - 1) break;
+
+        // roussian roulette
+        if (bounce > 2) {
+            auto rrprob = 1.0f - min(max_element_value(pt.rho()), 0.95f);
+            if (sample_next1f(pxl, params.rtype, params.nsamples) < rrprob)
+                break;
+            weight *= 1 / (1 - rrprob);
+        }
+
+        // continue path
+        auto rbl = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rbuv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto bwi = zero3f;
+        auto bdelta = false;
+        std::tie(bwi, bdelta) = sample_brdfcos(pt, wo, rbl, rbuv);
+        weight *= eval_brdfcos(pt, wo, bwi, bdelta) *
+                  weight_brdfcos(pt, wo, bwi, bdelta);
+        if (weight == zero3f) break;
+
+        auto bpt = intersect_scene(scn, bvh, make_ray(pt.pos, bwi));
+        emission = false;
+        if (!bpt.has_brdf()) break;
+
+        // continue path
+        pt = bpt;
+        wo = -bwi;
+    }
+
+    return l;
+}
+
+// Recursive path tracing.
+vec3f trace_path_hack(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt_, const vec3f& wo_,
+    trace_pixel& pxl, const trace_params& params) {
+    auto pt = pt_;
+    auto wo = wo_;
+
+    // emission
+    auto l = eval_emission(pt, wo);
+    if (!pt.has_brdf() || lights.empty()) return l;
+
+    // trace path
+    auto weight = vec3f{1, 1, 1};
+    for (auto bounce = 0; bounce < params.max_depth; bounce++) {
+        // direct
+        auto rll = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rle = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rluv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto& lgt = lights.lights[(int)(rll * lights.lights.size())];
+        auto lpt = sample_light(lights, lgt, pt, rle, rluv);
+        auto lwi = normalize(lpt.pos - pt.pos);
+        auto ld = eval_emission(lpt, -lwi) * eval_brdfcos(pt, wo, -lwi) *
+                  weight_light(lights, lpt, pt) * (float)lights.size();
+        if (ld != zero3f) {
+            l += weight * ld * eval_transmission(scn, bvh, pt, lpt, params);
+        }
+
+        // skip recursion if path ends
+        if (bounce == params.max_depth - 1) break;
+
+        // roussian roulette
+        if (bounce > 2) {
+            auto rrprob = 1.0f - min(max_element_value(pt.rho()), 0.95f);
+            if (sample_next1f(pxl, params.rtype, params.nsamples) < rrprob)
+                break;
+            weight *= 1 / (1 - rrprob);
+        }
+
+        // continue path
+        auto bwi = zero3f;
+        auto bdelta = false;
+        std::tie(bwi, bdelta) = sample_brdfcos(pt, wo,
+            sample_next1f(pxl, params.rtype, params.nsamples),
+            sample_next2f(pxl, params.rtype, params.nsamples));
+        weight *= eval_brdfcos(pt, wo, bwi, bdelta) *
+                  weight_brdfcos(pt, wo, bwi, bdelta);
+        if (weight == zero3f) break;
+
+        auto bpt = intersect_scene(scn, bvh, make_ray(pt.pos, bwi));
+        if (!bpt.has_brdf()) break;
+
+        // continue path
+        pt = bpt;
+        wo = -bwi;
+    }
+
+    return l;
+}
+
+// Direct illumination.
+vec3f trace_direct(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt, const vec3f& wo,
+    int bounce, trace_pixel& pxl, const trace_params& params) {
+    // emission
+    auto l = eval_emission(pt, wo);
+    if (!pt.has_brdf()) return l;
+
+    // ambient
+    l += params.ambient * pt.rho();
+
+    // direct
+    for (auto& lgt : lights.lights) {
+        auto rle = sample_next1f(pxl, params.rtype, params.nsamples);
+        auto rluv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto lpt = sample_light(lights, lgt, pt, rle, rluv);
+        auto lwi = normalize(lpt.pos - pt.pos);
+        auto ld = eval_emission(lpt, -lwi) * eval_brdfcos(pt, wo, lwi) *
+                  weight_light(lights, lpt, pt);
+        if (ld == zero3f) continue;
+        l += ld * eval_transmission(scn, bvh, pt, lpt, params);
+    }
+
+    // exit if needed
+    if (bounce >= params.max_depth) return l;
+
+    // reflection
+    if (pt.ks != zero3f && !pt.rs) {
+        auto wi = reflect(wo, pt.norm);
+        auto rpt = intersect_scene(scn, bvh, make_ray(pt.pos, wi));
+        l += pt.ks *
+             trace_direct(scn, bvh, lights, rpt, -wi, bounce + 1, pxl, params);
+    }
+
+    // opacity
+    if (pt.kt != zero3f) {
+        auto opt = intersect_scene(scn, bvh, make_ray(pt.pos, -wo));
+        l += pt.kt *
+             trace_direct(scn, bvh, lights, opt, wo, bounce + 1, pxl, params);
+    }
+
+    // done
+    return l;
+}
+
+// Direct illumination.
+vec3f trace_direct(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt, const vec3f& wo,
+    trace_pixel& pxl, const trace_params& params) {
+    return trace_direct(scn, bvh, lights, pt, wo, 0, pxl, params);
+}
+
+// Eyelight for quick previewing.
+vec3f trace_eyelight(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt, const vec3f& wo,
+    int bounce, trace_pixel& pxl, const trace_params& params) {
+    // emission
+    auto l = eval_emission(pt, wo);
+    if (!pt.has_brdf()) return l;
+
+    // brdf*light
+    l += eval_brdfcos(pt, wo, wo) * pif;
+
+    // opacity
+    if (bounce >= params.max_depth) return l;
+    if (pt.kt != zero3f) {
+        auto opt = intersect_scene(scn, bvh, make_ray(pt.pos, -wo));
+        l += pt.kt *
+             trace_eyelight(scn, bvh, lights, opt, wo, bounce + 1, pxl, params);
+    }
+
+    // done
+    return l;
+}
+
+// Eyelight for quick previewing.
+vec3f trace_eyelight(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt, const vec3f& wo,
+    trace_pixel& pxl, const trace_params& params) {
+    return trace_eyelight(scn, bvh, lights, pt, wo, 0, pxl, params);
+}
+
+// Debug previewing.
+vec3f trace_debug_normal(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt, const vec3f& wo,
+    trace_pixel& pxl, const trace_params& params) {
+    return pt.norm * 0.5f + vec3f{0.5f, 0.5f, 0.5f};
+}
+
+// Debug previewing.
+vec3f trace_debug_albedo(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt, const vec3f& wo,
+    trace_pixel& pxl, const trace_params& params) {
+    return pt.rho();
+}
+
+// Debug previewing.
+vec3f trace_debug_texcoord(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt, const vec3f& wo,
+    trace_pixel& pxl, const trace_params& params) {
+    return {pt.texcoord.x, pt.texcoord.y, 0};
+}
+
+// Trace shader function
+using trace_shader = vec3f (*)(const scene* scn, const bvh_tree* bvh,
+    const trace_lights& lights, const trace_point& pt, const vec3f& wo,
+    trace_pixel& pxl, const trace_params& params);
+
+// Trace filter function
+using trace_filter = float (*)(float);
+
+// map to convert trace samplers
+static auto trace_shaders = unordered_map<trace_shader_type, trace_shader>{
+    {trace_shader_type::eyelight, trace_eyelight},
+    {trace_shader_type::direct, trace_direct},
+    {trace_shader_type::pathtrace, trace_path},
+    {trace_shader_type::pathtrace_nomis, trace_path_nomis},
+    {trace_shader_type::debug_albedo, trace_debug_albedo},
+    {trace_shader_type::debug_normal, trace_debug_normal},
+    {trace_shader_type::debug_texcoord, trace_debug_texcoord},
+};
+
+// map to convert trace filters
+static auto trace_filters = unordered_map<trace_filter_type, trace_filter>{
+    {trace_filter_type::box, (trace_filter) nullptr},
+    {trace_filter_type::triangle, filter_triangle},
+    {trace_filter_type::cubic, filter_cubic},
+    {trace_filter_type::catmull_rom, filter_catmullrom},
+    {trace_filter_type::mitchell, filter_mitchell},
+};
+
+// map to convert trace filters
+static auto trace_filter_sizes = unordered_map<trace_filter_type, int>{
+    {trace_filter_type::box, 0},
+    {trace_filter_type::triangle, 1},
+    {trace_filter_type::cubic, 2},
+    {trace_filter_type::catmull_rom, 2},
+    {trace_filter_type::mitchell, 2},
+};
+
+// Trace a single sample
+void trace_sample(const scene* scn, const camera* cam, const bvh_tree* bvh,
+    const trace_lights& lights, trace_pixel& pxl, trace_shader shader,
+    const trace_params& params) {
+    pxl.sample += 1;
+    pxl.dimension = 0;
+    auto crn = sample_next2f(pxl, params.rtype, params.nsamples);
+    auto lrn = sample_next2f(pxl, params.rtype, params.nsamples);
+    auto uv = vec2f{
+        (pxl.i + crn.x) / params.width, 1 - (pxl.j + crn.y) / params.height};
+    auto ray = eval_camera_ray(cam, uv, lrn);
+    auto pt = intersect_scene(scn, bvh, ray);
+    if (!pt.shp && params.envmap_invisible) return;
+    auto l = shader(scn, bvh, lights, pt, -ray.d, pxl, params);
+    if (!isfinite(l.x) || !isfinite(l.y) || !isfinite(l.z)) {
+        log_error("NaN detected");
+        return;
+    }
+    if (params.pixel_clamp > 0) l = clamplen(l, params.pixel_clamp);
+    pxl.acc += {l, 1};
+}
+
+// Trace the next nsamples.
+void trace_samples(const scene* scn, const camera* cam, const bvh_tree* bvh,
+    const trace_lights& lights, image4f& img, image<trace_pixel>& pixels,
+    int nsamples, const trace_params& params) {
+    auto shader = trace_shaders.at(params.stype);
+    if (params.parallel) {
+        auto nthreads = std::thread::hardware_concurrency();
+        auto threads = vector<std::thread>();
+        for (auto tid = 0; tid < std::thread::hardware_concurrency(); tid++) {
+            threads.push_back(std::thread([=, &img, &pixels, &params]() {
+                for (auto j = tid; j < params.height; j += nthreads) {
+                    for (auto i = 0; i < params.width; i++) {
+                        auto& pxl = pixels.at(i, j);
+                        for (auto s = 0; s < nsamples; s++)
+                            trace_sample(
+                                scn, cam, bvh, lights, pxl, shader, params);
+                        img.at(i, j) = pxl.acc / pxl.sample;
+                    }
+                }
+            }));
+        }
+        for (auto& t : threads) t.join();
+        threads.clear();
+    } else {
+        auto shader = trace_shaders.at(params.stype);
+        for (auto j = 0; j < params.height; j++) {
+            for (auto i = 0; i < params.width; i++) {
+                auto& pxl = pixels.at(i, j);
+                for (auto s = 0; s < params.nsamples; s++)
+                    trace_sample(scn, cam, bvh, lights, pxl, shader, params);
+                img.at(i, j) = pxl.acc / pxl.sample;
             }
+        }
+    }
+}
+
+// Trace a filtered sample of samples
+void trace_sample_filtered(const scene* scn, const camera* cam,
+    const bvh_tree* bvh, const trace_lights& lights, trace_pixel& pxl,
+    trace_shader shader, trace_filter filter, int filter_size,
+    std::mutex& image_mutex, const trace_params& params) {
+    pxl.sample += 1;
+    pxl.dimension = 0;
+    auto crn = sample_next2f(pxl, params.rtype, params.nsamples);
+    auto lrn = sample_next2f(pxl, params.rtype, params.nsamples);
+    auto uv = vec2f{
+        (pxl.i + crn.x) / params.width, 1 - (pxl.j + crn.y) / params.height};
+    auto ray = eval_camera_ray(cam, uv, lrn);
+    auto pt = intersect_scene(scn, bvh, ray);
+    if (!pt.shp && params.envmap_invisible) return;
+    auto l = shader(scn, bvh, lights, pt, -ray.d, pxl, params);
+    if (!isfinite(l.x) || !isfinite(l.y) || !isfinite(l.z)) {
+        log_error("NaN detected");
+        return;
+    }
+    if (params.pixel_clamp > 0) l = clamplen(l, params.pixel_clamp);
+    if (params.ftype == trace_filter_type::box) {
+        pxl.acc += {l, 1};
+        pxl.weight += 1;
+    } else {
+        std::lock_guard<std::mutex> lock(image_mutex);
+        for (auto fj = max(0, pxl.j - filter_size);
+             fj <= min(params.height - 1, pxl.j + filter_size); fj++) {
+            for (auto fi = max(0, pxl.i - filter_size);
+                 fi <= min(params.width - 1, pxl.i + filter_size); fi++) {
+                auto w = filter((fi - pxl.i) - uv.x + 0.5f) *
+                         filter((fj - pxl.j) - uv.y + 0.5f);
+                pxl.acc += {l * w, w};
+                pxl.weight += w;
+            }
+        }
+    }
+}
+
+// Trace the next nsamples.
+void trace_samples_filtered(const scene* scn, const camera* cam,
+    const bvh_tree* bvh, const trace_lights& lights, image4f& img,
+    image<trace_pixel>& pixels, int nsamples, const trace_params& params) {
+    auto shader = trace_shaders.at(params.stype);
+    auto filter = trace_filters.at(params.ftype);
+    auto filter_size = trace_filter_sizes.at(params.ftype);
+    std::mutex image_mutex;
+    if (params.parallel) {
+        auto nthreads = std::thread::hardware_concurrency();
+        auto threads = vector<std::thread>();
+        for (auto tid = 0; tid < std::thread::hardware_concurrency(); tid++) {
+            threads.push_back(
+                std::thread([=, &pixels, &params, &image_mutex]() {
+                    for (auto j = tid; j < params.height; j += nthreads) {
+                        for (auto i = 0; i < params.width; i++) {
+                            auto& pxl = pixels.at(i, j);
+                            for (auto s = 0; s < nsamples; s++) {
+                                trace_sample_filtered(scn, cam, bvh, lights,
+                                    pxl, shader, filter, filter_size,
+                                    image_mutex, params);
+                            }
+                        }
+                    }
+                }));
+        }
+        for (auto& t : threads) t.join();
+        threads.clear();
+    } else {
+        for (auto j = 0; j < params.height; j++) {
+            for (auto i = 0; i < params.width; i++) {
+                auto& pxl = pixels.at(i, j);
+                for (auto s = 0; s < params.nsamples; s++) {
+                    trace_sample_filtered(scn, cam, bvh, lights, pxl, shader,
+                        filter, filter_size, image_mutex, params);
+                }
+            }
+        }
+    }
+    for (auto j = 0; j < params.height; j++) {
+        for (auto i = 0; i < params.width; i++) {
+            img.at(i, j) = pixels.at(i, j).acc / pixels.at(i, j).weight;
+        }
+    }
+}
+
+// Starts an anyncrhounous renderer.
+void trace_async_start(const scene* scn, const camera* cam, const bvh_tree* bvh,
+    const trace_lights& lights, image4f& img, image<trace_pixel>& pixels,
+    vector<std::thread>& threads, bool& stop_flag, const trace_params& params) {
+    pixels = make_trace_pixels(params);
+    auto nthreads = std::thread::hardware_concurrency();
+    for (auto tid = 0; tid < std::thread::hardware_concurrency(); tid++) {
+        threads.push_back(std::thread([=, &img, &pixels, &stop_flag]() {
+            auto shader = trace_shaders.at(params.stype);
+            for (auto s = 0; s < params.nsamples; s++) {
+                for (auto j = tid; j < params.height; j += nthreads) {
+                    for (auto i = 0; i < params.width; i++) {
+                        if (stop_flag) return;
+                        auto& pxl = pixels.at(i, j);
+                        trace_sample(
+                            scn, cam, bvh, lights, pxl, shader, params);
+                        img.at(i, j) = pxl.acc / pxl.sample;
+                    }
+                }
+            }
+        }));
+    }
+}
+
+// Stop the asynchronous renderer.
+void trace_async_stop(vector<std::thread>& threads, bool& stop_flag) {
+    stop_flag = true;
+    for (auto& t : threads) t.join();
+    stop_flag = false;
+    threads.clear();
+}
+
+// Initialize trace lights
+trace_lights make_trace_lights(const scene* scn) {
+    auto lights = trace_lights();
+    for (auto ist : scn->instances) {
+        auto shp = ist->shp->shapes.at(0);
+        if (!shp->mat) continue;
+        if (shp->mat->ke == zero3f) continue;
+        auto lgt = trace_light();
+        lgt.ist = ist;
+        lights.lights.push_back(lgt);
+        if (!contains(lights.shape_cdfs, shp)) {
+            if (!shp->points.empty()) {
+                lights.shape_cdfs[shp] = sample_points_cdf(shp->points.size());
+            } else if (!shp->lines.empty()) {
+                lights.shape_cdfs[shp] = sample_lines_cdf(shp->lines, shp->pos);
+            } else if (!shp->triangles.empty()) {
+                lights.shape_cdfs[shp] =
+                    sample_triangles_cdf(shp->triangles, shp->pos);
+            }
+            lights.shape_areas[shp] = lights.shape_cdfs[shp].back();
         }
     }
 
     for (auto env : scn->environments) {
-        if (!include_env) continue;
         if (env->ke == zero3f) continue;
-        auto lgt = new light();
-        lgt->env = env;
-        scn->lights.push_back(lgt);
-    }
-}
-
-// Print scene info (call update bounds bes before)
-inline void print_info(const scene* scn) {
-    auto nverts = 0, nnorms = 0, ntexcoords = 0, npoints = 0, nlines = 0,
-         ntriangles = 0, nquads = 0;
-    for (auto shp : scn->shapes) {
-        nverts += shp->pos.size();
-        nnorms += shp->norm.size();
-        ntexcoords += shp->texcoord.size();
-        npoints += shp->points.size();
-        nlines += shp->lines.size();
-        ntriangles += shp->triangles.size();
-        nquads += shp->quads.size();
+        auto lgt = trace_light();
+        lgt.env = env;
+        lights.lights.push_back(lgt);
     }
 
-    auto bbox = scn->bbox;
-    auto bboxc = vec3f{(bbox.max[0] + bbox.min[0]) / 2,
-        (bbox.max[1] + bbox.min[1]) / 2, (bbox.max[2] + bbox.min[2]) / 2};
-    auto bboxs = vec3f{bbox.max[0] - bbox.min[0], bbox.max[1] - bbox.min[1],
-        bbox.max[2] - bbox.min[2]};
-
-    printf("number of cameras:      %d\n", (int)scn->cameras.size());
-    printf("number of shapes:       %d\n", (int)scn->shapes.size());
-    printf("number of instances:    %d\n", (int)scn->instances.size());
-    printf("number of materials:    %d\n", (int)scn->materials.size());
-    printf("number of textures:     %d\n", (int)scn->textures.size());
-    printf("number of environments: %d\n", (int)scn->environments.size());
-    printf("number of vertices:     %d\n", nverts);
-    printf("number of normals:      %d\n", nnorms);
-    printf("number of texcoords:    %d\n", ntexcoords);
-    printf("number of points:       %d\n", npoints);
-    printf("number of lines:        %d\n", nlines);
-    printf("number of triangles:    %d\n", ntriangles);
-    printf("number of quads:        %d\n", nquads);
-    printf("\n");
-    printf("bbox min:    %g %g %g\n", bbox.min[0], bbox.min[1], bbox.min[2]);
-    printf("bbox max:    %g %g %g\n", bbox.max[0], bbox.max[1], bbox.max[2]);
-    printf("bbox center: %g %g %g\n", bboxc[0], bboxc[1], bboxc[2]);
-    printf("bbox size:   %g %g %g\n", bboxs[0], bboxs[1], bboxs[2]);
-    printf("\n");
+    return lights;
 }
 
-}  // namespace _impl_scn
-
-// Load a scene
-scene* load_scene(const string& filename, const load_options& opts) {
-    return _impl_scn::load_scene(filename, opts);
+// Initialize a rendering state
+image<trace_pixel> make_trace_pixels(const trace_params& params) {
+    auto pixels = image<trace_pixel>(params.width, params.height);
+    for (auto j = 0; j < params.height; j++) {
+        for (auto i = 0; i < params.width; i++) {
+            auto pxl = trace_pixel();
+            pxl.i = i;
+            pxl.j = j;
+            pxl.rng = init_rng(params.seed, (j * params.width + i) * 2 + 1);
+            pixels.at(i, j) = pxl;
+        }
+    }
+    return pixels;
 }
-
-// Save a scene
-void save_scene(
-    const string& filename, const scene* scn, const save_options& opts) {
-    _impl_scn::save_scene(filename, scn, opts);
-}
-
-// Add missing values and elements
-void add_elements(scene* scn, const add_elements_options& opts) {
-    _impl_scn::add_elements(scn, opts);
-}
-
-// Merge scene into one another
-void merge_into(scene* merge_into, scene* merge_from) {
-    _impl_scn::merge_into(merge_into, merge_from);
-}
-
-// Initialize the lights
-void update_lights(scene* scn, bool include_env, bool sampling_cdf) {
-    _impl_scn::update_lights(scn, include_env, sampling_cdf);
-}
-
-// Print scene info (call update bounds bes before)
-void print_info(const scene* scn) { _impl_scn::print_info(scn); }
 
 }  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR WAVEFRONT OBJ
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Parse a value
+template <typename T>
+inline void obj_parse_val(stringstream& ss, T& v) {
+    ss >> v;
+}
+
+// Parse a value
+inline void obj_parse_val(stringstream& ss, string& v) {
+    ss >> v;
+    if (v.length() == 0) return;
+    if ((v.front() == '"' && v.back() == '"') ||
+        (v.front() == '\'' && v.back() == '\'')) {
+        v = v.substr(1, v.length() - 2);
+        return;
+    }
+}
+
+// Parse a value
+template <typename T, int N>
+inline void obj_parse_val(stringstream& ss, vec<T, N>& v) {
+    for (auto i = 0; i < N; i++) obj_parse_val(ss, v[i]);
+}
+
+// Parse a value
+template <typename T, int N>
+inline void obj_parse_val(stringstream& ss, quat<T, N>& v) {
+    for (auto i = 0; i < N; i++) obj_parse_val(ss, v[i]);
+}
+
+// Parse a value
+template <typename T>
+inline void obj_parse_val(stringstream& ss, frame<T, 3>& v) {
+    obj_parse_val(ss, v.x);
+    obj_parse_val(ss, v.y);
+    obj_parse_val(ss, v.z);
+    obj_parse_val(ss, v.o);
+}
+
+// Parse texture options and name
+inline void parse_texture(stringstream& ss, obj_texture_info& info,
+    vector<string>& textures, unordered_set<string>& texture_set,
+    bool bump = false) {
+    // get tokens
+    auto tokens = vector<string>();
+    while (ss) {
+        auto s = string();
+        ss >> s;
+        if (!s.empty()) tokens.push_back(s);
+    }
+
+    // exit if no tokens
+    if (tokens.empty()) return;
+
+    // texture name
+    info.path = tokens.back();
+    for (auto& c : info.path)
+        if (c == '\\') c = '/';
+
+    // texture options
+    auto last = string();
+    for (auto& tok : tokens) {
+        if (tok == tokens.back()) break;
+        if (tok[0] == '-') {
+            last = tok;
+            info.unknown_props[last] = {};
+        } else {
+            info.unknown_props[last].push_back(tok);
+        }
+    }
+
+    // clamp
+    if (info.unknown_props.find("-clamp") != info.unknown_props.end() &&
+        info.unknown_props.at("-clamp").size() > 0) {
+        auto& clamp_vec = info.unknown_props.at("-clamp");
+        auto clamp_str = (clamp_vec.empty()) ? "" : clamp_vec.front();
+        info.clamp = clamp_str == "on" || clamp_str == "1";
+        info.unknown_props.erase("-clamp");
+    }
+
+    if (info.unknown_props.find("-bm") != info.unknown_props.end() &&
+        info.unknown_props.at("-bm").size() > 0) {
+        auto& bm_vec = info.unknown_props.at("-bm");
+        auto bm_str = (bm_vec.empty()) ? "" : bm_vec.front();
+        info.scale = std::atof(bm_str.c_str());
+        info.unknown_props.erase("-bm");
+    }
+
+    // insert texture
+    if (!info.path.empty() &&
+        texture_set.find(info.path) == texture_set.end()) {
+        textures.push_back(info.path);
+        texture_set.insert(info.path);
+    }
+}
+
+// Load MTL
+vector<obj_material*> load_mtl(
+    const string& filename, bool flip_tr, vector<string>& textures) {
+    // clear materials
+    auto materials = vector<obj_material*>();
+
+    // clear textures
+    textures.clear();
+    auto texture_set = unordered_set<string>();
+
+    // open file
+    auto fs = fstream(filename, ios_base::in);
+    if (!fs) throw runtime_error("cannot open filename " + filename);
+    // fs.exceptions(ios_base::failbit);
+
+    // add a material preemptively to avoid crashes
+    materials.push_back(new obj_material());
+
+    // read the file line by line
+    string line;
+    auto linenum = 0;
+    while (getline(fs, line)) {
+        // prepare to parse
+        linenum += 1;
+        auto ss = stringstream(line);
+        auto cmd = string();
+        ss >> cmd;
+
+        // skip empty and comments
+        if (cmd.empty() || cmd[0] == '#') continue;
+
+        // possible token values
+        if (cmd == "newmtl") {
+            materials.push_back(new obj_material());
+            obj_parse_val(ss, materials.back()->name);
+        } else if (cmd == "illum") {
+            obj_parse_val(ss, materials.back()->illum);
+        } else if (cmd == "Ke") {
+            obj_parse_val(ss, materials.back()->ke);
+        } else if (cmd == "Ka") {
+            obj_parse_val(ss, materials.back()->ka);
+        } else if (cmd == "Kd") {
+            obj_parse_val(ss, materials.back()->kd);
+        } else if (cmd == "Ks") {
+            obj_parse_val(ss, materials.back()->ks);
+        } else if (cmd == "Kr") {
+            obj_parse_val(ss, materials.back()->kr);
+        } else if (cmd == "Kt" || cmd == "Tf") {
+            auto vals = zero3f;
+            auto ntok = 0;
+            while (ss) obj_parse_val(ss, vals[ntok++]);
+            if (ntok >= 3)
+                materials.back()->kt = vals;
+            else
+                materials.back()->kt = {vals.x, vals.x, vals.x};
+        } else if (cmd == "Tr") {
+            auto vals = zero3f;
+            auto ntok = 0;
+            while (ss) obj_parse_val(ss, vals[ntok++]);
+            if (ntok >= 3)
+                materials.back()->kt = vals;
+            else
+                materials.back()->op = (flip_tr) ? 1 - vals.x : vals.x;
+        } else if (cmd == "Ns") {
+            obj_parse_val(ss, materials.back()->ns);
+        } else if (cmd == "d") {
+            obj_parse_val(ss, materials.back()->op);
+        } else if (cmd == "Ni") {
+            obj_parse_val(ss, materials.back()->ior);
+        } else if (cmd == "map_Ke") {
+            parse_texture(ss, materials.back()->ke_txt, textures, texture_set);
+        } else if (cmd == "map_Ka") {
+            parse_texture(ss, materials.back()->ka_txt, textures, texture_set);
+        } else if (cmd == "map_Kd") {
+            parse_texture(ss, materials.back()->kd_txt, textures, texture_set);
+        } else if (cmd == "map_Ks") {
+            parse_texture(ss, materials.back()->ks_txt, textures, texture_set);
+        } else if (cmd == "map_Kr") {
+            parse_texture(ss, materials.back()->kr_txt, textures, texture_set);
+        } else if (cmd == "map_Tr") {
+            parse_texture(ss, materials.back()->kt_txt, textures, texture_set);
+        } else if (cmd == "map_Ns") {
+            parse_texture(ss, materials.back()->ns_txt, textures, texture_set);
+        } else if (cmd == "map_d") {
+            parse_texture(ss, materials.back()->op_txt, textures, texture_set);
+        } else if (cmd == "map_Ni") {
+            parse_texture(ss, materials.back()->ior_txt, textures, texture_set);
+        } else if (cmd == "map_bump" || cmd == "bump") {
+            parse_texture(
+                ss, materials.back()->bump_txt, textures, texture_set);
+        } else if (cmd == "map_disp" || cmd == "disp") {
+            parse_texture(
+                ss, materials.back()->disp_txt, textures, texture_set);
+        } else if (cmd == "map_norm" || cmd == "norm") {
+            parse_texture(
+                ss, materials.back()->norm_txt, textures, texture_set);
+        } else {
+            // copy into strings
+            while (ss) {
+                materials.back()->unknown_props[cmd].push_back({});
+                obj_parse_val(ss, materials.back()->unknown_props[cmd].back());
+            }
+        }
+    }
+
+    // remove first fake material
+    materials.erase(materials.begin());
+
+    // done
+    return materials;
+}
+
+// Loads textures for an scene.
+void load_textures(obj_scene* asset, const string& dirname, bool skip_missing) {
+    for (auto txt : asset->textures) {
+        auto filename = dirname + txt->path;
+        for (auto& c : filename)
+            if (c == '\\') c = '/';
+#if YGL_IMAGEIO
+        if (is_hdr_filename(filename)) {
+            txt->dataf =
+                load_imagef(filename, txt->width, txt->height, txt->ncomp);
+        } else {
+            txt->datab =
+                load_image(filename, txt->width, txt->height, txt->ncomp);
+        }
+#endif
+        if (txt->datab.empty() && txt->dataf.empty()) {
+            if (skip_missing) continue;
+            throw runtime_error("cannot laod image " + filename);
+        }
+    }
+}
+
+// Parses an OBJ vertex list. Handles negative values.
+inline void obj_parse_vertlist(
+    stringstream& ss, vector<obj_vertex>& elems, const obj_vertex& vert_size) {
+    elems.clear();
+    while (true) {
+        auto tok = string();
+        obj_parse_val(ss, tok);
+        if (tok.empty()) break;
+        auto toks = split(tok, "/");
+        if (toks.empty()) break;
+        auto v = obj_vertex{-1, -1, -1, -1, -1};
+        for (auto i = 0; i < min(5, (int)toks.size()); i++) {
+            if (toks[i] == "") continue;
+            ((int*)&v)[i] = (int)atoi(toks[i].c_str());
+            ((int*)&v)[i] = (((int*)&v)[i] < 0) ?
+                                ((int*)&vert_size)[i] + ((int*)&v)[i] :
+                                ((int*)&v)[i] - 1;
+        }
+        elems.push_back(v);
+    }
+}
+
+// Loads an OBJ
+obj_scene* load_obj(const string& filename, bool load_txt, bool skip_missing,
+    bool flip_texcoord, bool flip_tr) {
+    // clear obj
+    auto asset = unique_ptr<obj_scene>(new obj_scene());
+
+    // open file
+    auto fs = fstream(filename, ios_base::in);
+    if (!fs) throw runtime_error("cannot open filename " + filename);
+    // fs.exceptions(ios_base::failbit);
+
+    // initializing obj
+    asset->objects.push_back(new obj_object());
+    asset->objects.back()->groups.push_back({});
+
+    // allocate buffers to avoid re-allocing
+    auto cur_elems = vector<obj_vertex>();
+    auto cur_matname = string();
+    auto cur_mtllibs = vector<string>();
+
+    // keep track of array lengths
+    auto vert_size = obj_vertex{0, 0, 0, 0, 0};
+
+    // read the file line by line
+    string line;
+    auto linenum = 0;
+    while (getline(fs, line)) {
+        // prepare to parse
+        linenum += 1;
+        auto ss = stringstream(line);
+        auto cmd = string();
+        ss >> cmd;
+
+        // skip empty and comments
+        if (cmd.empty() || cmd[0] == '#') continue;
+
+        // possible token values
+        if (cmd == "v") {
+            vert_size.pos += 1;
+            asset->pos.push_back({});
+            obj_parse_val(ss, asset->pos.back());
+        } else if (cmd == "vn") {
+            vert_size.norm += 1;
+            asset->norm.push_back({});
+            obj_parse_val(ss, asset->norm.back());
+        } else if (cmd == "vt") {
+            vert_size.texcoord += 1;
+            asset->texcoord.push_back({});
+            obj_parse_val(ss, asset->texcoord.back());
+            if (flip_texcoord)
+                asset->texcoord.back().y = 1 - asset->texcoord.back().y;
+        } else if (cmd == "vc") {
+            vert_size.color += 1;
+            asset->color.push_back({});
+            obj_parse_val(ss, asset->color.back());
+        } else if (cmd == "vr") {
+            vert_size.radius += 1;
+            asset->radius.push_back({});
+            obj_parse_val(ss, asset->radius.back());
+        } else if (cmd == "f") {
+            obj_parse_vertlist(ss, cur_elems, vert_size);
+            auto& g = asset->objects.back()->groups.back();
+            g.elems.push_back({(uint32_t)g.verts.size(), obj_element_type::face,
+                (uint16_t)cur_elems.size()});
+            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
+        } else if (cmd == "l") {
+            obj_parse_vertlist(ss, cur_elems, vert_size);
+            auto& g = asset->objects.back()->groups.back();
+            g.elems.push_back({(uint32_t)g.verts.size(), obj_element_type::line,
+                (uint16_t)cur_elems.size()});
+            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
+        } else if (cmd == "p") {
+            obj_parse_vertlist(ss, cur_elems, vert_size);
+            auto& g = asset->objects.back()->groups.back();
+            g.elems.push_back({(uint32_t)g.verts.size(),
+                obj_element_type::point, (uint16_t)cur_elems.size()});
+            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
+        } else if (cmd == "b") {
+            obj_parse_vertlist(ss, cur_elems, vert_size);
+            auto& g = asset->objects.back()->groups.back();
+            g.elems.push_back({(uint32_t)g.verts.size(),
+                obj_element_type::bezier, (uint16_t)cur_elems.size()});
+            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
+        } else if (cmd == "t") {
+            obj_parse_vertlist(ss, cur_elems, vert_size);
+            auto& g = asset->objects.back()->groups.back();
+            g.elems.push_back({(uint32_t)g.verts.size(),
+                obj_element_type::tetra, (uint16_t)cur_elems.size()});
+            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
+        } else if (cmd == "o") {
+            auto name = string();
+            obj_parse_val(ss, name);
+            asset->objects.push_back(new obj_object{name, {}});
+            asset->objects.back()->groups.push_back({});
+            asset->objects.back()->groups.back().matname = cur_matname;
+        } else if (cmd == "usemtl") {
+            auto name = string();
+            obj_parse_val(ss, name);
+            cur_matname = name;
+            asset->objects.back()->groups.push_back({});
+            asset->objects.back()->groups.back().matname = cur_matname;
+        } else if (cmd == "g") {
+            auto name = string();
+            obj_parse_val(ss, name);
+            asset->objects.back()->groups.push_back({});
+            asset->objects.back()->groups.back().matname = cur_matname;
+            asset->objects.back()->groups.back().groupname = name;
+        } else if (cmd == "s") {
+            auto name = string();
+            obj_parse_val(ss, name);
+            auto smoothing = (name == "on");
+            if (asset->objects.back()->groups.empty()) {
+                asset->objects.back()->groups.push_back({});
+                asset->objects.back()->groups.back().matname = cur_matname;
+                asset->objects.back()->groups.back().smoothing = smoothing;
+            } else if (asset->objects.back()->groups.back().smoothing !=
+                       smoothing) {
+                auto gname = asset->objects.back()->groups.back().groupname;
+                asset->objects.back()->groups.push_back({});
+                asset->objects.back()->groups.back().matname = cur_matname;
+                asset->objects.back()->groups.back().groupname = gname;
+                asset->objects.back()->groups.back().smoothing = smoothing;
+            }
+        } else if (cmd == "sl") {
+            auto subdiv = zero2i;
+            obj_parse_val(ss, subdiv);
+            if (asset->objects.back()->groups.empty()) {
+                asset->objects.back()->groups.push_back({});
+                asset->objects.back()->groups.back().matname = cur_matname;
+            }
+            asset->objects.back()->groups.back().subdivision_level = subdiv.x;
+            asset->objects.back()->groups.back().subdivision_catmullclark =
+                (bool)subdiv.y;
+        } else if (cmd == "mtllib") {
+            auto name = string();
+            obj_parse_val(ss, name);
+            if (name != string("")) {
+                auto found = false;
+                for (auto lib : cur_mtllibs) {
+                    if (lib == name) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) cur_mtllibs.push_back(name);
+            }
+        } else if (cmd == "c") {
+            auto cam = new obj_camera();
+            obj_parse_val(ss, cam->name);
+            obj_parse_val(ss, cam->ortho);
+            obj_parse_val(ss, cam->yfov);
+            obj_parse_val(ss, cam->aspect);
+            obj_parse_val(ss, cam->aperture);
+            obj_parse_val(ss, cam->focus);
+            obj_parse_val(ss, cam->frame);
+            asset->cameras.push_back(cam);
+        } else if (cmd == "e") {
+            auto env = new obj_environment();
+            obj_parse_val(ss, env->name);
+            obj_parse_val(ss, env->matname);
+            obj_parse_val(ss, env->frame);
+            asset->environments.push_back(env);
+        } else if (cmd == "n") {
+            auto nde = new obj_node();
+            obj_parse_val(ss, nde->name);
+            obj_parse_val(ss, nde->parent);
+            obj_parse_val(ss, nde->camname);
+            obj_parse_val(ss, nde->objname);
+            obj_parse_val(ss, nde->envname);
+            obj_parse_val(ss, nde->frame);
+            obj_parse_val(ss, nde->translation);
+            obj_parse_val(ss, nde->rotation);
+            obj_parse_val(ss, nde->scaling);
+            asset->nodes.push_back(nde);
+        } else {
+            // unused
+        }
+    }
+
+    // cleanup unused
+    for (auto o : asset->objects) {
+        auto end = std::remove_if(o->groups.begin(), o->groups.end(),
+            [](const obj_group& x) { return x.verts.empty(); });
+        o->groups.erase(end, o->groups.end());
+    }
+    // TODO: possible memory leak
+    auto end = std::remove_if(asset->objects.begin(), asset->objects.end(),
+        [](const obj_object* x) { return x->groups.empty(); });
+    asset->objects.erase(end, asset->objects.end());
+
+    // parse materials
+    auto dirname = path_dirname(filename);
+    unordered_set<string> texture_set;
+    for (auto mtllib : cur_mtllibs) {
+        auto mtlname = dirname + mtllib;
+        vector<string> textures;
+        auto materials = load_mtl(mtlname, flip_tr, textures);
+        asset->materials.insert(
+            asset->materials.end(), materials.begin(), materials.end());
+        for (auto& txt : textures) {
+            if (texture_set.find(txt) != texture_set.end()) continue;
+            asset->textures.push_back(new obj_texture());
+            asset->textures.back()->path = txt;
+            texture_set.insert(txt);
+        }
+    }
+
+    // load textures
+    if (load_txt) load_textures(asset.get(), dirname, skip_missing);
+
+    // done
+    return asset.release();
+}
+
+// write to stream
+template <typename T>
+inline void obj_dump_val(fstream& fs, const T& v) {
+    fs << v;
+}
+
+// write to stream
+template <typename T, int N>
+inline void obj_dump_val(fstream& fs, const vec<T, N>& v) {
+    for (auto i = 0; i < N; i++) {
+        if (i) fs << ' ';
+        obj_dump_val(fs, v[i]);
+    }
+}
+
+// write to stream
+template <typename T, int N>
+inline void obj_dump_val(fstream& fs, const quat<T, N>& v) {
+    for (auto i = 0; i < N; i++) {
+        if (i) fs << ' ';
+        obj_dump_val(fs, v[i]);
+    }
+}
+
+// write to stream
+template <typename T>
+inline void obj_dump_val(fstream& fs, const frame<T, 3>& v) {
+    obj_dump_val(fs, v.x);
+    fs << ' ';
+    obj_dump_val(fs, v.y);
+    fs << ' ';
+    obj_dump_val(fs, v.z);
+    fs << ' ';
+    obj_dump_val(fs, v.o);
+}
+
+// write to stream
+inline void obj_dump_val(fstream& fs, const obj_texture_info& v) {
+    for (auto&& kv : v.unknown_props) {
+        obj_dump_val(fs, kv.first + " ");
+        for (auto&& vv : kv.second) obj_dump_val(fs, vv + " ");
+    }
+    if (v.clamp) obj_dump_val(fs, "-clamp on ");
+    obj_dump_val(fs, v.path);
+}
+
+// write to stream
+template <typename T>
+inline void obj_dump_named_val(fstream& fs, const string& name, const T& v) {
+    obj_dump_val(fs, name);
+    fs << ' ';
+    obj_dump_val(fs, v);
+    fs << '\n';
+}
+
+// write to stream
+template <typename T>
+inline void obj_dump_opt_val(
+    fstream& fs, const string& name, const T& v, const T& def = {}) {
+    if (v == def) return;
+    obj_dump_named_val(fs, name, v);
+}
+
+// write an OBJ vertex triplet using only the indices that are active
+inline void obj_dump_objverts(
+    fstream& fs, const char* str, int nv, const obj_vertex* verts) {
+    obj_dump_val(fs, str);
+    for (auto v = 0; v < nv; v++) {
+        auto& vert = verts[v];
+        auto vert_ptr = &vert.pos;
+        auto nto_write = 0;
+        for (auto i = 0; i < 5; i++) {
+            if (vert_ptr[i] >= 0) nto_write = i + 1;
+        }
+        for (auto i = 0; i < nto_write; i++) {
+            if (vert_ptr[i] >= 0) {
+                obj_dump_val(fs, ((i == 0) ? ' ' : '/'));
+                obj_dump_val(fs, vert_ptr[i] + 1);
+            } else {
+                obj_dump_val(fs, '/');
+            }
+        }
+    }
+    obj_dump_val(fs, "\n");
+}
+
+// Save an MTL file
+void save_mtl(const string& filename, const vector<obj_material*>& materials,
+    bool flip_tr) {
+    // open file
+    auto fs = fstream(filename, ios_base::out);
+    if (!fs) throw runtime_error("cannot open filename " + filename);
+    fs.exceptions(ios_base::failbit);
+
+    // for each material, dump all the values
+    for (auto mat : materials) {
+        obj_dump_named_val(fs, "newmtl", mat->name);
+        obj_dump_named_val(fs, "  illum", mat->illum);
+        obj_dump_opt_val(fs, "  Ke", mat->ke);
+        obj_dump_opt_val(fs, "  Ka", mat->ka);
+        obj_dump_opt_val(fs, "  Kd", mat->kd);
+        obj_dump_opt_val(fs, "  Ks", mat->ks);
+        obj_dump_opt_val(fs, "  Kr", mat->kr);
+        obj_dump_opt_val(fs, "  Tf", mat->kt);
+        obj_dump_opt_val(fs, "  Ns", mat->ns, 0.0f);
+        obj_dump_opt_val(fs, "  d", mat->op, 1.0f);
+        obj_dump_opt_val(fs, "  Ni", mat->ior, 1.0f);
+        obj_dump_opt_val(fs, "  map_Ke", mat->ke_txt);
+        obj_dump_opt_val(fs, "  map_Ka", mat->ka_txt);
+        obj_dump_opt_val(fs, "  map_Kd", mat->kd_txt);
+        obj_dump_opt_val(fs, "  map_Ks", mat->ks_txt);
+        obj_dump_opt_val(fs, "  map_Kr", mat->kr_txt);
+        obj_dump_opt_val(fs, "  map_Kt", mat->kt_txt);
+        obj_dump_opt_val(fs, "  map_Ns", mat->ns_txt);
+        obj_dump_opt_val(fs, "  map_d", mat->op_txt);
+        obj_dump_opt_val(fs, "  map_Ni", mat->ior_txt);
+        obj_dump_opt_val(fs, "  map_bump", mat->bump_txt);
+        obj_dump_opt_val(fs, "  map_disp", mat->disp_txt);
+        obj_dump_opt_val(fs, "  map_norm", mat->norm_txt);
+        for (auto&& kv : mat->unknown_props) {
+            obj_dump_val(fs, kv.first);
+            for (auto&& v : kv.second) {
+                obj_dump_val(fs, " ");
+                obj_dump_val(fs, v);
+            }
+            obj_dump_val(fs, "\n");
+        }
+        obj_dump_val(fs, "\n");
+    }
+}
+
+// Loads textures for an scene.
+void save_textures(
+    const obj_scene* asset, const string& dirname, bool skip_missing) {
+    for (auto txt : asset->textures) {
+        if (txt->datab.empty() && txt->dataf.empty()) continue;
+        auto filename = dirname + txt->path;
+        for (auto& c : filename)
+            if (c == '\\') c = '/';
+        auto ok = false;
+#if YGL_IMAGEIO
+        if (!txt->datab.empty()) {
+            ok = save_image(filename, txt->width, txt->height, txt->ncomp,
+                txt->datab.data());
+        }
+        if (!txt->dataf.empty()) {
+            ok = save_imagef(filename, txt->width, txt->height, txt->ncomp,
+                txt->dataf.data());
+        }
+#endif
+        if (!ok) {
+            if (skip_missing) continue;
+            throw runtime_error("cannot save image " + filename);
+        }
+    }
+}
+
+// Save an OBJ
+void save_obj(const string& filename, const obj_scene* asset, bool save_txt,
+    bool skip_missing, bool flip_texcoord, bool flip_tr) {
+    // open file
+    auto fs = fstream(filename, ios_base::out);
+    if (!fs) throw runtime_error("cannot open filename " + filename);
+    fs.exceptions(ios_base::failbit);
+
+    // linkup to mtl
+    auto dirname = path_dirname(filename);
+    auto basename = filename.substr(dirname.length());
+    basename = basename.substr(0, basename.length() - 4);
+    if (!asset->materials.empty()) {
+        obj_dump_named_val(fs, "mtllib", basename + ".mtl");
+    }
+
+    // save cameras
+    for (auto cam : asset->cameras) {
+        obj_dump_val(fs, "c ");
+        obj_dump_val(fs, cam->name);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, cam->ortho);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, cam->yfov);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, cam->aspect);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, cam->aperture);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, cam->focus);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, cam->frame);
+        obj_dump_val(fs, "\n");
+    }
+
+    // save envs
+    for (auto env : asset->environments) {
+        obj_dump_val(fs, "e ");
+        obj_dump_val(fs, env->name);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, env->matname);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, env->frame);
+        obj_dump_val(fs, "\n");
+    }
+
+    // save nodes
+    for (auto nde : asset->nodes) {
+        obj_dump_val(fs, "n ");
+        obj_dump_val(fs, nde->name);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, (nde->parent.empty()) ? string("\"\"") : nde->parent);
+        obj_dump_val(fs, " ");
+        obj_dump_val(
+            fs, (nde->camname.empty()) ? string("\"\"") : nde->camname);
+        obj_dump_val(fs, " ");
+        obj_dump_val(
+            fs, (nde->objname.empty()) ? string("\"\"") : nde->objname);
+        obj_dump_val(fs, " ");
+        obj_dump_val(
+            fs, (nde->envname.empty()) ? string("\"\"") : nde->envname);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, nde->frame);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, nde->translation);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, nde->rotation);
+        obj_dump_val(fs, " ");
+        obj_dump_val(fs, nde->scaling);
+        obj_dump_val(fs, "\n");
+    }
+
+    // save all vertex data
+    for (auto& v : asset->pos) obj_dump_named_val(fs, "v", v);
+    if (flip_texcoord) {
+        for (auto& v : asset->texcoord)
+            obj_dump_named_val(fs, "vt", vec2f{v.x, 1 - v.y});
+    } else {
+        for (auto& v : asset->texcoord) obj_dump_named_val(fs, "vt", v);
+    }
+    for (auto& v : asset->norm) obj_dump_named_val(fs, "vn", v);
+    for (auto& v : asset->color) obj_dump_named_val(fs, "vc", v);
+    for (auto& v : asset->radius) obj_dump_named_val(fs, "vr", v);
+
+    // save element data
+    static auto elem_labels =
+        unordered_map<obj_element_type, string>{{obj_element_type::point, "p"},
+            {obj_element_type::line, "l"}, {obj_element_type::face, "f"},
+            {obj_element_type::bezier, "b"}, {obj_element_type::tetra, "t"}};
+    for (auto object : asset->objects) {
+        obj_dump_named_val(fs, "o", object->name);
+        for (auto& group : object->groups) {
+            obj_dump_opt_val(fs, "usemtl", group.matname);
+            obj_dump_opt_val(fs, "g", group.groupname);
+            if (!group.smoothing) obj_dump_named_val(fs, "s", "off");
+            if (group.subdivision_level) {
+                auto sl = vec2i{group.subdivision_level,
+                    (group.subdivision_catmullclark) ? 1 : 0};
+                obj_dump_named_val(fs, "sl", sl);
+            }
+            for (auto elem : group.elems) {
+                auto lbl = "";
+                switch (elem.type) {
+                    case obj_element_type::point: lbl = "p"; break;
+                    case obj_element_type::line: lbl = "l"; break;
+                    case obj_element_type::face: lbl = "f"; break;
+                    case obj_element_type::bezier: lbl = "b"; break;
+                    case obj_element_type::tetra: lbl = "t"; break;
+                    default: throw runtime_error("should not have gotten here");
+                }
+                obj_dump_objverts(
+                    fs, lbl, elem.size, group.verts.data() + elem.start);
+            }
+        }
+    }
+
+    // save materials
+    if (!asset->materials.empty())
+        save_mtl(dirname + basename + ".mtl", asset->materials, flip_tr);
+
+    // save textures
+    if (save_txt) save_textures(asset, dirname, skip_missing);
+}
+
+// A hash function for vecs
+struct obj_vertex_hash {
+    std::hash<int> Th;
+    size_t operator()(const obj_vertex& vv) const {
+        auto v = (const int*)&vv;
+        size_t h = 0;
+        for (auto i = 0; i < sizeof(obj_vertex) / sizeof(int); i++) {
+            // embads hash_combine below
+            h ^= (Th(v[i]) + 0x9e3779b9 + (h << 6) + (h >> 2));
+        }
+        return h;
+    }
+};
+
+// Flattens an scene
+obj_mesh* get_mesh(
+    const obj_scene* model, const obj_object& oshape, bool facet_non_smooth) {
+    // convert meshes
+    auto msh = new obj_mesh();
+    msh->name = oshape.name;
+    for (auto& group : oshape.groups) {
+        if (group.verts.empty()) continue;
+        if (group.elems.empty()) continue;
+        msh->shapes.emplace_back();
+        auto prim = &msh->shapes.back();
+        prim->name = group.groupname;
+        prim->matname = group.matname;
+
+        // insert all vertices
+        unordered_map<obj_vertex, int, obj_vertex_hash> vert_map;
+        vector<int> vert_ids;
+        // vert_map.clear();
+        // vert_ids.clear();
+        for (auto& vert : group.verts) {
+            if (vert_map.find(vert) == vert_map.end()) {
+                // split in two to avoid undefined behaviour
+                auto size = (int)vert_map.size();
+                vert_map[vert] = size;
+            }
+            vert_ids.push_back(vert_map.at(vert));
+        }
+
+        // convert elements
+        for (auto& elem : group.elems) {
+            switch (elem.type) {
+                case obj_element_type::point: {
+                    for (auto i = elem.start; i < elem.start + elem.size; i++) {
+                        prim->points.push_back(vert_ids[i]);
+                    }
+                } break;
+                case obj_element_type::line: {
+                    for (auto i = elem.start; i < elem.start + elem.size - 1;
+                         i++) {
+                        prim->lines.push_back({vert_ids[i], vert_ids[i + 1]});
+                    }
+                } break;
+                case obj_element_type::face: {
+                    for (auto i = elem.start + 2; i < elem.start + elem.size;
+                         i++) {
+                        prim->triangles.push_back({vert_ids[elem.start],
+                            vert_ids[i - 1], vert_ids[i]});
+                    }
+                } break;
+                case obj_element_type::bezier: {
+                    if ((elem.size - 1) % 3)
+                        throw runtime_error("bad obj bezier");
+                    for (auto i = elem.start + 1; i < elem.start + elem.size;
+                         i += 3) {
+                        prim->bezier.push_back({vert_ids[i - 1], vert_ids[i],
+                            vert_ids[i + 1], vert_ids[i + 2]});
+                    }
+                } break;
+                case obj_element_type::tetra: {
+                    for (auto i = elem.start; i < elem.start + elem.size;
+                         i += 4) {
+                        if (i + 3 >= vert_ids.size()) continue;
+                        prim->tetras.push_back({vert_ids[i], vert_ids[i + 1],
+                            vert_ids[i + 2], vert_ids[i + 3]});
+                    }
+                } break;
+                default: { assert(false); }
+            }
+        }
+
+        // check for errors
+        // copy vertex data
+        auto v = group.verts[0];
+        if (v.pos >= 0) prim->pos.resize(vert_map.size());
+        if (v.texcoord >= 0) prim->texcoord.resize(vert_map.size());
+        if (v.norm >= 0) prim->norm.resize(vert_map.size());
+        if (v.color >= 0) prim->color.resize(vert_map.size());
+        if (v.radius >= 0) prim->radius.resize(vert_map.size());
+        for (auto& kv : vert_map) {
+            if (v.pos >= 0 && kv.first.pos >= 0) {
+                prim->pos[kv.second] = model->pos[kv.first.pos];
+            }
+            if (v.texcoord >= 0 && kv.first.texcoord >= 0) {
+                prim->texcoord[kv.second] = model->texcoord[kv.first.texcoord];
+            }
+            if (v.norm >= 0 && kv.first.norm >= 0) {
+                prim->norm[kv.second] = model->norm[kv.first.norm];
+            }
+            if (v.color >= 0 && kv.first.color >= 0) {
+                prim->color[kv.second] = model->color[kv.first.color];
+            }
+            if (v.radius >= 0 && kv.first.radius >= 0) {
+                prim->radius[kv.second] = model->radius[kv.first.radius];
+            }
+        }
+
+        // fix smoothing
+        if (!group.smoothing && facet_non_smooth) {
+            auto faceted_ = obj_shape();
+            auto faceted = &faceted_;
+            faceted->name = prim->name;
+            faceted->matname = prim->matname;
+            auto pidx = vector<int>();
+            for (auto point : prim->points) {
+                faceted->points.push_back((int)pidx.size());
+                pidx.push_back(point);
+            }
+            for (auto line : prim->lines) {
+                faceted->lines.push_back(
+                    {(int)pidx.size() + 0, (int)pidx.size() + 1});
+                pidx.push_back(line.x);
+                pidx.push_back(line.y);
+            }
+            for (auto triangle : prim->triangles) {
+                faceted->triangles.push_back({(int)pidx.size() + 0,
+                    (int)pidx.size() + 1, (int)pidx.size() + 2});
+                pidx.push_back(triangle.x);
+                pidx.push_back(triangle.y);
+                pidx.push_back(triangle.z);
+            }
+            for (auto tetra : prim->tetras) {
+                faceted->tetras.push_back(
+                    {(int)pidx.size() + 0, (int)pidx.size() + 1,
+                        (int)pidx.size() + 2, (int)pidx.size() + 3});
+                pidx.push_back(tetra.x);
+                pidx.push_back(tetra.y);
+                pidx.push_back(tetra.z);
+                pidx.push_back(tetra.w);
+            }
+            for (auto idx : pidx) {
+                if (!prim->pos.empty()) faceted->pos.push_back(prim->pos[idx]);
+                if (!prim->norm.empty())
+                    faceted->norm.push_back(prim->norm[idx]);
+                if (!prim->texcoord.empty())
+                    faceted->texcoord.push_back(prim->texcoord[idx]);
+                if (!prim->color.empty())
+                    faceted->color.push_back(prim->color[idx]);
+                if (!prim->radius.empty())
+                    faceted->radius.push_back(prim->radius[idx]);
+            }
+            *prim = *faceted;
+        }
+    }
+
+    // done
+    return msh;
+}
+
+}  // namespace ygl
+
+#if YGL_GLTF
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR KHRONOS GLTF
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Json alias
+using json = nlohmann::json;
+
+// Parse int function.
+void serialize(int& val, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_number_integer()) throw runtime_error("integer expected");
+        val = js;
+    } else {
+        js = val;
+    }
+}
+
+// Parse float function.
+void serialize(float& val, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_number()) throw runtime_error("number expected");
+        val = js;
+    } else {
+        js = val;
+    }
+}
+
+// Parse bool function.
+void serialize(bool& val, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_boolean()) throw runtime_error("bool expected");
+        val = js;
+    } else {
+        js = val;
+    }
+}
+
+// Parse std::string function.
+void serialize(string& val, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_string()) throw runtime_error("string expected");
+        val = js;
+    } else {
+        js = val;
+    }
+}
+
+// Parse json function.
+void serialize(json& val, json& js, bool reading) {
+    if (reading) {
+        val = js;
+    } else {
+        js = val;
+    }
+}
+
+// Parse support function.
+template <typename T>
+void serialize(T*& val, json& js, bool reading) {
+    if (reading) {
+        if (js.is_null()) {
+            val = nullptr;
+            return;
+        }
+        if (!js.is_object()) throw runtime_error("object expected");
+        if (!val) val = new T();
+        serialize(*val, js, reading);
+    } else {
+        if (!val) {
+            js = nullptr;
+            return;
+        }
+        if (!js.is_object()) js = json::object();
+        serialize(*val, js, reading);
+    }
+}
+
+// Parse support function.
+template <typename T>
+void serialize(vector<T>& vals, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_array()) throw runtime_error("array expected");
+        vals.resize(js.size());
+        for (auto i = 0; i < js.size(); i++) {
+            // this is contrived to support for vector<bool>
+            auto v = T();
+            serialize(v, js[i], reading);
+            vals[i] = v;
+        }
+    } else {
+        js = json::array();
+        for (auto i = 0; i < vals.size(); i++)
+            serialize(vals[i], js[i], reading);
+    }
+}
+
+// Parse support function.
+template <typename T, size_t N>
+void serialize(array<T, N>& vals, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_array()) throw runtime_error("array expected");
+        if (N != js.size()) throw runtime_error("wrong array size");
+        for (auto i = 0; i < N; i++) serialize(vals[i], js.at(i), reading);
+    } else {
+        js = json::array();
+        for (auto i = 0; i < N; i++) serialize(vals[i], js[i], reading);
+    }
+}
+
+// Parse support function.
+template <typename T>
+void serialize(map<string, T>& vals, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_object()) throw runtime_error("object expected");
+        for (auto kv = js.begin(); kv != js.end(); ++kv) {
+            serialize(vals[kv.key()], kv.value(), reading);
+        }
+    } else {
+        js = json::object();
+        for (auto& kv : vals) serialize(kv.second, js[kv.first], reading);
+    }
+}
+
+// Parse support function.
+template <typename T, typename T1>
+void serialize(
+    T& val, json& js, bool reading, const vector<pair<T1, T>>& table) {
+    if (reading) {
+        auto v = T1();
+        serialize(v, js, reading);
+        auto found = false;
+        for (auto& kv : table) {
+            if (kv.first == v) {
+                val = kv.second;
+                found = true;
+                break;
+            }
+        }
+        if (!found) throw runtime_error("bad enum value");
+    } else {
+        auto found = false;
+        auto v = T1();
+        for (auto& kv : table) {
+            if (kv.second == val) {
+                v = kv.first;
+                found = true;
+                break;
+            }
+        }
+        if (!found) throw runtime_error("invalid value");
+        serialize(v, js, reading);
+    }
+}
+
+// Parse support function.
+template <typename T, int N>
+void serialize(vec<T, N>& vals, json& js, bool reading) {
+    serialize((array<T, N>&)vals, js, reading);
+}
+
+// Parse support function.
+template <typename T, int N>
+void serialize(quat<T, N>& vals, json& js, bool reading) {
+    serialize((array<T, N>&)vals, js, reading);
+}
+
+// Parse support function.
+template <typename T, int N>
+void serialize(mat<T, N>& vals, json& js, bool reading) {
+    serialize((array<T, N * N>&)vals, js, reading);
+}
+
+// Parse support function.
+template <typename T, int N>
+void serialize(frame<T, N>& vals, json& js, bool reading) {
+    serialize((array<T, N*(N + 1)>&)vals, js, reading);
+}
+
+// Parse support function.
+void serialize_obj(json& js, bool reading) {
+    if (reading) {
+        if (!js.is_object()) throw runtime_error("object expected");
+    } else {
+        if (!js.is_object()) js = json::object();
+    }
+}
+
+// Parse support function.
+template <typename T>
+void serialize_attr(T& val, json& js, const char* name, bool reading,
+    bool required = true, const T& def = {}) {
+    if (reading) {
+        if (required) {
+            if (!js.count(name)) throw runtime_error("missing value");
+            serialize(val, js.at(name), reading);
+        } else {
+            if (!js.count(name))
+                val = def;
+            else
+                serialize(val, js.at(name), reading);
+        }
+    } else {
+        if (required || val != def) serialize(val, js[name], reading);
+    }
+}
+
+// Dump support function.
+template <typename T>
+void serialize_attr(vector<T>& val, json& js, const char* name, bool reading,
+    bool required = true, const vector<T>& def = {}) {
+    if (reading) {
+        if (required) {
+            if (!js.count(name)) throw runtime_error("missing value");
+            serialize(val, js.at(name), reading);
+        } else {
+            if (!js.count(name))
+                val = def;
+            else
+                serialize(val, js.at(name), reading);
+        }
+    } else {
+        if (required || !val.empty()) serialize(val, js[name], reading);
+    }
+}
+
+// #codegen begin func ---------------------------------------------------------
+
+// Check for default value
+template <typename T>
+bool operator==(const glTFid<T>& a, const glTFid<T>& b) {
+    return (int)a == (int)b;
+}
+
+// Check for default value
+template <typename T>
+bool operator!=(const glTFid<T>& a, const glTFid<T>& b) {
+    return (int)a != (int)b;
+}
+
+// Parse id function.
+template <typename T>
+void serialize(glTFid<T>& val, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_number_integer()) throw runtime_error("int expected");
+        val = glTFid<T>((int)js);
+    } else {
+        js = (int)val;
+    }
+}
+
+// Parses a glTFProperty object
+void serialize(glTFProperty& val, json& js, bool reading) {
+    if (reading) {
+        if (!js.is_object()) throw runtime_error("object expected");
+#if YGL_GLTFJSON
+        if (js.count("extensions"))
+            serialize(val.extensions, js.at("extensions"), reading);
+        if (js.count("extras")) serialize(val.extras, js.at("extras"), reading);
+#endif
+    } else {
+        if (!js.is_object()) js = json::object();
+#if YGL_GLTFJSON
+        if (!val.extensions.empty())
+            serialize(val.extensions, js["extensions"], reading);
+        if (!val.extras.is_null()) serialize(val.extras, js["extras"], reading);
+#endif
+    }
+}
+
+// Parses a glTFChildOfRootProperty object
+void serialize(glTFChildOfRootProperty& val, json& js, bool reading) {
+    static auto def = glTFChildOfRootProperty();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.name, js, "name", reading, false, def.name);
+}
+// Parse a glTFAccessorSparseIndicesComponentType enum
+void serialize(
+    glTFAccessorSparseIndicesComponentType& val, json& js, bool reading) {
+    static vector<pair<int, glTFAccessorSparseIndicesComponentType>> table = {
+        {5121, glTFAccessorSparseIndicesComponentType::UnsignedByte},
+        {5123, glTFAccessorSparseIndicesComponentType::UnsignedShort},
+        {5125, glTFAccessorSparseIndicesComponentType::UnsignedInt},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFAccessorSparseIndices object
+void serialize(glTFAccessorSparseIndices& val, json& js, bool reading) {
+    static auto def = glTFAccessorSparseIndices();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(
+        val.bufferView, js, "bufferView", reading, true, def.bufferView);
+    serialize_attr(
+        val.byteOffset, js, "byteOffset", reading, false, def.byteOffset);
+    serialize_attr(val.componentType, js, "componentType", reading, true,
+        def.componentType);
+}
+
+// Parses a glTFAccessorSparseValues object
+void serialize(glTFAccessorSparseValues& val, json& js, bool reading) {
+    static auto def = glTFAccessorSparseValues();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(
+        val.bufferView, js, "bufferView", reading, true, def.bufferView);
+    serialize_attr(
+        val.byteOffset, js, "byteOffset", reading, false, def.byteOffset);
+}
+
+// Parses a glTFAccessorSparse object
+void serialize(glTFAccessorSparse& val, json& js, bool reading) {
+    static auto def = glTFAccessorSparse();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.count, js, "count", reading, true, def.count);
+    serialize_attr(val.indices, js, "indices", reading, true, def.indices);
+    serialize_attr(val.values, js, "values", reading, true, def.values);
+}
+// Parse a glTFAccessorComponentType enum
+void serialize(glTFAccessorComponentType& val, json& js, bool reading) {
+    static vector<pair<int, glTFAccessorComponentType>> table = {
+        {5120, glTFAccessorComponentType::Byte},
+        {5121, glTFAccessorComponentType::UnsignedByte},
+        {5122, glTFAccessorComponentType::Short},
+        {5123, glTFAccessorComponentType::UnsignedShort},
+        {5125, glTFAccessorComponentType::UnsignedInt},
+        {5126, glTFAccessorComponentType::Float},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parse a glTFAccessorType enum
+void serialize(glTFAccessorType& val, json& js, bool reading) {
+    static vector<pair<string, glTFAccessorType>> table = {
+        {"SCALAR", glTFAccessorType::Scalar},
+        {"VEC2", glTFAccessorType::Vec2},
+        {"VEC3", glTFAccessorType::Vec3},
+        {"VEC4", glTFAccessorType::Vec4},
+        {"MAT2", glTFAccessorType::Mat2},
+        {"MAT3", glTFAccessorType::Mat3},
+        {"MAT4", glTFAccessorType::Mat4},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFAccessor object
+void serialize(glTFAccessor& val, json& js, bool reading) {
+    static auto def = glTFAccessor();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(
+        val.bufferView, js, "bufferView", reading, false, def.bufferView);
+    serialize_attr(
+        val.byteOffset, js, "byteOffset", reading, false, def.byteOffset);
+    serialize_attr(val.componentType, js, "componentType", reading, true,
+        def.componentType);
+    serialize_attr(
+        val.normalized, js, "normalized", reading, false, def.normalized);
+    serialize_attr(val.count, js, "count", reading, true, def.count);
+    serialize_attr(val.type, js, "type", reading, true, def.type);
+    serialize_attr(val.max, js, "max", reading, false, def.max);
+    serialize_attr(val.min, js, "min", reading, false, def.min);
+    serialize_attr(val.sparse, js, "sparse", reading, false, def.sparse);
+}
+// Parse a glTFAnimationChannelTargetPath enum
+void serialize(glTFAnimationChannelTargetPath& val, json& js, bool reading) {
+    static vector<pair<string, glTFAnimationChannelTargetPath>> table = {
+        {"translation", glTFAnimationChannelTargetPath::Translation},
+        {"rotation", glTFAnimationChannelTargetPath::Rotation},
+        {"scale", glTFAnimationChannelTargetPath::Scale},
+        {"weights", glTFAnimationChannelTargetPath::Weights},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFAnimationChannelTarget object
+void serialize(glTFAnimationChannelTarget& val, json& js, bool reading) {
+    static auto def = glTFAnimationChannelTarget();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.node, js, "node", reading, true, def.node);
+    serialize_attr(val.path, js, "path", reading, true, def.path);
+}
+
+// Parses a glTFAnimationChannel object
+void serialize(glTFAnimationChannel& val, json& js, bool reading) {
+    static auto def = glTFAnimationChannel();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.sampler, js, "sampler", reading, true, def.sampler);
+    serialize_attr(val.target, js, "target", reading, true, def.target);
+}
+// Parse a glTFAnimationSamplerInterpolation enum
+void serialize(glTFAnimationSamplerInterpolation& val, json& js, bool reading) {
+    static vector<pair<string, glTFAnimationSamplerInterpolation>> table = {
+        {"LINEAR", glTFAnimationSamplerInterpolation::Linear},
+        {"STEP", glTFAnimationSamplerInterpolation::Step},
+        {"CATMULLROMSPLINE",
+            glTFAnimationSamplerInterpolation::CatmullRomSpline},
+        {"CUBICSPLINE", glTFAnimationSamplerInterpolation::CubicSpline},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFAnimationSampler object
+void serialize(glTFAnimationSampler& val, json& js, bool reading) {
+    static auto def = glTFAnimationSampler();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.input, js, "input", reading, true, def.input);
+    serialize_attr(val.interpolation, js, "interpolation", reading, false,
+        def.interpolation);
+    serialize_attr(val.output, js, "output", reading, true, def.output);
+}
+
+// Parses a glTFAnimation object
+void serialize(glTFAnimation& val, json& js, bool reading) {
+    static auto def = glTFAnimation();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.channels, js, "channels", reading, true, def.channels);
+    serialize_attr(val.samplers, js, "samplers", reading, true, def.samplers);
+}
+
+// Parses a glTFAsset object
+void serialize(glTFAsset& val, json& js, bool reading) {
+    static auto def = glTFAsset();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(
+        val.copyright, js, "copyright", reading, false, def.copyright);
+    serialize_attr(
+        val.generator, js, "generator", reading, false, def.generator);
+    serialize_attr(val.version, js, "version", reading, true, def.version);
+    serialize_attr(
+        val.minVersion, js, "minVersion", reading, false, def.minVersion);
+}
+
+// Parses a glTFBuffer object
+void serialize(glTFBuffer& val, json& js, bool reading) {
+    static auto def = glTFBuffer();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.uri, js, "uri", reading, false, def.uri);
+    serialize_attr(
+        val.byteLength, js, "byteLength", reading, true, def.byteLength);
+}
+// Parse a glTFBufferViewTarget enum
+void serialize(glTFBufferViewTarget& val, json& js, bool reading) {
+    static vector<pair<int, glTFBufferViewTarget>> table = {
+        {34962, glTFBufferViewTarget::ArrayBuffer},
+        {34963, glTFBufferViewTarget::ElementArrayBuffer},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFBufferView object
+void serialize(glTFBufferView& val, json& js, bool reading) {
+    static auto def = glTFBufferView();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.buffer, js, "buffer", reading, true, def.buffer);
+    serialize_attr(
+        val.byteOffset, js, "byteOffset", reading, false, def.byteOffset);
+    serialize_attr(
+        val.byteLength, js, "byteLength", reading, true, def.byteLength);
+    serialize_attr(
+        val.byteStride, js, "byteStride", reading, false, def.byteStride);
+    serialize_attr(val.target, js, "target", reading, false, def.target);
+}
+
+// Parses a glTFCameraOrthographic object
+void serialize(glTFCameraOrthographic& val, json& js, bool reading) {
+    static auto def = glTFCameraOrthographic();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.xmag, js, "xmag", reading, true, def.xmag);
+    serialize_attr(val.ymag, js, "ymag", reading, true, def.ymag);
+    serialize_attr(val.zfar, js, "zfar", reading, true, def.zfar);
+    serialize_attr(val.znear, js, "znear", reading, true, def.znear);
+}
+
+// Parses a glTFCameraPerspective object
+void serialize(glTFCameraPerspective& val, json& js, bool reading) {
+    static auto def = glTFCameraPerspective();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(
+        val.aspectRatio, js, "aspectRatio", reading, false, def.aspectRatio);
+    serialize_attr(val.yfov, js, "yfov", reading, true, def.yfov);
+    serialize_attr(val.zfar, js, "zfar", reading, false, def.zfar);
+    serialize_attr(val.znear, js, "znear", reading, true, def.znear);
+}
+// Parse a glTFCameraType enum
+void serialize(glTFCameraType& val, json& js, bool reading) {
+    static vector<pair<string, glTFCameraType>> table = {
+        {"perspective", glTFCameraType::Perspective},
+        {"orthographic", glTFCameraType::Orthographic},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFCamera object
+void serialize(glTFCamera& val, json& js, bool reading) {
+    static auto def = glTFCamera();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(
+        val.orthographic, js, "orthographic", reading, false, def.orthographic);
+    serialize_attr(
+        val.perspective, js, "perspective", reading, false, def.perspective);
+    serialize_attr(val.type, js, "type", reading, true, def.type);
+}
+// Parse a glTFImageMimeType enum
+void serialize(glTFImageMimeType& val, json& js, bool reading) {
+    static vector<pair<string, glTFImageMimeType>> table = {
+        {"image/jpeg", glTFImageMimeType::ImageJpeg},
+        {"image/png", glTFImageMimeType::ImagePng},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFImage object
+void serialize(glTFImage& val, json& js, bool reading) {
+    static auto def = glTFImage();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.uri, js, "uri", reading, false, def.uri);
+    serialize_attr(val.mimeType, js, "mimeType", reading, false, def.mimeType);
+    serialize_attr(
+        val.bufferView, js, "bufferView", reading, false, def.bufferView);
+}
+
+// Parses a glTFTextureInfo object
+void serialize(glTFTextureInfo& val, json& js, bool reading) {
+    static auto def = glTFTextureInfo();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.index, js, "index", reading, true, def.index);
+    serialize_attr(val.texCoord, js, "texCoord", reading, false, def.texCoord);
+}
+
+// Parses a glTFTexture object
+void serialize(glTFTexture& val, json& js, bool reading) {
+    static auto def = glTFTexture();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.sampler, js, "sampler", reading, false, def.sampler);
+    serialize_attr(val.source, js, "source", reading, false, def.source);
+}
+
+// Parses a glTFMaterialNormalTextureInfo object
+void serialize(glTFMaterialNormalTextureInfo& val, json& js, bool reading) {
+    static auto def = glTFMaterialNormalTextureInfo();
+    serialize_obj(js, reading);
+    serialize((glTFTextureInfo&)val, js, reading);
+    serialize_attr(val.scale, js, "scale", reading, false, def.scale);
+}
+
+// Parses a glTFMaterialOcclusionTextureInfo object
+void serialize(glTFMaterialOcclusionTextureInfo& val, json& js, bool reading) {
+    static auto def = glTFMaterialOcclusionTextureInfo();
+    serialize_obj(js, reading);
+    serialize((glTFTextureInfo&)val, js, reading);
+    serialize_attr(val.strength, js, "strength", reading, false, def.strength);
+}
+
+// Parses a glTFMaterialPbrMetallicRoughness object
+void serialize(glTFMaterialPbrMetallicRoughness& val, json& js, bool reading) {
+    static auto def = glTFMaterialPbrMetallicRoughness();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.baseColorFactor, js, "baseColorFactor", reading, false,
+        def.baseColorFactor);
+    serialize_attr(val.baseColorTexture, js, "baseColorTexture", reading, false,
+        def.baseColorTexture);
+    serialize_attr(val.metallicFactor, js, "metallicFactor", reading, false,
+        def.metallicFactor);
+    serialize_attr(val.roughnessFactor, js, "roughnessFactor", reading, false,
+        def.roughnessFactor);
+    serialize_attr(val.metallicRoughnessTexture, js, "metallicRoughnessTexture",
+        reading, false, def.metallicRoughnessTexture);
+}
+
+// Parses a glTFMaterialPbrSpecularGlossiness object
+void serialize(glTFMaterialPbrSpecularGlossiness& val, json& js, bool reading) {
+    static auto def = glTFMaterialPbrSpecularGlossiness();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.diffuseFactor, js, "diffuseFactor", reading, false,
+        def.diffuseFactor);
+    serialize_attr(val.diffuseTexture, js, "diffuseTexture", reading, false,
+        def.diffuseTexture);
+    serialize_attr(val.specularFactor, js, "specularFactor", reading, false,
+        def.specularFactor);
+    serialize_attr(val.glossinessFactor, js, "glossinessFactor", reading, false,
+        def.glossinessFactor);
+    serialize_attr(val.specularGlossinessTexture, js,
+        "specularGlossinessTexture", reading, false,
+        def.specularGlossinessTexture);
+}
+// Parse a glTFMaterialAlphaMode enum
+void serialize(glTFMaterialAlphaMode& val, json& js, bool reading) {
+    static vector<pair<string, glTFMaterialAlphaMode>> table = {
+        {"OPAQUE", glTFMaterialAlphaMode::Opaque},
+        {"MASK", glTFMaterialAlphaMode::Mask},
+        {"BLEND", glTFMaterialAlphaMode::Blend},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFMaterial object
+void serialize(glTFMaterial& val, json& js, bool reading) {
+    static auto def = glTFMaterial();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.pbrMetallicRoughness, js, "pbrMetallicRoughness",
+        reading, false, def.pbrMetallicRoughness);
+    serialize_attr(val.normalTexture, js, "normalTexture", reading, false,
+        def.normalTexture);
+    serialize_attr(val.occlusionTexture, js, "occlusionTexture", reading, false,
+        def.occlusionTexture);
+    serialize_attr(val.emissiveTexture, js, "emissiveTexture", reading, false,
+        def.emissiveTexture);
+    serialize_attr(val.emissiveFactor, js, "emissiveFactor", reading, false,
+        def.emissiveFactor);
+    serialize_attr(
+        val.alphaMode, js, "alphaMode", reading, false, def.alphaMode);
+    serialize_attr(
+        val.alphaCutoff, js, "alphaCutoff", reading, false, def.alphaCutoff);
+    serialize_attr(
+        val.doubleSided, js, "doubleSided", reading, false, def.doubleSided);
+    if (reading) {
+        if (js.count("extensions")) {
+            auto& js_ext = js["extensions"];
+            serialize_attr(val.pbrSpecularGlossiness, js_ext,
+                "KHR_materials_pbrSpecularGlossiness", reading, false,
+                def.pbrSpecularGlossiness);
+        }
+    } else {
+        if (val.pbrSpecularGlossiness != nullptr) {
+            auto& js_ext = js["extensions"];
+            serialize_attr(val.pbrSpecularGlossiness, js_ext,
+                "KHR_materials_pbrSpecularGlossiness", reading, false,
+                def.pbrSpecularGlossiness);
+        }
+    }
+}
+// Parse a glTFMeshPrimitiveMode enum
+void serialize(glTFMeshPrimitiveMode& val, json& js, bool reading) {
+    static vector<pair<int, glTFMeshPrimitiveMode>> table = {
+        {0, glTFMeshPrimitiveMode::Points},
+        {1, glTFMeshPrimitiveMode::Lines},
+        {2, glTFMeshPrimitiveMode::LineLoop},
+        {3, glTFMeshPrimitiveMode::LineStrip},
+        {4, glTFMeshPrimitiveMode::Triangles},
+        {5, glTFMeshPrimitiveMode::TriangleStrip},
+        {6, glTFMeshPrimitiveMode::TriangleFan},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFMeshPrimitive object
+void serialize(glTFMeshPrimitive& val, json& js, bool reading) {
+    static auto def = glTFMeshPrimitive();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(
+        val.attributes, js, "attributes", reading, true, def.attributes);
+    serialize_attr(val.indices, js, "indices", reading, false, def.indices);
+    serialize_attr(val.material, js, "material", reading, false, def.material);
+    serialize_attr(val.mode, js, "mode", reading, false, def.mode);
+    serialize_attr(val.targets, js, "targets", reading, false, def.targets);
+}
+
+// Parses a glTFMesh object
+void serialize(glTFMesh& val, json& js, bool reading) {
+    static auto def = glTFMesh();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(
+        val.primitives, js, "primitives", reading, true, def.primitives);
+    serialize_attr(val.weights, js, "weights", reading, false, def.weights);
+}
+
+// Parses a glTFNode object
+void serialize(glTFNode& val, json& js, bool reading) {
+    static auto def = glTFNode();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.camera, js, "camera", reading, false, def.camera);
+    serialize_attr(val.children, js, "children", reading, false, def.children);
+    serialize_attr(val.skin, js, "skin", reading, false, def.skin);
+    serialize_attr(val.matrix, js, "matrix", reading, false, def.matrix);
+    serialize_attr(val.mesh, js, "mesh", reading, false, def.mesh);
+    serialize_attr(val.rotation, js, "rotation", reading, false, def.rotation);
+    serialize_attr(val.scale, js, "scale", reading, false, def.scale);
+    serialize_attr(
+        val.translation, js, "translation", reading, false, def.translation);
+    serialize_attr(val.weights, js, "weights", reading, false, def.weights);
+}
+// Parse a glTFSamplerMagFilter enum
+void serialize(glTFSamplerMagFilter& val, json& js, bool reading) {
+    static vector<pair<int, glTFSamplerMagFilter>> table = {
+        {9728, glTFSamplerMagFilter::Nearest},
+        {9729, glTFSamplerMagFilter::Linear},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parse a glTFSamplerMinFilter enum
+void serialize(glTFSamplerMinFilter& val, json& js, bool reading) {
+    static vector<pair<int, glTFSamplerMinFilter>> table = {
+        {9728, glTFSamplerMinFilter::Nearest},
+        {9729, glTFSamplerMinFilter::Linear},
+        {9984, glTFSamplerMinFilter::NearestMipmapNearest},
+        {9985, glTFSamplerMinFilter::LinearMipmapNearest},
+        {9986, glTFSamplerMinFilter::NearestMipmapLinear},
+        {9987, glTFSamplerMinFilter::LinearMipmapLinear},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parse a glTFSamplerWrapS enum
+void serialize(glTFSamplerWrapS& val, json& js, bool reading) {
+    static vector<pair<int, glTFSamplerWrapS>> table = {
+        {33071, glTFSamplerWrapS::ClampToEdge},
+        {33648, glTFSamplerWrapS::MirroredRepeat},
+        {10497, glTFSamplerWrapS::Repeat},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parse a glTFSamplerWrapT enum
+void serialize(glTFSamplerWrapT& val, json& js, bool reading) {
+    static vector<pair<int, glTFSamplerWrapT>> table = {
+        {33071, glTFSamplerWrapT::ClampToEdge},
+        {33648, glTFSamplerWrapT::MirroredRepeat},
+        {10497, glTFSamplerWrapT::Repeat},
+    };
+    serialize(val, js, reading, table);
+}
+
+// Parses a glTFSampler object
+void serialize(glTFSampler& val, json& js, bool reading) {
+    static auto def = glTFSampler();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(
+        val.magFilter, js, "magFilter", reading, false, def.magFilter);
+    serialize_attr(
+        val.minFilter, js, "minFilter", reading, false, def.minFilter);
+    serialize_attr(val.wrapS, js, "wrapS", reading, false, def.wrapS);
+    serialize_attr(val.wrapT, js, "wrapT", reading, false, def.wrapT);
+}
+
+// Parses a glTFScene object
+void serialize(glTFScene& val, json& js, bool reading) {
+    static auto def = glTFScene();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.nodes, js, "nodes", reading, false, def.nodes);
+}
+
+// Parses a glTFSkin object
+void serialize(glTFSkin& val, json& js, bool reading) {
+    static auto def = glTFSkin();
+    serialize_obj(js, reading);
+    serialize((glTFChildOfRootProperty&)val, js, reading);
+    serialize_attr(val.inverseBindMatrices, js, "inverseBindMatrices", reading,
+        false, def.inverseBindMatrices);
+    serialize_attr(val.skeleton, js, "skeleton", reading, false, def.skeleton);
+    serialize_attr(val.joints, js, "joints", reading, true, def.joints);
+}
+
+// Parses a glTF object
+void serialize(glTF& val, json& js, bool reading) {
+    static auto def = glTF();
+    serialize_obj(js, reading);
+    serialize((glTFProperty&)val, js, reading);
+    serialize_attr(val.extensionsUsed, js, "extensionsUsed", reading, false,
+        def.extensionsUsed);
+    serialize_attr(val.extensionsRequired, js, "extensionsRequired", reading,
+        false, def.extensionsRequired);
+    serialize_attr(
+        val.accessors, js, "accessors", reading, false, def.accessors);
+    serialize_attr(
+        val.animations, js, "animations", reading, false, def.animations);
+    serialize_attr(val.asset, js, "asset", reading, true, def.asset);
+    serialize_attr(val.buffers, js, "buffers", reading, false, def.buffers);
+    serialize_attr(
+        val.bufferViews, js, "bufferViews", reading, false, def.bufferViews);
+    serialize_attr(val.cameras, js, "cameras", reading, false, def.cameras);
+    serialize_attr(val.images, js, "images", reading, false, def.images);
+    serialize_attr(
+        val.materials, js, "materials", reading, false, def.materials);
+    serialize_attr(val.meshes, js, "meshes", reading, false, def.meshes);
+    serialize_attr(val.nodes, js, "nodes", reading, false, def.nodes);
+    serialize_attr(val.samplers, js, "samplers", reading, false, def.samplers);
+    serialize_attr(val.scene, js, "scene", reading, false, def.scene);
+    serialize_attr(val.scenes, js, "scenes", reading, false, def.scenes);
+    serialize_attr(val.skins, js, "skins", reading, false, def.skins);
+    serialize_attr(val.textures, js, "textures", reading, false, def.textures);
+}
+
+// #codegen end func
+
+// Encode in base64
+string base64_encode(
+    unsigned char const* bytes_to_encode, unsigned int in_len) {
+    static const string base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+
+    string ret;
+    int i = 0;
+    int j = 0;
+    unsigned char char_array_3[3];
+    unsigned char char_array_4[4];
+
+    while (in_len--) {
+        char_array_3[i++] = *(bytes_to_encode++);
+        if (i == 3) {
+            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) +
+                              ((char_array_3[1] & 0xf0) >> 4);
+            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) +
+                              ((char_array_3[2] & 0xc0) >> 6);
+            char_array_4[3] = char_array_3[2] & 0x3f;
+
+            for (i = 0; (i < 4); i++) ret += base64_chars[char_array_4[i]];
+            i = 0;
+        }
+    }
+
+    if (i) {
+        for (j = i; j < 3; j++) char_array_3[j] = '\0';
+
+        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+        char_array_4[1] =
+            ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+        char_array_4[2] =
+            ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+        char_array_4[3] = char_array_3[2] & 0x3f;
+
+        for (j = 0; (j < i + 1); j++) ret += base64_chars[char_array_4[j]];
+
+        while ((i++ < 3)) ret += '=';
+    }
+
+    return ret;
+}
+
+// Decode from base64
+string base64_decode(string const& encoded_string) {
+    static const string base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+
+    auto is_base64 = [](unsigned char c) -> bool {
+        return (isalnum(c) || (c == '+') || (c == '/'));
+    };
+
+    int in_len = (int)encoded_string.size();
+    int i = 0;
+    int j = 0;
+    int in_ = 0;
+    unsigned char char_array_4[4], char_array_3[3];
+    string ret;
+
+    while (in_len-- && (encoded_string[in_] != '=') &&
+           is_base64(encoded_string[in_])) {
+        char_array_4[i++] = encoded_string[in_];
+        in_++;
+        if (i == 4) {
+            for (i = 0; i < 4; i++)
+                char_array_4[i] = base64_chars.find(char_array_4[i]);
+
+            char_array_3[0] =
+                (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) +
+                              ((char_array_4[2] & 0x3c) >> 2);
+            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+            for (i = 0; (i < 3); i++) ret += char_array_3[i];
+            i = 0;
+        }
+    }
+
+    if (i) {
+        for (j = i; j < 4; j++) char_array_4[j] = 0;
+
+        for (j = 0; j < 4; j++)
+            char_array_4[j] = base64_chars.find(char_array_4[j]);
+
+        char_array_3[0] =
+            (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+        char_array_3[1] =
+            ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+        for (j = 0; (j < i - 1); j++) ret += char_array_3[j];
+    }
+
+    return ret;
+}
+
+// Load buffer data.
+void load_buffers(glTF* gltf, const string& dirname, bool skip_missing) {
+    for (auto buffer : gltf->buffers) {
+        if (buffer->uri == "") continue;
+        try {
+            if (startswith(buffer->uri, "data:")) {
+                // assume it is base64 and find ','
+                auto pos = buffer->uri.find(',');
+                if (pos == buffer->uri.npos) {
+                    if (skip_missing) continue;
+                    throw runtime_error("could not decode base64 data");
+                }
+                // decode
+                auto data = base64_decode(buffer->uri.substr(pos + 1));
+                buffer->data =
+                    vector<unsigned char>((unsigned char*)data.c_str(),
+                        (unsigned char*)data.c_str() + data.length());
+            } else {
+                buffer->data =
+                    load_binary(path_convert_eparator(dirname + buffer->uri));
+                if (buffer->data.empty()) {
+                    if (skip_missing) continue;
+                    throw runtime_error(
+                        "could not load binary file " +
+                        path_convert_eparator(dirname + buffer->uri));
+                }
+            }
+            if (buffer->byteLength != buffer->data.size()) {
+                throw runtime_error("mismatched buffer size");
+            }
+        } catch (const std::exception&) {
+            if (skip_missing) continue;
+            throw;
+        }
+    }
+}
+
+// Loads images.
+void load_images(glTF* gltf, const string& dirname, bool skip_missing) {
+    for (auto image : gltf->images) {
+        image->data = image_data();
+        auto filename = string();
+#if YGL_IMAGEIO
+        if (image->bufferView || startswith(image->uri, "data:")) {
+            auto buffer = string();
+            auto data = (unsigned char*)nullptr;
+            auto data_size = 0;
+            if (image->bufferView) {
+                auto view = gltf->get(image->bufferView);
+                auto buffer = gltf->get(view->buffer);
+                if (!view || !buffer || view->byteStride) {
+                    if (skip_missing) continue;
+                    throw runtime_error("invalid image buffer view");
+                }
+                if (image->mimeType == glTFImageMimeType::ImagePng)
+                    filename = "internal_data.png";
+                else if (image->mimeType == glTFImageMimeType::ImageJpeg)
+                    filename = "internal_data.jpg";
+                else {
+                    if (skip_missing) continue;
+                    throw runtime_error("unsupported image format");
+                }
+                data = buffer->data.data() + view->byteOffset;
+                data_size = view->byteLength;
+            } else {
+                // assume it is base64 and find ','
+                auto pos = image->uri.find(',');
+                if (pos == image->uri.npos) {
+                    if (skip_missing) continue;
+                    throw runtime_error("could not decode base64 data");
+                }
+                auto header = image->uri.substr(0, pos);
+                for (auto format : {"png", "jpg", "jpeg", "tga", "ppm", "hdr"})
+                    if (header.find(format) != header.npos)
+                        filename = string("fake.") + format;
+                if (is_hdr_filename(filename)) {
+                    if (skip_missing) continue;
+                    throw runtime_error("unsupported embedded image format " +
+                                        header.substr(0, pos));
+                }
+                // decode
+                buffer = base64_decode(image->uri.substr(pos + 1));
+                data_size = (int)buffer.size();
+                data = (unsigned char*)buffer.data();
+            }
+            if (is_hdr_filename(filename)) {
+                image->data.dataf = load_imagef_from_memory(filename, data,
+                    data_size, image->data.width, image->data.height,
+                    image->data.ncomp);
+            } else {
+                image->data.datab = load_image_from_memory(filename, data,
+                    data_size, image->data.width, image->data.height,
+                    image->data.ncomp);
+            }
+        } else {
+            filename = path_convert_eparator(dirname + image->uri);
+            if (is_hdr_filename(filename)) {
+                image->data.dataf = load_imagef(filename, image->data.width,
+                    image->data.height, image->data.ncomp);
+            } else {
+                image->data.datab = load_image(filename, image->data.width,
+                    image->data.height, image->data.ncomp);
+            }
+        }
+#endif
+        if (image->data.dataf.empty() && image->data.datab.empty()) {
+            if (skip_missing) continue;
+            throw runtime_error("cannot load image " + filename);
+        }
+    }
+}
+
+// Loads a gltf.
+glTF* load_gltf(
+    const string& filename, bool load_bin, bool load_image, bool skip_missing) {
+    // clear data
+    auto gltf = unique_ptr<glTF>(new glTF());
+
+    // load json
+    std::ifstream stream(filename.c_str());
+    if (!stream) throw runtime_error("could not load json " + filename);
+    auto js = json();
+    try {
+        stream >> js;
+    } catch (const exception& e) {
+        throw runtime_error(
+            string("could not load json with error ") + e.what());
+    }
+
+    // parse json
+    auto gltf_ = gltf.get();
+    try {
+        serialize(gltf_, js, true);
+    } catch (const exception& e) {
+        throw runtime_error("error parsing gltf " + string(e.what()));
+    }
+
+    // load external resources
+    auto dirname = path_dirname(filename);
+    if (load_bin) load_buffers(gltf.get(), dirname, skip_missing);
+    if (load_image) load_images(gltf.get(), dirname, skip_missing);
+
+    // done
+    return gltf.release();
+}
+
+// Save buffer data.
+void save_buffers(const glTF* gltf, const string& dirname, bool skip_missing) {
+    for (auto buffer : gltf->buffers) {
+        try {
+            if (startswith(buffer->uri, "data:")) {
+                throw runtime_error("saving of embedded data not supported");
+            }
+            save_binary(dirname + buffer->uri, buffer->data);
+        } catch (const std::exception&) {
+            if (skip_missing) continue;
+            throw;
+        }
+    }
+}
+
+// Save images.
+void save_images(const glTF* gltf, const string& dirname, bool skip_missing) {
+    for (auto image : gltf->images) {
+        try {
+            if (startswith(image->uri, "data:")) {
+                throw runtime_error("saving of embedded data not supported");
+            }
+            auto filename = dirname + image->uri;
+            auto ok = false;
+#if YGL_IMAGEIO
+            if (!image->data.datab.empty()) {
+                ok = save_image(filename, image->data.width, image->data.height,
+                    image->data.ncomp, image->data.datab.data());
+            }
+            if (!image->data.dataf.empty()) {
+                ok =
+                    save_imagef(filename, image->data.width, image->data.height,
+                        image->data.ncomp, image->data.dataf.data());
+            }
+#endif
+            if (!ok) { throw runtime_error("cannot save image " + filename); }
+        } catch (const std::exception&) {
+            if (skip_missing) continue;
+            throw;
+        }
+    }
+}
+
+// Saves a gltf.
+void save_gltf(
+    const string& filename, const glTF* gltf, bool save_bin, bool save_image) {
+    // dumps json
+    auto js = json();
+    serialize((glTF*&)gltf, js, false);
+
+    // save json
+    save_text(filename, js.dump(2));
+
+    // save external resources
+    auto dirname = path_dirname(filename);
+    if (save_bin) save_buffers(gltf, dirname, false);
+    if (save_image) save_images(gltf, dirname, false);
+}
+
+// reading shortcut
+template <typename T>
+void gltf_fread(FILE* f, T* v, int count) {
+    if (fread(v, sizeof(T), count, f) != count)
+        throw runtime_error("could not read binary file");
+}
+
+// writing shortcut
+template <typename T>
+void gltf_fwrite(FILE* f, const T* v, int count) {
+    if (fwrite(v, sizeof(T), count, f) != count)
+        runtime_error("could not write binary file");
+}
+
+// Loads a binary gltf.
+glTF* load_binary_gltf(
+    const string& filename, bool load_bin, bool load_image, bool skip_missing) {
+    // clear data
+    auto gltf = unique_ptr<glTF>(new glTF());
+
+    // opens binary file
+    auto f = fopen(filename.c_str(), "rb");
+    if (!f) throw runtime_error("could not load binary file " + filename);
+
+    // read magic
+    uint32_t magic;
+    gltf_fread(f, &magic, 1);
+    if (magic != 0x46546C67) throw runtime_error("corrupted glb format");
+
+    // read version
+    uint32_t version;
+    gltf_fread(f, &version, 1);
+    if (version != 1 && version != 2)
+        throw runtime_error("unsupported glb version");
+
+    // read length
+    uint32_t length;
+    gltf_fread(f, &length, 1);
+
+    // data
+    auto json_bytes = vector<char>();
+    auto buffer_bytes = vector<unsigned char>();
+    uint32_t buffer_length = 0;
+
+    if (version == 1) {
+        // read content length and format
+        uint32_t json_length, json_format;
+        gltf_fread(f, &json_length, 1);
+        gltf_fread(f, &json_format, 1);
+
+        // read json bytes
+        json_bytes.resize(json_length);
+        gltf_fread(f, json_bytes.data(), json_length);
+
+        // read buffer bytes
+        if (load_bin) {
+            buffer_bytes.resize(length - json_length - 20);
+            gltf_fread(f, buffer_bytes.data(), (int)buffer_bytes.size());
+            buffer_length = (int)buffer_bytes.size();
+        }
+    }
+
+    if (version == 2) {
+        // read content length and format
+        uint32_t json_length, json_format;
+        gltf_fread(f, &json_length, 1);
+        gltf_fread(f, &json_format, 1);
+        if (json_format != 0x4E4F534A) {
+            throw runtime_error("corrupt binary format");
+            return nullptr;
+        }
+
+        // read json bytes
+        json_bytes.resize(json_length);
+        gltf_fread(f, json_bytes.data(), (int)json_bytes.size());
+
+        // read content length and format
+        uint32_t buffer_format;
+        gltf_fread(f, &buffer_length, 1);
+        gltf_fread(f, &buffer_format, 1);
+        if (buffer_format != 0x004E4942)
+            throw runtime_error("corrupt binary format");
+
+        // read buffer bytes
+        if (load_bin) {
+            buffer_bytes.resize(buffer_length);
+            gltf_fread(f, buffer_bytes.data(), (int)buffer_bytes.size());
+        }
+    }
+
+    // load json
+    auto js = json();
+    try {
+        json_bytes.push_back(0);
+        js = json::parse(json_bytes.data());
+    } catch (const exception& e) {
+        throw runtime_error(
+            string("could not load json with error ") + e.what());
+    }
+
+    // parse json
+    auto gltf_ = gltf.get();
+    try {
+        serialize(gltf_, js, true);
+    } catch (const exception& e) {
+        throw runtime_error("cannot parse gltf json " + string(e.what()));
+        return nullptr;
+    }
+
+    // fix internal buffer
+    auto buffer = gltf->buffers.at(0);
+    buffer->byteLength = buffer_length;
+    if (version == 2) buffer->uri = "";
+    if (load_bin) { buffer->data = buffer_bytes; }
+
+    // load external resources
+    auto dirname = path_dirname(filename);
+    if (load_bin) load_buffers(gltf.get(), dirname, skip_missing);
+    if (load_image) load_images(gltf.get(), dirname, skip_missing);
+
+    // close
+    fclose(f);
+
+    // done
+    return gltf.release();
+}
+
+// Saves a binary gltf.
+void save_binary_gltf(
+    const string& filename, const glTF* gltf, bool save_bin, bool save_image) {
+    // opens binary file
+    auto f = fopen(filename.c_str(), "wb");
+    if (!f) throw runtime_error("could not write binary file");
+
+    // dumps json
+    auto js = json();
+    serialize((glTF*&)gltf, js, false);
+
+    // fix string
+    auto js_str = js.dump(2);
+    while (js_str.length() % 4) js_str += " ";
+    uint32_t json_length = (uint32_t)js_str.size();
+
+    // internal buffer
+    auto buffer = gltf->buffers.at(0);
+    uint32_t buffer_length = buffer->byteLength;
+    if (buffer_length % 4) buffer_length += 4 - buffer_length % 4;
+
+    // write header
+    uint32_t magic = 0x46546C67;
+    gltf_fwrite(f, &magic, 1);
+    uint32_t version = 2;
+    gltf_fwrite(f, &version, 1);
+    uint32_t length = 12 + 8 + json_length + 8 + buffer_length;
+    gltf_fwrite(f, &length, 1);
+
+    // write json
+    uint32_t json_type = 0x4E4F534A;
+    gltf_fwrite(f, &json_length, 1);
+    gltf_fwrite(f, &json_type, 1);
+    gltf_fwrite(f, js_str.data(), (int)json_length);
+
+    if (save_bin) {
+        uint32_t buffer_type = 0x004E4942;
+        gltf_fwrite(f, &buffer_length, 1);
+        gltf_fwrite(f, &buffer_type, 1);
+        gltf_fwrite(f, buffer->data.data(), (int)buffer->data.size());
+        char pad = 0;
+        for (auto i = 0; i < buffer_length - buffer->data.size(); i++)
+            gltf_fwrite(f, &pad, 1);
+    }
+
+    // close
+    fclose(f);
+
+    // save external resources
+    auto dirname = path_dirname(filename);
+    if (save_bin) save_buffers(gltf, dirname, false);
+    if (save_image) save_images(gltf, dirname, false);
+}
+
+accessor_view::accessor_view(const glTF* gltf, const glTFAccessor* accessor) {
+    _size = accessor->count;
+    _ncomp = _num_components(accessor->type);
+    _ctype = accessor->componentType;
+    _normalize = accessor->normalized;
+    auto buffer_view = gltf->get(accessor->bufferView);
+    _stride = (buffer_view->byteStride) ? buffer_view->byteStride :
+                                          (_ctype_size(_ctype) * _ncomp);
+    auto buffer = gltf->get(buffer_view->buffer);
+    _data =
+        buffer->data.data() + accessor->byteOffset + buffer_view->byteOffset;
+    auto remaining_buffer_bytes =
+        buffer->data.size() - (_data - buffer->data.data());
+    auto view_bytes = _size * _stride;
+    _valid = remaining_buffer_bytes >= view_bytes;
+    if (!_valid) throw runtime_error("corrupted glTF accessor view");
+}
+
+float accessor_view::get(int idx, int c) const {
+    auto i = min(max(c, 0), ncomp() - 1);
+    auto valb = _data + _stride * idx + i * _ctype_size(_ctype);
+    // use double for integer conversion to attempt to maintain precision
+    if (!_normalize) {
+        switch (_ctype) {
+            case glTFAccessorComponentType::Float:
+                return (float)(*(float*)valb);
+            case glTFAccessorComponentType::Byte: return (float)(*(char*)valb);
+            case glTFAccessorComponentType::UnsignedByte:
+                return (float)(*(unsigned char*)valb);
+            case glTFAccessorComponentType::Short:
+                return (float)(*(short*)valb);
+            case glTFAccessorComponentType::UnsignedShort:
+                return (float)(*(unsigned short*)valb);
+            case glTFAccessorComponentType::UnsignedInt:
+                return (float)(*(unsigned int*)valb);
+            case glTFAccessorComponentType::NotSet:
+                throw runtime_error("bad enum value");
+                break;
+        }
+
+    } else {
+        switch (_ctype) {
+            case glTFAccessorComponentType::Float:
+                return (float)(*(float*)valb);
+            case glTFAccessorComponentType::Byte:
+                return (float)max((float)(c / 127.0), -1.0f);
+            case glTFAccessorComponentType::UnsignedByte:
+                return (float)(c / 255.0);
+            case glTFAccessorComponentType::Short:
+                return (float)(max((float)(c / 32767.0), -1.0f));
+            case glTFAccessorComponentType::UnsignedShort:
+                return (float)(c / 65535.0);
+            case glTFAccessorComponentType::UnsignedInt:
+                return (float)(max((float)(c / 2147483647.0), -1.0f));
+            case glTFAccessorComponentType::NotSet:
+                throw runtime_error("bad enum value");
+                break;
+        }
+    }
+    return 0;
+}
+
+int accessor_view::geti(int idx, int c) const {
+    auto i = min(max(c, 0), ncomp() - 1);
+    auto valb = _data + _stride * idx + i * _ctype_size(_ctype);
+    // use double for integer conversion to attempt to maintain precision
+    switch (_ctype) {
+        case glTFAccessorComponentType::Float: return (int)(*(float*)valb);
+        case glTFAccessorComponentType::Byte: return (int)(*(char*)valb);
+        case glTFAccessorComponentType::UnsignedByte:
+            return (int)(*(unsigned char*)valb);
+        case glTFAccessorComponentType::Short: return (int)(*(short*)valb);
+        case glTFAccessorComponentType::UnsignedShort:
+            return (int)(*(unsigned short*)valb);
+        case glTFAccessorComponentType::UnsignedInt:
+            return (int)(*(unsigned int*)valb);
+        case glTFAccessorComponentType::NotSet:
+            throw runtime_error("bad enum value");
+            break;
+    }
+    return 0;
+}
+
+int accessor_view::_num_components(glTFAccessorType type) {
+    switch (type) {
+        case glTFAccessorType::Scalar: return 1;
+        case glTFAccessorType::Vec2: return 2;
+        case glTFAccessorType::Vec3: return 3;
+        case glTFAccessorType::Vec4: return 4;
+        case glTFAccessorType::Mat2: return 4;
+        case glTFAccessorType::Mat3: return 9;
+        case glTFAccessorType::Mat4: return 16;
+        default: assert(false); return 0;
+    }
+}
+
+int accessor_view::_ctype_size(glTFAccessorComponentType componentType) {
+    switch (componentType) {
+        case glTFAccessorComponentType::Byte: return 1;
+        case glTFAccessorComponentType::UnsignedByte: return 1;
+        case glTFAccessorComponentType::Short: return 2;
+        case glTFAccessorComponentType::UnsignedShort: return 2;
+        case glTFAccessorComponentType::UnsignedInt: return 4;
+        case glTFAccessorComponentType::Float: return 4;
+        default: assert(false); return 0;
+    }
+}
+
+}  // namespace ygl
+
+#endif
+
+#if YGL_SVG
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR SVG
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Load SVG
+svg_scene* load_svg(const string& filename) {
+    auto svg = nsvgParseFromFile(filename.c_str(), "mm", 96);
+    if (!svg) throw runtime_error("cannot load SVG");
+    auto scn = new svg_scene();
+    for (auto shape = svg->shapes; shape != nullptr; shape = shape->next) {
+        auto shp = new svg_shape();
+        scn->shapes.push_back(shp);
+        for (auto path = shape->paths; path != nullptr; path = path->next) {
+            auto pth = new svg_path();
+            shp->paths.push_back(pth);
+            pth->pos.resize(path->npts);
+            for (int i = 0; i < path->npts; i += 1) {
+                pth->pos[i] = {path->pts[i * 2 + 0], path->pts[i * 2 + 1]};
+            }
+        }
+    }
+    nsvgDelete(svg);
+    return scn;
+}
+
+// Save SVG
+void save_svg(const string& filename, const vector<svg_path>& paths) {
+    throw runtime_error("not implemented yet");
+}
+
+}  // namespace ygl
+
+#endif
 
 // -----------------------------------------------------------------------------
 // IMPLEMENTATION FOR SHAPE EXAMPLES
@@ -6988,10 +9128,11 @@ namespace ygl {
 
 // Make a sphere. This is not watertight.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvsphere(
-    int level, bool flipped) {
+    int tesselation, bool flipped) {
     auto quads = vector<vec4i>();
     auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) = make_uvquads(pow2(level + 2), pow2(level + 1));
+    tie(quads, texcoord) =
+        make_uvquads(pow2(tesselation + 2), pow2(tesselation + 1));
     auto pos = vector<vec3f>(texcoord.size());
     auto norm = vector<vec3f>(texcoord.size());
     if (!flipped) {
@@ -7014,7 +9155,7 @@ tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvsphere(
 }
 
 // Make a geodesic sphere.
-tuple<vector<vec3i>, vector<vec3f>> make_geodesicsphere(int level) {
+tuple<vector<vec3i>, vector<vec3f>> make_geodesicsphere(int tesselation) {
     // https://stackoverflow.com/questions/17705621/algorithm-for-a-geodesic-sphere
     const float X = 0.525731112119133606f;
     const float Z = 0.850650808352039932f;
@@ -7025,7 +9166,7 @@ tuple<vector<vec3i>, vector<vec3f>> make_geodesicsphere(int level) {
         {4, 1, 8}, {8, 1, 10}, {8, 10, 3}, {5, 8, 3}, {5, 3, 2}, {2, 3, 7},
         {7, 3, 10}, {7, 10, 6}, {7, 6, 11}, {11, 6, 0}, {0, 6, 1}, {6, 10, 1},
         {9, 11, 0}, {9, 2, 11}, {9, 5, 2}, {7, 11, 2}};
-    for (auto l = 0; l < level - 2; l++) {
+    for (auto l = 0; l < tesselation - 2; l++) {
         vector<vec2i> _lines;
         vector<vec4i> _quads;
         vector<vec2i> edges;
@@ -7040,10 +9181,11 @@ tuple<vector<vec3i>, vector<vec3f>> make_geodesicsphere(int level) {
 
 // Make a sphere. This is not watertight.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvhemisphere(int level, bool flipped) {
+make_uvhemisphere(int tesselation, bool flipped) {
     auto quads = vector<vec4i>();
     auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) = make_uvquads(pow2(level + 2), pow2(level));
+    tie(quads, texcoord) =
+        make_uvquads(pow2(tesselation + 2), pow2(tesselation));
     auto pos = vector<vec3f>(texcoord.size());
     auto norm = vector<vec3f>(texcoord.size());
     if (!flipped) {
@@ -7067,10 +9209,10 @@ make_uvhemisphere(int level, bool flipped) {
 
 // Make a quad.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvquad(
-    int level) {
+    int tesselation) {
     auto quads = vector<vec4i>();
     auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) = make_uvquads(pow2(level), pow2(level));
+    tie(quads, texcoord) = make_uvquads(pow2(tesselation), pow2(tesselation));
     auto pos = vector<vec3f>(texcoord.size());
     auto norm = vector<vec3f>(texcoord.size());
     for (auto i = 0; i < texcoord.size(); i++) {
@@ -7083,47 +9225,83 @@ tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvquad(
 
 // Make a cube with unique vertices. This is watertight but has no
 // texture coordinates or normals.
-tuple<vector<vec4i>, vector<vec3f>> make_cube() {
-    static auto cube_pos =
-        vector<vec3f>{{-1, -1, -1}, {-1, +1, -1}, {+1, +1, -1}, {+1, -1, -1},
-            {-1, -1, +1}, {-1, +1, +1}, {+1, +1, +1}, {+1, -1, +1}};
-    static auto cube_quads = vector<vec4i>{{0, 1, 2, 3}, {7, 6, 5, 4},
-        {4, 5, 1, 0}, {6, 7, 3, 2}, {2, 1, 5, 6}, {0, 3, 7, 4}};
-    static auto cube_quad_uv = vector<vec2f>{{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-    return {cube_quads, cube_pos};
+tuple<vector<vec4i>, vector<vec3f>> make_cube(int tesselation) {
+    static auto pos = vector<vec3f>{{-1, -1, -1}, {-1, +1, -1}, {+1, +1, -1},
+        {+1, -1, -1}, {-1, -1, +1}, {-1, +1, +1}, {+1, +1, +1}, {+1, -1, +1}};
+    static auto quads = vector<vec4i>{{0, 1, 2, 3}, {7, 6, 5, 4}, {4, 5, 1, 0},
+        {6, 7, 3, 2}, {2, 1, 5, 6}, {0, 3, 7, 4}};
+
+    auto tpos = pos;
+    auto tquads = quads;
+    for (auto l = 0; l < tesselation; l++) {
+        auto lines = vector<vec2i>();
+        auto triangles = vector<vec3i>();
+        auto edges = vector<vec2i>();
+        auto faces = vector<vec4i>();
+        tie(lines, triangles, tquads, edges, faces) =
+            subdivide_elems_linear({}, {}, tquads, (int)tpos.size());
+        tpos = subdivide_vert_linear(tpos, edges, faces);
+    }
+
+    return {tquads, tpos};
 }
 
 // Make a facevarying cube with unique vertices but different texture
 // coordinates.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec4i>, vector<vec3f>, vector<vec4i>,
     vector<vec2f>>
-make_fvcube() {
+make_fvcube(int tesselation) {
     static auto pos = vector<vec3f>{{-1, -1, -1}, {-1, +1, -1}, {+1, +1, -1},
         {+1, -1, -1}, {-1, -1, +1}, {-1, +1, +1}, {+1, +1, +1}, {+1, -1, +1}};
-    static auto qpos = vector<vec4i>{{0, 1, 2, 3}, {7, 6, 5, 4}, {4, 5, 1, 0},
-        {6, 7, 3, 2}, {2, 1, 5, 6}, {0, 3, 7, 4}};
+    static auto quads_pos = vector<vec4i>{{0, 1, 2, 3}, {7, 6, 5, 4},
+        {4, 5, 1, 0}, {6, 7, 3, 2}, {2, 1, 5, 6}, {0, 3, 7, 4}};
     static auto norm = vector<vec3f>{{0, 0, -1}, {0, 0, -1}, {0, 0, -1},
         {0, 0, -1}, {0, 0, +1}, {0, 0, +1}, {0, 0, +1}, {0, 0, +1}, {-1, 0, 0},
         {-1, 0, 0}, {-1, 0, 0}, {-1, 0, 0}, {+1, 0, 0}, {+1, 0, 0}, {+1, 0, 0},
         {+1, 0, 0}, {0, +1, 0}, {0, +1, 0}, {0, +1, 0}, {0, +1, 0}, {0, -1, 0},
         {0, -1, 0}, {0, -1, 0}, {0, -1, 0}};
-    static auto qnorm = vector<vec4i>{{0, 1, 2, 3}, {4, 5, 6, 7},
+    static auto quads_norm = vector<vec4i>{{0, 1, 2, 3}, {4, 5, 6, 7},
         {8, 9, 10, 11}, {12, 13, 14, 15}, {16, 17, 18, 19}, {20, 21, 22, 23}};
     static auto texcoord = vector<vec2f>{{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0},
         {1, 0}, {1, 1}, {0, 1}, {0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0}, {1, 0},
         {1, 1}, {0, 1}, {0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0}, {1, 0}, {1, 1},
         {0, 1}};
-    static auto qtexcoord = vector<vec4i>{{0, 1, 2, 3}, {4, 5, 6, 7},
+    static auto quads_texcoord = vector<vec4i>{{0, 1, 2, 3}, {4, 5, 6, 7},
         {8, 9, 10, 11}, {12, 13, 14, 15}, {16, 17, 18, 19}, {20, 21, 22, 23}};
-    return {qpos, pos, qnorm, norm, qtexcoord, texcoord};
+
+    if (!tesselation)
+        return {quads_pos, pos, quads_norm, norm, quads_texcoord, texcoord};
+
+    auto tpos = pos, tnorm = norm;
+    auto ttexcoord = texcoord;
+    auto tquads_pos = quads_pos, tquads_norm = quads_norm,
+         tquads_texcoord = quads_texcoord;
+    for (auto l = 0; l < tesselation; l++) {
+        auto lines = vector<vec2i>();
+        auto triangles = vector<vec3i>();
+        auto edges = vector<vec2i>();
+        auto faces = vector<vec4i>();
+        tie(lines, triangles, tquads_pos, edges, faces) =
+            subdivide_elems_linear({}, {}, tquads_pos, (int)tpos.size());
+        tpos = subdivide_vert_linear(tpos, edges, faces);
+        tie(lines, triangles, tquads_norm, edges, faces) =
+            subdivide_elems_linear({}, {}, tquads_norm, (int)tnorm.size());
+        tnorm = subdivide_vert_linear(tnorm, edges, faces);
+        tie(lines, triangles, tquads_texcoord, edges, faces) =
+            subdivide_elems_linear(
+                {}, {}, tquads_texcoord, (int)ttexcoord.size());
+        ttexcoord = subdivide_vert_linear(ttexcoord, edges, faces);
+    }
+
+    return {tquads_pos, tpos, tquads_norm, tnorm, tquads_texcoord, ttexcoord};
 }
 
 // Make a facevarying sphere with unique vertices but different texture
 // coordinates.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec4i>, vector<vec3f>, vector<vec4i>,
     vector<vec2f>>
-make_fvsphere(int level) {
-    auto usteps = pow2(level + 2), vsteps = pow2(level + 1);
+make_fvsphere(int tesselation) {
+    auto usteps = pow2(tesselation + 2), vsteps = pow2(tesselation + 1);
     auto qpos = vector<vec4i>(), qtexcoord = vector<vec4i>();
     auto uvpos = vector<vec2f>(), texcoord = vector<vec2f>();
     tie(qpos, uvpos) = make_uvquads(usteps, vsteps, true, false, true, true);
@@ -7139,7 +9317,7 @@ make_fvsphere(int level) {
 
 // Make a suzanne monkey model for testing. Note that some quads are
 // degenerate.
-tuple<vector<vec4i>, vector<vec3f>> make_suzanne() {
+tuple<vector<vec4i>, vector<vec3f>> make_suzanne(int tesselation) {
     static auto suzanne_pos = vector<vec3f>{{0.4375, 0.1640625, 0.765625},
         {-0.4375, 0.1640625, 0.765625}, {0.5, 0.09375, 0.6875},
         {-0.5, 0.09375, 0.6875}, {0.546875, 0.0546875, 0.578125},
@@ -7557,15 +9735,32 @@ tuple<vector<vec4i>, vector<vec3f>> make_suzanne() {
         {493, 495, 499, 501}, {500, 496, 494, 502}, {313, 381, 387, 505},
         {388, 382, 314, 506}, {313, 505, 503, 321}, {504, 506, 314, 322},
         {319, 321, 503, 389}, {504, 322, 320, 390}};
-    auto quads = suzanne_quads;
-    quads.reserve(suzanne_quads.size() + suzanne_triangles.size());
-    for (auto& t : suzanne_triangles) { quads.push_back({t.x, t.y, t.z, t.z}); }
-    return {quads, suzanne_pos};
+
+    auto tpos = suzanne_pos;
+    auto tquads = suzanne_quads;
+    tquads.reserve(suzanne_quads.size() + suzanne_triangles.size());
+    for (auto& t : suzanne_triangles) {
+        tquads.push_back({t.x, t.y, t.z, t.z});
+    }
+
+    if (!tesselation) return {tquads, tpos};
+
+    for (auto l = 0; l < tesselation; l++) {
+        auto lines = vector<vec2i>();
+        auto triangles = vector<vec3i>();
+        auto edges = vector<vec2i>();
+        auto faces = vector<vec4i>();
+        tie(lines, triangles, tquads, edges, faces) =
+            subdivide_elems_linear({}, {}, tquads, (int)tpos.size());
+        tpos = subdivide_vert_linear(tpos, edges, faces);
+    }
+
+    return {tquads, tpos};
 }
 
 // Make a cube with uv. This is not watertight.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvcube(
-    int level) {
+    int tesselation) {
     frame3f frames[6] = {frame3f{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 1}},
         frame3f{{-1, 0, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, -1}},
         frame3f{{-1, 0, 0}, {0, 0, 1}, {0, 1, 0}, {0, 1, 0}},
@@ -7575,7 +9770,8 @@ tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvcube(
     vector<vec3f> quad_pos, quad_norm;
     vector<vec2f> quad_texcoord;
     vector<vec4i> quad_quads;
-    tie(quad_quads, quad_pos, quad_norm, quad_texcoord) = make_uvquad(level);
+    tie(quad_quads, quad_pos, quad_norm, quad_texcoord) =
+        make_uvquad(tesselation);
     vector<vec3f> pos, norm;
     vector<vec2f> texcoord;
     vector<vec4i> quads;
@@ -7607,11 +9803,11 @@ tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvcube(
 
 // Make a sphere from a cube. This is not watertight.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvspherecube(int level) {
+make_uvspherecube(int tesselation) {
     vector<vec3f> pos, norm;
     vector<vec2f> texcoord;
     vector<vec4i> quads;
-    tie(quads, pos, norm, texcoord) = make_uvcube(level);
+    tie(quads, pos, norm, texcoord) = make_uvcube(tesselation);
     for (auto i = 0; i < pos.size(); i++) {
         pos[i] = normalize(pos[i]);
         norm[i] = normalize(pos[i]);
@@ -7621,11 +9817,11 @@ make_uvspherecube(int level) {
 
 // Make a cube than stretch it towards a sphere. This is not watertight.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvspherizedcube(int level, float radius) {
+make_uvspherizedcube(int tesselation, float radius) {
     vector<vec3f> pos, norm;
     vector<vec2f> texcoord;
     vector<vec4i> quads;
-    tie(quads, pos, norm, texcoord) = make_uvcube(level);
+    tie(quads, pos, norm, texcoord) = make_uvcube(tesselation);
     for (auto i = 0; i < pos.size(); i++) {
         norm[i] = normalize(pos[i]);
         pos[i] *= 1 - radius;
@@ -7637,11 +9833,11 @@ make_uvspherizedcube(int level, float radius) {
 
 // Make a flipped sphere. This is not watertight.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvflipcapsphere(int level, float z, bool flipped) {
+make_uvflipcapsphere(int tesselation, float z, bool flipped) {
     vector<vec3f> pos, norm;
     vector<vec2f> texcoord;
     vector<vec4i> quads;
-    tie(quads, pos, norm, texcoord) = make_uvsphere(level, flipped);
+    tie(quads, pos, norm, texcoord) = make_uvsphere(tesselation, flipped);
     for (auto i = 0; i < pos.size(); i++) {
         if (pos[i].z > z) {
             pos[i].z = 2 * z - pos[i].z;
@@ -7658,10 +9854,11 @@ make_uvflipcapsphere(int level, float z, bool flipped) {
 
 // Make a cutout sphere. This is not watertight.
 tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvcutsphere(int level, float z, bool flipped) {
+make_uvcutsphere(int tesselation, float z, bool flipped) {
     auto quads = vector<vec4i>();
     auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) = make_uvquads(pow2(level + 2), pow2(level + 1));
+    tie(quads, texcoord) =
+        make_uvquads(pow2(tesselation + 2), pow2(tesselation + 1));
     auto pos = vector<vec3f>(texcoord.size());
     auto norm = vector<vec3f>(texcoord.size());
     if (!flipped) {
@@ -7685,6 +9882,54 @@ make_uvcutsphere(int level, float z, bool flipped) {
     return {quads, pos, norm, texcoord};
 }
 
+// Make a seashell. This is not watertight. Returns quads, pos, norm, texcoord.
+tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
+make_uvseashell(int tesselation, const make_seashell_params& params) {
+    auto R = params.spiral_revolutions;
+    auto D = -1.0f;
+    auto a = params.spiral_angle;
+    auto b = params.enlarging_angle;
+    auto A = params.spiral_aperture;
+    auto e = params.ellipse_axis;
+    auto O = params.curve_rotation;  // (psi, Omega, mu)
+    auto W = params.nodule_length;
+    auto N = params.nodules_num;
+    auto P = params.nodule_pos;
+    auto L = params.nodule_height;
+
+    auto cot_a = 1 / tan(a);
+
+    auto quads = vector<vec4i>();
+    auto texcoord = vector<vec2f>();
+    tie(quads, texcoord) = make_uvquads(
+        pow2(tesselation + 2), pow2(tesselation + 1 + (int)round(R)));
+    auto pos = vector<vec3f>(texcoord.size());
+    for (auto i = 0; i < texcoord.size(); i++) {
+        auto uv = texcoord[i];
+        auto s = uv.x * 2 * pif;
+        auto t = uv.y * 2 * pif * R - pif * R;
+        auto re = 1 / sqrt(pow(cos(s) / e.x, 2) + pow(sin(s) / e.y, 2));
+        if (L && W.x && W.y && t > 0) {
+            auto l = (2 * pif / N) *
+                     ((N * t) / (2 * pif) - floor((N * t) / (2 * pif)));
+            auto rn =
+                L * exp(-pow((2 * (s - P)) / W.x, 2) - pow((2 * l) / W.y, 2));
+            re += rn;
+        }
+        pos[i].x = (A * sin(b) * cos(t) + cos(s + O.x) * cos(t + O.y) * re -
+                       sin(O.z) * sin(t + O.y) * re) *
+                   D * exp(t * cot_a);
+        pos[i].y = (A * sin(b) * sin(t) + cos(s + O.x) * sin(t + O.y) * re +
+                       sin(O.z) * sin(s + O.x) * cos(t + O.y) * re) *
+                   exp(t * cot_a);
+        pos[i].z =
+            (-A * cos(b) + cos(O.z) * sin(s + O.x) * re) * exp(t * cot_a);
+        texcoord[i] = {uv.x, uv.y * R};
+    }
+    auto norm = compute_normals({}, {}, quads, pos);
+    return {quads, pos, norm, texcoord};
+}
+
 // Make a bezier circle. Returns bezier, pos.
 tuple<vector<vec4i>, vector<vec3f>> make_bezier_circle() {
     // constant from http://spencermortensen.com/articles/bezier-circle/
@@ -7699,28 +9944,28 @@ tuple<vector<vec4i>, vector<vec3f>> make_bezier_circle() {
 
 // Make a hair ball around a shape
 tuple<vector<vec2i>, vector<vec3f>, vector<vec3f>, vector<vec2f>, vector<float>>
-make_hair(int num, int level, const vec2f& len, const vec2f& rad,
-    const vector<vec3i>& striangles, const vector<vec4i>& squads,
-    const vector<vec3f>& spos, const vector<vec3f>& snorm,
-    const vector<vec2f>& stexcoord, const vec2f& noise, const vec2f& clump,
-    const vec2f& rotation, uint32_t seed) {
+make_hair(int num, int tesselation, const vector<vec3i>& striangles,
+    const vector<vec4i>& squads, const vector<vec3f>& spos,
+    const vector<vec3f>& snorm, const vector<vec2f>& stexcoord,
+    const make_hair_params& params) {
     vector<vec3f> bpos;
     vector<vec3f> bnorm;
     vector<vec2f> btexcoord;
-    tie(bpos, bnorm, btexcoord) =
-        sample_triangles_points(striangles + convert_quads_to_triangles(squads),
-            spos, snorm, stexcoord, num, seed);
+    tie(bpos, bnorm, btexcoord) = sample_triangles_points(
+        join(striangles, convert_quads_to_triangles(squads)), spos, snorm,
+        stexcoord, num, params.seed);
 
-    auto rng = init_rng(seed, 3);
+    auto rng = init_rng(params.seed, 3);
     auto blen = vector<float>(bpos.size());
-    for (auto& l : blen) l = lerp(len.x, len.y, next_rand1f(rng));
+    for (auto& l : blen)
+        l = lerp(params.length.x, params.length.y, next_rand1f(rng));
 
     auto cidx = vector<int>();
-    if (clump.x > 0) {
-        for (auto bidx : range(bpos.size())) {
-            cidx += 0;
+    if (params.clump.x > 0) {
+        for (auto bidx = 0; bidx < bpos.size(); bidx++) {
+            cidx.push_back(0);
             auto cdist = flt_max;
-            for (auto c = 0; c < clump.y; c++) {
+            for (auto c = 0; c < params.clump.y; c++) {
                 auto d = length(bpos[bidx] - bpos[c]);
                 if (d < cdist) {
                     cdist = d;
@@ -7730,34 +9975,36 @@ make_hair(int num, int level, const vec2f& len, const vec2f& rad,
         }
     }
 
-    auto usteps = pow2(level);
+    auto usteps = pow2(tesselation);
     auto lines = vector<vec2i>();
     auto texcoord = vector<vec2f>();
     tie(lines, texcoord) = make_uvlines(num, usteps);
     auto pos = vector<vec3f>(texcoord.size());
     auto norm = vector<vec3f>(texcoord.size());
     auto radius = vector<float>(texcoord.size());
-    for (auto i : range(texcoord.size())) {
+    for (auto i = 0; i < texcoord.size(); i++) {
         auto u = texcoord[i].x;
         auto bidx = i / (usteps + 1);
         pos[i] = bpos[bidx] + bnorm[bidx] * u * blen[bidx];
         norm[i] = bnorm[bidx];
-        radius[i] = lerp(rad.x, rad.y, u);
-        if (clump.x > 0) {
+        radius[i] = lerp(params.radius.x, params.radius.y, u);
+        if (params.clump.x > 0) {
             pos[i] = lerp(pos[i], pos[i + (cidx[bidx] - bidx) * (usteps + 1)],
-                u * clump.x);
+                u * params.clump.x);
         }
-        if (noise.x > 0) {
-            auto nx = perlin_noise(pos[i] * noise.y + vec3f{0, 0, 0}) * noise.x;
-            auto ny =
-                perlin_noise(pos[i] * noise.y + vec3f{3, 7, 11}) * noise.x;
+        if (params.noise.x > 0) {
+            auto nx = perlin_noise(pos[i] * params.noise.y + vec3f{0, 0, 0}) *
+                      params.noise.x;
+            auto ny = perlin_noise(pos[i] * params.noise.y + vec3f{3, 7, 11}) *
+                      params.noise.x;
             auto nz =
-                perlin_noise(pos[i] * noise.y + vec3f{13, 17, 19}) * noise.x;
+                perlin_noise(pos[i] * params.noise.y + vec3f{13, 17, 19}) *
+                params.noise.x;
             pos[i] += {nx, ny, nz};
         }
     }
 
-    if (clump.x > 0 || noise.x > 0 || rotation.x > 0)
+    if (params.clump.x > 0 || params.noise.x > 0 || params.rotation.x > 0)
         norm = compute_normals(lines, {}, {}, pos);
 
     return {lines, pos, norm, texcoord, radius};
@@ -7778,7 +10025,7 @@ scene* make_cornell_box_scene() {
                            float aperture, float aspect = 16.0f / 9.0f) {
         auto cam = new camera();
         cam->name = name;
-        cam->frame = lookat_frame3f(from, to, {0, 1, 0});
+        cam->frame = lookat_frame3(from, to, {0, 1, 0});
         cam->aperture = aperture;
         cam->focus = length(from - to);
         cam->yfov = yfov * pif / 180;
@@ -7786,39 +10033,44 @@ scene* make_cornell_box_scene() {
         return cam;
     };
 
-    auto make_instance = [](string name, shape* shp, vec3f pos,
+    auto make_instance = [](string name, shape_group* shp, vec3f pos,
                              vec3f rot = {0, 0, 0}) {
         auto ist = new instance();
         ist->name = name;
         ist->shp = shp;
-        ist->frame = {rotation_mat3f(vec3f{0, 0, 1}, rot[2] * pif / 180) *
-                          rotation_mat3f(vec3f{0, 1, 0}, rot[1] * pif / 180) *
-                          rotation_mat3f(vec3f{1, 0, 0}, rot[0] * pif / 180),
+        ist->frame = {rotation_mat3(vec3f{0, 0, 1}, rot[2] * pif / 180) *
+                          rotation_mat3(vec3f{0, 1, 0}, rot[1] * pif / 180) *
+                          rotation_mat3(vec3f{1, 0, 0}, rot[0] * pif / 180),
             pos};
         return ist;
-    };
-
+	};
     auto make_quad = [](string name, material* mat, float scale = 1) {
+        auto sgr = new shape_group();
+        sgr->name = name;
         auto shp = new shape();
         shp->mat = mat;
         shp->name = name;
         tie(shp->quads, shp->pos, shp->norm, shp->texcoord) = make_uvquad(0);
         for (auto& p : shp->pos) p *= scale;
-        return shp;
+        sgr->shapes.push_back(shp);
+        return sgr;
     };
 
     auto make_box = [](string name, material* mat, vec3f scale) {
+        auto sgr = new shape_group();
+        sgr->name = name;
         auto shp = new shape();
         shp->mat = mat;
         shp->name = name;
         tie(shp->quads, shp->pos, shp->norm, shp->texcoord) = make_uvcube(0);
         for (auto& p : shp->pos) p *= scale;
-        return shp;
+        sgr->shapes.push_back(shp);
+        return sgr;
     };
 
     auto make_material = [](string name, vec3f kd, vec3f ke = {0, 0, 0}) {
         auto mat = new material();
-        mat->mtype = material_type::specular_roughness;
+        mat->type = material_type::specular_roughness;
         mat->name = name;
         mat->ke = ke;
         mat->kd = kd;
@@ -7828,44 +10080,46 @@ scene* make_cornell_box_scene() {
     };
 
     auto scn = new scene();
-    scn->cameras += make_camera("cb_cam", {0, 1, 5.15f}, {0, 1, 0}, 27, 0, 1);
-    scn->materials += make_material("cb_white", {0.725f, 0.71f, 0.68f});
-    scn->materials += make_material("cb_red", {0.63f, 0.065f, 0.05f});
-    scn->materials += make_material("cb_green", {0.14f, 0.45f, 0.091f});
-    scn->materials += make_material("cb_light", zero3f, {17, 12, 4});
-    scn->shapes += make_quad("cb_floor", scn->materials[0]);
-    scn->shapes += make_quad("cb_ceiling", scn->materials[0]);
-    scn->shapes += make_quad("cb_back", scn->materials[0]);
-    scn->shapes += make_quad("cb_left", scn->materials[2]);
-    scn->shapes += make_quad("cb_right", scn->materials[1]);
-    scn->shapes +=
-        make_box("cb_tallbox", scn->materials[0], {0.3f, 0.6f, 0.3f});
-    scn->shapes +=
-        make_box("cb_shortbox", scn->materials[0], {0.3f, 0.3f, 0.3f});
-    scn->shapes += make_quad("cb_light", scn->materials[3], 0.25f);
-    scn->instances +=
-        make_instance("cb_floor", scn->shapes[0], {0, 0, 0}, {-90, 0, 0});
-    scn->instances +=
-        make_instance("cb_ceiling", scn->shapes[1], {0, 2, 0}, {90, 0, 0});
-    scn->instances += make_instance("cb_back", scn->shapes[2], {0, 1, -1});
-    scn->instances +=
-        make_instance("cb_left", scn->shapes[3], {+1, 1, 0}, {0, -90, 0}),
-        scn->instances +=
-        make_instance("cb_right", scn->shapes[4], {-1, 1, 0}, {0, 90, 0}),
-        scn->instances += make_instance(
-            "cb_tallbox", scn->shapes[5], {-0.33f, 0.6f, -0.29f}, {0, 15, 0}),
-        scn->instances += make_instance(
-            "cb_shortbox", scn->shapes[6], {0.33f, 0.3f, 0.33f}, {0, -15, 0}),
-        scn->instances +=
-        make_instance("cb_light", scn->shapes[7], {0, 1.999f, 0}, {90, 0, 0});
+    scn->cameras.push_back(
+        make_camera("cb_cam", {0, 1, 5.15f}, {0, 1, 0}, 27, 0, 1));
+    scn->materials.push_back(make_material("cb_white", {0.725f, 0.71f, 0.68f}));
+    scn->materials.push_back(make_material("cb_red", {0.63f, 0.065f, 0.05f}));
+    scn->materials.push_back(make_material("cb_green", {0.14f, 0.45f, 0.091f}));
+    scn->materials.push_back(make_material("cb_light", zero3f, {17, 12, 4}));
+    scn->shapes.push_back(make_quad("cb_floor", scn->materials[0]));
+    scn->shapes.push_back(make_quad("cb_ceiling", scn->materials[0]));
+    scn->shapes.push_back(make_quad("cb_back", scn->materials[0]));
+    scn->shapes.push_back(make_quad("cb_left", scn->materials[2]));
+    scn->shapes.push_back(make_quad("cb_right", scn->materials[1]));
+    scn->shapes.push_back(
+        make_box("cb_tallbox", scn->materials[0], {0.3f, 0.6f, 0.3f}));
+    scn->shapes.push_back(
+        make_box("cb_shortbox", scn->materials[0], {0.3f, 0.3f, 0.3f}));
+    scn->shapes.push_back(make_quad("cb_light", scn->materials[3], 0.25f));
+    scn->instances.push_back(
+        make_instance("cb_floor", scn->shapes[0], {0, 0, 0}, {-90, 0, 0}));
+    scn->instances.push_back(
+        make_instance("cb_ceiling", scn->shapes[1], {0, 2, 0}, {90, 0, 0}));
+    scn->instances.push_back(
+        make_instance("cb_back", scn->shapes[2], {0, 1, -1}));
+    scn->instances.push_back(
+        make_instance("cb_left", scn->shapes[3], {+1, 1, 0}, {0, -90, 0}));
+    scn->instances.push_back(
+        make_instance("cb_right", scn->shapes[4], {-1, 1, 0}, {0, 90, 0}));
+    scn->instances.push_back(make_instance(
+        "cb_tallbox", scn->shapes[5], {-0.33f, 0.6f, -0.29f}, {0, 15, 0}));
+    scn->instances.push_back(make_instance(
+        "cb_shortbox", scn->shapes[6], {0.33f, 0.3f, 0.33f}, {0, -15, 0}));
+    scn->instances.push_back(
+        make_instance("cb_light", scn->shapes[7], {0, 1.999f, 0}, {90, 0, 0}));
     return scn;
 }
 
 //
 // Make standard shape. Public API described above.
 //
-inline tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvhollowcutsphere(int level, float radius) {
+tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
+make_uvhollowcutsphere(int tesselation, float radius) {
     auto quads = vector<vec4i>();
     auto pos = vector<vec3f>();
     auto norm = vector<vec3f>();
@@ -7877,26 +10131,28 @@ make_uvhollowcutsphere(int level, float radius) {
     vector<vec2i> _aux1;
     vector<vec3i> _aux2;
 
-    tie(mquads, mpos, mnorm, mtexcoord) = make_uvcutsphere(level, radius);
+    tie(mquads, mpos, mnorm, mtexcoord) = make_uvcutsphere(tesselation, radius);
     for (auto& uv : mtexcoord) uv.y *= radius;
     tie(_aux1, _aux2, quads) =
         merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    pos += mpos;
-    norm += mnorm;
-    texcoord += mtexcoord;
+    append(pos, mpos);
+    append(norm, mnorm);
+    append(texcoord, mtexcoord);
 
-    tie(mquads, mpos, mnorm, mtexcoord) = make_uvcutsphere(level, radius, true);
+    tie(mquads, mpos, mnorm, mtexcoord) =
+        make_uvcutsphere(tesselation, radius, true);
     for (auto& p : mpos) p *= radius;
     tie(_aux1, _aux2, quads) =
         merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    pos += mpos;
-    norm += mnorm;
-    texcoord += mtexcoord;
+    append(pos, mpos);
+    append(norm, mnorm);
+    append(texcoord, mtexcoord);
 
     // dpdu = [- s r s0 s1, s r c0 s1, 0] === [- s0, c0, 0]
     // dpdv = [s c0 s1, s s0 s1, s c1] === [c0 s1, s0 s1, c1]
     // n = [c0 c1, - s0 c1, s1]
-    tie(mquads, mtexcoord) = make_uvquads(pow2(level + 2), pow2(level + 1));
+    tie(mquads, mtexcoord) =
+        make_uvquads(pow2(tesselation + 2), pow2(tesselation + 1));
     mpos.resize(mtexcoord.size());
     mnorm.resize(mtexcoord.size());
     for (auto i = 0; i < mtexcoord.size(); i++) {
@@ -7910,17 +10166,17 @@ make_uvhollowcutsphere(int level, float radius) {
     }
     tie(_aux1, _aux2, quads) =
         merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    pos += mpos;
-    norm += mnorm;
-    texcoord += mtexcoord;
+    append(pos, mpos);
+    append(norm, mnorm);
+    append(texcoord, mtexcoord);
     return {quads, pos, norm, texcoord};
 }
 
 //
 // Make standard shape. Public API described above.
 //
-inline tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvhollowcutsphere1(int level, float radius) {
+tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
+make_uvhollowcutsphere1(int tesselation, float radius) {
     auto quads = vector<vec4i>();
     auto pos = vector<vec3f>();
     auto norm = vector<vec3f>();
@@ -7932,27 +10188,28 @@ make_uvhollowcutsphere1(int level, float radius) {
     vector<vec2i> _aux1;
     vector<vec3i> _aux2;
 
-    tie(mquads, mpos, mnorm, mtexcoord) = make_uvcutsphere(level, radius);
+    tie(mquads, mpos, mnorm, mtexcoord) = make_uvcutsphere(tesselation, radius);
     for (auto& uv : mtexcoord) uv.y *= radius;
-    for (auto i = (pow2(level + 2) + 1) * pow2(level + 1); i < mnorm.size();
-         i++)
+    for (auto i = (pow2(tesselation + 2) + 1) * pow2(tesselation + 1);
+         i < mnorm.size(); i++)
         mnorm[i] = normalize(mnorm[i] + vec3f{0, 0, 1});
     tie(_aux1, _aux2, quads) =
         merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    pos += mpos;
-    norm += mnorm;
-    texcoord += mtexcoord;
+    append(pos, mpos);
+    append(norm, mnorm);
+    append(texcoord, mtexcoord);
 
     tie(mquads, mpos, mnorm, mtexcoord) =
-        make_uvcutsphere(level, radius * 1.05f, true);
+        make_uvcutsphere(tesselation, radius * 1.05f, true);
     for (auto& p : mpos) p *= 0.8f;
     tie(_aux1, _aux2, quads) =
         merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    pos += mpos;
-    norm += mnorm;
-    texcoord += mtexcoord;
+    append(pos, mpos);
+    append(norm, mnorm);
+    append(texcoord, mtexcoord);
 
-    tie(mquads, mtexcoord) = make_uvquads(pow2(level + 2), pow2(level + 1) / 4);
+    tie(mquads, mtexcoord) =
+        make_uvquads(pow2(tesselation + 2), pow2(tesselation + 1) / 4);
     mpos.resize(mtexcoord.size());
     mnorm.resize(mtexcoord.size());
     for (auto i = 0; i < mtexcoord.size(); i++) {
@@ -7965,389 +10222,184 @@ make_uvhollowcutsphere1(int level, float radius) {
         mnorm[i] = {-cos(a[0]) * sin(a[1]), -sin(a[0]) * sin(a[1]), cos(a[1])};
         mtexcoord[i] = {uv[0], radius + (1 - radius) * uv[1]};
     }
-    for (auto i = 0; i < (pow2(level + 2) + 1); i++)
+    for (auto i = 0; i < (pow2(tesselation + 2) + 1); i++)
         mnorm[i] = normalize(mnorm[i] + vec3f{0, 0, 1});
     tie(_aux1, _aux2, quads) =
         merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    pos += mpos;
-    norm += mnorm;
-    texcoord += mtexcoord;
+    append(pos, mpos);
+    append(norm, mnorm);
+    append(texcoord, mtexcoord);
     return {quads, pos, norm, texcoord};
 }
 
-enum struct test_texture_type {
-    none,
-    grid,
-    checker,
-    colored,
-    rcolored,
-    tgrid,
-    bump,
-    uv,
-    gamma,
-    gridn,
-    bumpn,
-    tgridn,
-    noise,
-    fbm,
-    ridge,
-    turbulence,
-    gammaf,
-    sky1,
-    sky2
-};
+}  // namespace ygl
 
-inline const vector<pair<string, test_texture_type>>& test_texture_names() {
-    static auto names = vector<pair<string, test_texture_type>>{
-        {"none.png", test_texture_type::none},
-        {"grid.png", test_texture_type::grid},
-        {"checker.png", test_texture_type::checker},
-        {"bump.png", test_texture_type::bumpn},
-        {"tgrid.png", test_texture_type::tgrid},
-        {"colored.png", test_texture_type::colored},
-        {"rcolored.png", test_texture_type::rcolored},
-        {"uv.png", test_texture_type::uv},
-        {"gamma.png", test_texture_type::gamma},
-        {"gridn.png", test_texture_type::gridn},
-        {"bumpn.png", test_texture_type::bumpn},
-        {"tgridn.png", test_texture_type::tgridn},
-        {"noise.png", test_texture_type::noise},
-        {"fbm.png", test_texture_type::fbm},
-        {"ridge.png", test_texture_type::ridge},
-        {"turbulence.png", test_texture_type::turbulence},
-        {"gammaf.hdr", test_texture_type::gammaf},
-        {"sky1.hdr", test_texture_type::sky1},
-        {"sky2.hdr", test_texture_type::sky2}};
-    return names;
-}
+// -----------------------------------------------------------------------------
+// EXAMPLE SCENES
+// -----------------------------------------------------------------------------
+namespace ygl {
 
-texture* add_test_texture(scene* scn, test_texture_type type) {
-    if (type == test_texture_type::none) return nullptr;
-    auto name = ""s;
-    for (auto kv : test_texture_names())
-        if (kv.second == type) name = kv.first;
-    for (auto txt : scn->textures)
-        if (txt->path == name) return txt;
-    auto txt = new texture();
-    txt->path = name;
-    scn->textures += txt;
-    switch (type) {
+// Makes/updates a test texture
+void update_test_texture(
+    const scene* scn, texture* txt, const test_texture_params& ttxt) {
+    if (ttxt.name == "") throw runtime_error("cannot use empty name");
+
+    txt->name = ttxt.name;
+    txt->path = "";
+    txt->ldr = {};
+    txt->hdr = {};
+
+    switch (ttxt.type) {
+        case test_texture_type::none: break;
         case test_texture_type::grid: {
-            txt->ldr = make_grid_image(512, 512);
+            txt->ldr = make_grid_image(ttxt.resolution, ttxt.resolution);
         } break;
         case test_texture_type::checker: {
-            txt->ldr = make_checker_image(512, 512);
+            txt->ldr = make_checker_image(ttxt.resolution, ttxt.resolution);
         } break;
         case test_texture_type::colored: {
-            txt->ldr = make_uvgrid_image(512, 512);
+            txt->ldr = make_uvgrid_image(ttxt.resolution, ttxt.resolution);
         } break;
         case test_texture_type::rcolored: {
-            txt->ldr = make_recuvgrid_image(512, 512);
+            txt->ldr = make_recuvgrid_image(ttxt.resolution, ttxt.resolution);
         } break;
         case test_texture_type::bump: {
-            txt->ldr = make_bumpdimple_image(512, 512, 32);
-        } break;
-        case test_texture_type::tgrid: {
-            txt->ldr = make_grid_image(512, 512, 32);
+            txt->ldr = make_bumpdimple_image(
+                ttxt.resolution, ttxt.resolution, ttxt.tile_size);
         } break;
         case test_texture_type::uv: {
-            txt->ldr = make_uv_image(512, 512);
+            txt->ldr = make_uv_image(ttxt.resolution, ttxt.resolution);
         } break;
         case test_texture_type::gamma: {
-            txt->ldr = make_gammaramp_image(512, 512);
-        } break;
-        case test_texture_type::gridn: {
-            txt->ldr = bump_to_normal_map(make_grid_image(512, 512), 4);
-        } break;
-        case test_texture_type::bumpn: {
-            txt->ldr =
-                bump_to_normal_map(make_bumpdimple_image(512, 512, 32), 4);
-        } break;
-        case test_texture_type::tgridn: {
-            txt->ldr = bump_to_normal_map(make_grid_image(512, 512, 32), 4);
+            txt->ldr = make_gammaramp_image(ttxt.resolution, ttxt.resolution);
         } break;
         case test_texture_type::noise: {
-            txt->ldr = make_noise_image(512, 512, 8);
+            txt->ldr = make_noise_image(
+                ttxt.resolution, ttxt.resolution, ttxt.noise_scale);
         } break;
         case test_texture_type::ridge: {
-            txt->ldr = make_ridge_image(512, 512, 8);
+            txt->ldr = make_ridge_image(
+                ttxt.resolution, ttxt.resolution, ttxt.noise_scale);
         } break;
         case test_texture_type::fbm: {
-            txt->ldr = make_fbm_image(512, 512, 8);
+            txt->ldr = make_fbm_image(
+                ttxt.resolution, ttxt.resolution, ttxt.noise_scale);
         } break;
         case test_texture_type::turbulence: {
-            txt->ldr = make_turbulence_image(512, 512, 8);
+            txt->ldr = make_turbulence_image(
+                ttxt.resolution, ttxt.resolution, ttxt.noise_scale);
         } break;
         case test_texture_type::gammaf: {
-            txt->hdr = make_gammaramp_imagef(512, 512);
+            txt->hdr = make_gammaramp_imagef(ttxt.resolution, ttxt.resolution);
         } break;
-        case test_texture_type::sky1: {
-            txt->hdr = make_sunsky_image(512, pif / 4);
+        case test_texture_type::sky: {
+            txt->hdr = make_sunsky_image(ttxt.resolution, ttxt.sky_sunangle);
         } break;
-        case test_texture_type::sky2: {
-            txt->hdr = make_sunsky_image(512, pif / 2);
-        } break;
-        default: throw runtime_error("bad value");
+        default: throw runtime_error("should not have gotten here");
     }
-    return txt;
-}
 
-enum struct test_material_type {
-    none,
-    matte_grid,
-    matte_gray,
-    matte_green,
-    matte_colored,
-    matte_uv,
-    plastic_red,
-    plastic_blue,
-    plastic_green,
-    plastic_colored,
-    plastic_bumped,
-    silver_mirror,
-    silver_rough,
-    gold_mirror,
-    gold_rough,
-    transparent_red,
-    transparent_green,
-    transparent_blue,
-    light_point,
-    light_area,
-    light_areal,
-    light_arear,
-    light_areat,
-    light_areaf,
-};
-
-inline const vector<pair<string, test_material_type>>& test_material_names() {
-    static auto names = vector<pair<string, test_material_type>>{
-        {"none", test_material_type::none},
-        {"matte_grid", test_material_type::matte_grid},
-        {"matte_gray", test_material_type::matte_gray},
-        {"matte_green", test_material_type::matte_green},
-        {"matte_colored", test_material_type::matte_colored},
-        {"matte_uv", test_material_type::matte_uv},
-        {"plastic_red", test_material_type::plastic_red},
-        {"plastic_blue", test_material_type::plastic_blue},
-        {"plastic_green", test_material_type::plastic_green},
-        {"plastic_colored", test_material_type::plastic_colored},
-        {"plastic_bumped", test_material_type::plastic_bumped},
-        {"silver_mirror", test_material_type::silver_mirror},
-        {"silver_rough", test_material_type::silver_rough},
-        {"gold_mirror", test_material_type::gold_mirror},
-        {"gold_rough", test_material_type::gold_rough},
-        {"transparent_red", test_material_type::transparent_red},
-        {"transparent_green", test_material_type::transparent_green},
-        {"transparent_blue", test_material_type::transparent_blue},
-        {"light_point", test_material_type::light_point},
-        {"light_area", test_material_type::light_area},
-        {"light_areal", test_material_type::light_areal},
-        {"light_arear", test_material_type::light_arear},
-        {"light_areat", test_material_type::light_areat},
-        {"light_areaf", test_material_type::light_areaf},
-    };
-
-    return names;
-}
-
-inline material* add_test_material(scene* scn, test_material_type type) {
-    if (type == test_material_type::none) return nullptr;
-    auto name = ""s;
-    for (auto kv : test_material_names())
-        if (kv.second == type) name = kv.first;
-    for (auto mat : scn->materials)
-        if (mat->name == name) return mat;
-    auto mat = new material();
-    mat->name = name;
-    scn->materials += mat;
-    switch (type) {
-        case test_material_type::matte_gray: {
-            mat->kd = {0.2f, 0.2f, 0.2f};
-        } break;
-        case test_material_type::matte_green: {
-            mat->kd = {0.2f, 0.5f, 0.2f};
-        } break;
-        case test_material_type::matte_grid: {
-            mat->kd = {1, 1, 1};
-            mat->kd_txt.txt = add_test_texture(scn, test_texture_type::grid);
-        } break;
-        case test_material_type::matte_colored: {
-            mat->kd = {1, 1, 1};
-            mat->kd_txt.txt = add_test_texture(scn, test_texture_type::colored);
-        } break;
-        case test_material_type::matte_uv: {
-            mat->kd = {1, 1, 1};
-            mat->kd_txt.txt = add_test_texture(scn, test_texture_type::uv);
-        } break;
-        case test_material_type::plastic_red: {
-            mat->kd = {0.5f, 0.2f, 0.2f};
-            mat->ks = {0.04f, 0.04f, 0.04f};
-            mat->rs = 0.25f;
-        } break;
-        case test_material_type::plastic_green: {
-            mat->kd = {0.2f, 0.5f, 0.2f};
-            mat->ks = {0.04f, 0.04f, 0.04f};
-            mat->rs = 0.1f;
-        } break;
-        case test_material_type::plastic_blue: {
-            mat->kd = {0.2f, 0.2f, 0.5f};
-            mat->ks = {0.04f, 0.04f, 0.04f};
-            mat->rs = 0.05f;
-        } break;
-        case test_material_type::plastic_colored: {
-            mat->kd = {1, 1, 1};
-            mat->ks = {0.04f, 0.04f, 0.04f};
-            mat->rs = 0.25f;
-            mat->kd_txt.txt = add_test_texture(scn, test_texture_type::colored);
-        } break;
-        case test_material_type::plastic_bumped: {
-            mat->kd = {1, 1, 1};
-            mat->ks = {0.04f, 0.04f, 0.04f};
-            mat->rs = 0.25f;
-            mat->kd_txt.txt = add_test_texture(scn, test_texture_type::colored);
-            mat->norm_txt.txt = add_test_texture(scn, test_texture_type::bumpn);
-        } break;
-        case test_material_type::silver_mirror: {
-            mat->ks = {0.5, 0.5, 0.5};
-            mat->rs = 0.05f;
-        } break;
-        case test_material_type::silver_rough: {
-            mat->ks = {0.5, 0.5, 0.5};
-            mat->rs = 0.25f;
-        } break;
-        case test_material_type::gold_mirror: {
-            mat->ks = {0.66f, 0.45f, 0.34f};
-            mat->rs = 0.05f;
-        } break;
-        case test_material_type::gold_rough: {
-            mat->ks = {0.66f, 0.45f, 0.34f};
-            mat->rs = 0.25f;
-        } break;
-        case test_material_type::transparent_red: {
-            mat->kd = {0.5f, 0.2f, 0.2f};
-            mat->op = 0.9f;
-        } break;
-        case test_material_type::transparent_green: {
-            mat->kd = {0.5f, 0.2f, 0.2f};
-            mat->op = 0.5f;
-        } break;
-        case test_material_type::transparent_blue: {
-            mat->kd = {0.5f, 0.2f, 0.2f};
-            mat->op = 0.92f;
-        } break;
-        case test_material_type::light_point: {
-            mat->ke = {400, 400, 400};
-        } break;
-        case test_material_type::light_area: {
-            mat->ke = {40, 40, 40};
-        } break;
-        case test_material_type::light_arear: {
-            mat->ke = {80, 80, 80};
-        } break;
-        case test_material_type::light_areal: {
-            mat->ke = {20, 20, 20};
-        } break;
-        case test_material_type::light_areat: {
-            mat->ke = {10, 10, 10};
-        } break;
-        case test_material_type::light_areaf: {
-            mat->ke = {40, 40, 40};
-        } break;
-        default: throw runtime_error("bad value");
+    if (ttxt.bump_to_normal) {
+        txt->ldr = bump_to_normal_map(txt->ldr, ttxt.bump_scale);
     }
-    return mat;
+
+    if (txt->ldr) txt->path = ttxt.name + ".png";
+    if (txt->hdr) txt->path = ttxt.name + ".hdr";
 }
 
-enum struct test_shape_type {
-    none,
-    floor,
-    quad,
-    cube,
-    sphere,
-    spherecube,
-    spherizedcube,
-    flipcapsphere,
-    geosphere,
-    geospherel,
-    geospheref,
-    cubep,
-    cubes,
-    suzanne,
-    suzannes,
-    cubefv,
-    cubefvs,
-    quads,
-    spherefv,
-    matball,
-    matballi,
-    points,
-    lines1,
-    lines2,
-    lines3,
-    linesi,
-    bcircle,
-    plight,
-    alight,
-    alightt,
-    alightf,
-};
+// Makes/updates a test material
+void update_test_material(
+    const scene* scn, material* mat, const test_material_params& tmat) {
+    if (tmat.name == "") throw runtime_error("cannot use empty name");
 
-inline const vector<pair<string, test_shape_type>>& test_shape_names() {
-    static auto names = vector<pair<string, test_shape_type>>{
-        {"none", test_shape_type::none},
-        {"floor", test_shape_type::floor},
-        {"quad", test_shape_type::quad},
-        {"cube", test_shape_type::cube},
-        {"sphere", test_shape_type::sphere},
-        {"spherecube", test_shape_type::spherecube},
-        {"spherizedcube", test_shape_type::spherizedcube},
-        {"flipcapsphere", test_shape_type::flipcapsphere},
-        {"geosphere", test_shape_type::geosphere},
-        {"geospherel", test_shape_type::geospherel},
-        {"geospheref", test_shape_type::geospheref},
-        {"cubep", test_shape_type::cubep},
-        {"cubes", test_shape_type::cubes},
-        {"suzanne", test_shape_type::suzanne},
-        {"suzannes", test_shape_type::suzannes},
-        {"cubefv", test_shape_type::cubefv},
-        {"cubefvs", test_shape_type::cubefvs},
-        {"quads", test_shape_type::quads},
-        {"spherefv", test_shape_type::spherefv},
-        {"matball", test_shape_type::matball},
-        {"matballi", test_shape_type::matballi},
-        {"points", test_shape_type::points},
-        {"lines1", test_shape_type::lines1},
-        {"lines2", test_shape_type::lines2},
-        {"lines3", test_shape_type::lines3},
-        {"linesi", test_shape_type::linesi},
-        {"bcircle", test_shape_type::bcircle},
-        {"plight", test_shape_type::plight},
-        {"alight", test_shape_type::alight},
-        {"alightt", test_shape_type::alightt},
-        {"alightf", test_shape_type::alightf},
-    };
-    return names;
+    auto txt = find_named_elem(scn->textures, tmat.texture);
+    auto norm = find_named_elem(scn->textures, tmat.normal);
+
+    mat->name = tmat.name;
+    mat->type = material_type::specular_roughness;
+    mat->ke = zero3f;
+    mat->kd = zero3f;
+    mat->rs = 1;
+    mat->kr = zero3f;
+    mat->kt = zero3f;
+    mat->ke_txt.txt = nullptr;
+    mat->kd_txt.txt = nullptr;
+    mat->ks_txt.txt = nullptr;
+    mat->kr_txt.txt = nullptr;
+    mat->kt_txt.txt = nullptr;
+
+    switch (tmat.type) {
+        case test_material_type::none: break;
+        case test_material_type::emission: {
+            mat->ke = tmat.emission * tmat.color;
+            mat->ke_txt.txt = txt;
+        } break;
+        case test_material_type::matte: {
+            mat->kd = tmat.color;
+            mat->kd_txt.txt = txt;
+        } break;
+        case test_material_type::plastic: {
+            mat->kd = tmat.color;
+            mat->ks = {0.04f, 0.04f, 0.04f};
+            mat->rs = tmat.roughness;
+            mat->kd_txt.txt = txt;
+        } break;
+        case test_material_type::metal: {
+            mat->ks = tmat.color;
+            mat->rs = tmat.roughness;
+            mat->ks_txt.txt = txt;
+        } break;
+        case test_material_type::transparent: {
+            mat->kd = tmat.color;
+            mat->op = tmat.opacity;
+            mat->kd_txt.txt = txt;
+        } break;
+        default: throw runtime_error("should not have gotten here");
+    }
+
+    mat->norm_txt.txt = norm;
 }
 
-inline shape* add_test_shape(
-    scene* scn, test_shape_type stype, test_material_type mtype) {
-    if (stype == test_shape_type::none) return nullptr;
-    auto name = ""s;
-    for (auto kv : test_shape_names())
-        if (kv.second == stype) name += kv.first;
-    name += "_";
-    for (auto kv : test_material_names())
-        if (kv.second == mtype) name += kv.first;
-    for (auto shp : scn->shapes)
-        if (shp->name == name) return shp;
-    auto shp = new shape();
-    shp->name = name;
-    shp->mat = add_test_material(scn, mtype);
-    scn->shapes += shp;
-    switch (stype) {
+// Makes/updates a test shape
+void update_test_shape(
+    const scene* scn, shape_group* sgr, const test_shape_params& tshp) {
+    if (tshp.name == "") throw runtime_error("cannot use empty name");
+    auto nshapes = 1;
+    if (tshp.type == test_shape_type::matball ||
+        tshp.type == test_shape_type::hairball)
+        nshapes = 2;
+    if (sgr->shapes.size() != nshapes) {
+        for (auto v : sgr->shapes) delete v;
+        sgr->shapes.clear();
+        for (auto sid = 0; sid < nshapes; sid++)
+            sgr->shapes.push_back(new shape());
+    }
+
+    sgr->name = tshp.name;
+    auto sid = 0;
+    for (auto shp : sgr->shapes) {
+        shp->name = tshp.name + ((sid > 0) ? to_string(sid++) : string(""));
+        shp->mat = find_named_elem(scn->materials, tshp.material);
+        shp->pos = {};
+        shp->norm = {};
+        shp->texcoord = {};
+        shp->texcoord1 = {};
+        shp->color = {};
+        shp->radius = {};
+        shp->tangsp = {};
+        shp->points = {};
+        shp->lines = {};
+        shp->triangles = {};
+        shp->quads = {};
+        shp->quads_pos = {};
+        shp->quads_norm = {};
+        shp->quads_texcoord = {};
+    }
+
+    auto shp = sgr->shapes.front();
+    switch (tshp.type) {
         case test_shape_type::floor: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvquad(6);
+                make_uvquad((tshp.tesselation < 0) ? 5 : tshp.tesselation);
             for (auto& p : shp->pos) p = {-p.x, p.z, p.y};
             for (auto& n : shp->norm) n = {n.x, n.z, n.y};
             for (auto& p : shp->pos) p *= 20;
@@ -8355,648 +10407,1015 @@ inline shape* add_test_shape(
         } break;
         case test_shape_type::quad: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvquad(0);
+                make_uvquad((tshp.tesselation < 0) ? 0 : tshp.tesselation);
         } break;
         case test_shape_type::cube: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvcube(0);
+                make_uvcube((tshp.tesselation < 0) ? 0 : tshp.tesselation);
         } break;
         case test_shape_type::sphere: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvsphere(5);
+                make_uvsphere((tshp.tesselation < 0) ? 5 : tshp.tesselation);
         } break;
         case test_shape_type::spherecube: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvspherecube(4);
+                make_uvspherecube(
+                    (tshp.tesselation < 0) ? 4 : tshp.tesselation);
         } break;
         case test_shape_type::spherizedcube: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvspherizedcube(4, 0.75f);
+                make_uvspherizedcube(
+                    (tshp.tesselation < 0) ? 4 : tshp.tesselation, 0.75f);
+        } break;
+        case test_shape_type::geosphere: {
+            tie(shp->triangles, shp->pos) = make_geodesicsphere(
+                (tshp.tesselation < 0) ? 5 : tshp.tesselation);
+            shp->norm = shp->pos;
         } break;
         case test_shape_type::flipcapsphere: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvflipcapsphere(5, 0.75f);
-            // for (auto& uv : shp->texcoord) uv *= uvscale;
-        } break;
-        case test_shape_type::geosphere: {
-            tie(shp->triangles, shp->pos) = make_geodesicsphere(5);
-            shp->norm = shp->pos;
-        } break;
-        case test_shape_type::geospheref: {
-            tie(shp->triangles, shp->pos) = make_geodesicsphere(5);
-            facet_shape(shp);
-        } break;
-        case test_shape_type::geospherel: {
-            tie(shp->triangles, shp->pos) = make_geodesicsphere(4);
-            facet_shape(shp);
-        } break;
-        case test_shape_type::cubep: {
-            tie(shp->quads, shp->pos) = make_cube();
-        } break;
-        case test_shape_type::cubes: {
-            tie(shp->quads, shp->pos) = make_cube();
-            for (auto i = 0; i < 4; i++) subdivide_shape_once(shp, true);
+                make_uvflipcapsphere(
+                    (tshp.tesselation < 0) ? 5 : tshp.tesselation, 0.75f);
         } break;
         case test_shape_type::suzanne: {
-            tie(shp->quads, shp->pos) = make_suzanne();
+            tie(shp->quads, shp->pos) =
+                make_suzanne((tshp.tesselation < 0) ? 0 : tshp.tesselation);
         } break;
-        case test_shape_type::suzannes: {
-            tie(shp->quads, shp->pos) = make_suzanne();
-            for (auto i = 0; i < 2; i++) subdivide_shape_once(shp, true);
+        case test_shape_type::cubep: {
+            tie(shp->quads, shp->pos) =
+                make_cube((tshp.tesselation < 0) ? 0 : tshp.tesselation);
         } break;
-        case test_shape_type::cubefv: {
+        case test_shape_type::fvcube: {
             tie(shp->quads_pos, shp->pos, shp->quads_norm, shp->norm,
-                shp->quads_texcoord, shp->texcoord) = make_fvcube();
+                shp->quads_texcoord, shp->texcoord) =
+                make_fvcube((tshp.tesselation < 0) ? 0 : tshp.tesselation);
         } break;
-        case test_shape_type::cubefvs: {
-            tie(shp->quads_pos, shp->pos, shp->quads_norm, shp->norm,
-                shp->quads_texcoord, shp->texcoord) = make_fvcube();
-            for (auto l = 0; l < 4; l++) subdivide_shape_once(shp, true);
-        } break;
-        case test_shape_type::quads: {
+        case test_shape_type::fvsphere: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvquad(0);
-            for (auto i = 0; i < 4; i++) subdivide_shape_once(shp, true);
-        } break;
-        case test_shape_type::spherefv: {
-            tie(shp->quads_pos, shp->pos, shp->quads_norm, shp->norm,
-                shp->quads_texcoord, shp->texcoord) = make_fvsphere(4);
+                make_uvsphere((tshp.tesselation < 0) ? 5 : tshp.tesselation);
         } break;
         case test_shape_type::matball: {
             tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvflipcapsphere(5, 0.75f);
-#if 0
-            auto level = 6;
-            auto usteps = pow2(level + 2), vsteps = pow2(level + 1);
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvhollowcutsphere(usteps, vsteps, 0.75f);
-#endif
+                make_uvflipcapsphere(
+                    (tshp.tesselation < 0) ? 5 : tshp.tesselation, 0.75f);
+            auto shp1 = sgr->shapes.at(1);
+            tie(shp1->quads, shp1->pos, shp1->norm, shp1->texcoord) =
+                make_uvsphere((tshp.tesselation < 0) ? 5 : tshp.tesselation);
+            for (auto& p : shp1->pos) p *= 0.8f;
+            shp1->mat = find_named_elem(scn->materials, tshp.interior);
         } break;
-        case test_shape_type::matballi: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvsphere(5);
-            for (auto& p : shp->pos) p *= 0.8f;
-        } break;
-        case test_shape_type::points: {
-            tie(shp->points, shp->texcoord) = make_uvpoints(64 * 64 * 16);
-            shp->pos.reserve(shp->texcoord.size());
-            shp->norm.resize(shp->texcoord.size(), {0, 0, 1});
-            shp->radius.resize(shp->texcoord.size(), 0.0025f);
-            auto rn = init_rng(0);
-            for (auto i = 0; i < shp->texcoord.size(); i++) {
-                shp->pos += vec3f{-1 + 2 * next_rand1f(rn),
-                    -1 + 2 * next_rand1f(rn), -1 + 2 * next_rand1f(rn)};
-            }
-        } break;
-        case test_shape_type::lines1: {
-            auto nhairs = 65536;
-            // auto nhairs = 32768;
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvspherecube(5);
-            tie(shp->lines, shp->pos, shp->norm, shp->texcoord, shp->radius) =
-                make_hair(nhairs, 2, {0.1f, 0.1f}, {0.001f, 0.0001f}, {},
-                    shp->quads, shp->pos, shp->norm, shp->texcoord, {0.5f, 8});
-            shp->quads.clear();
-        } break;
-        case test_shape_type::lines2: {
-            auto nhairs = 65536;
-            // auto nhairs = 32768;
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvspherecube(5);
-            tie(shp->lines, shp->pos, shp->norm, shp->texcoord, shp->radius) =
-                make_hair(nhairs, 2, {0.1f, 0.1f}, {0.001f, 0.0001f}, {},
-                    shp->quads, shp->pos, shp->norm, shp->texcoord, {},
-                    {0.5f, 128});
-            shp->quads.clear();
-        } break;
-        case test_shape_type::lines3: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvspherecube(4);
-            tie(shp->lines, shp->pos, shp->norm, shp->texcoord, shp->radius) =
-                make_hair(16384, 2, {0.1f, 0.1f}, {0.01f, 0.0001f}, {},
-                    shp->quads, shp->pos, shp->norm, shp->texcoord);
-            shp->quads.clear();
-        } break;
-        case test_shape_type::linesi: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvsphere(5);
-        } break;
-        case test_shape_type::bcircle: {
-            tie(shp->beziers, shp->pos) = make_bezier_circle();
-            shp->subdivision_level = 2;
-        } break;
-        case test_shape_type::plight: {
+        case test_shape_type::point: {
             shp->points.push_back(0);
             shp->pos.push_back({0, 0, 0});
             shp->norm.push_back({0, 0, 1});
             shp->radius.push_back(0.001f);
         } break;
-        case test_shape_type::alight: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvquad(0);
-            for (auto& p : shp->pos) p *= 2;
+        case test_shape_type::pointscube: {
+            auto npoints = (tshp.num < 0) ? 64 * 64 * 16 : tshp.num;
+            auto radius = (tshp.radius < 0) ? 0.0025f : tshp.radius;
+            tie(shp->points, shp->texcoord) = make_uvpoints(npoints);
+            shp->pos.reserve(shp->texcoord.size());
+            shp->norm.resize(shp->texcoord.size(), {0, 0, 1});
+            shp->radius.resize(shp->texcoord.size(), radius);
+            auto rn = init_rng(0);
+            for (auto i = 0; i < shp->texcoord.size(); i++) {
+                shp->pos.push_back(vec3f{-1 + 2 * next_rand1f(rn),
+                    -1 + 2 * next_rand1f(rn), -1 + 2 * next_rand1f(rn)});
+            }
         } break;
-        case test_shape_type::alightt: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvquad(0);
-            for (auto& p : shp->pos) p *= 16;
+        case test_shape_type::hairball: {
+            auto shp1 = sgr->shapes.at(1);
+            tie(shp1->quads, shp1->pos, shp1->norm, shp1->texcoord) =
+                make_uvspherecube(5);
+            shp1->mat = find_named_elem(scn->materials, tshp.interior);
+            auto nhairs = (tshp.num < 0) ? 65536 : tshp.num;
+            // auto radius = (tshp.radius < 0) ? vec2f{0.001f, 0.0001f} :
+            //                                   vec2f{tshp.radius, 0.0001f};
+            tie(shp->lines, shp->pos, shp->norm, shp->texcoord, shp->radius) =
+                make_hair(nhairs, 2, {}, shp1->quads, shp1->pos, shp1->norm,
+                    shp1->texcoord, tshp.hair_params);
         } break;
-        case test_shape_type::alightf: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvquad(0);
-            for (auto& p : shp->pos) p *= 16;
+        case test_shape_type::beziercircle: {
+            tie(shp->beziers, shp->pos) = make_bezier_circle();
+            shp->subdivision_level = 2;
         } break;
-        default: throw runtime_error("bad value");
+        default: throw runtime_error("should not have gotten here");
     }
-    // for (auto& p : shp->pos) p *= scale;
-    return shp;
+
+    if (tshp.scale != 1) {
+        for (auto& p : shp->pos) p *= tshp.scale;
+    }
+
+    for (auto i = 0; i < tshp.subdivision; i++) {
+        subdivide_shape_once(shp, true);
+    }
+
+    if (tshp.faceted) facet_shape(shp);
 }
 
-enum struct test_environment_type {
-    none,
-    sky1,
-    sky2,
-};
+// Makes/updates a test shape.
+void update_test_instance(
+    const scene* scn, instance* ist, const test_instance_params& tist) {
+    if (tist.name == "") throw runtime_error("cannot use empty name");
+    ist->name = tist.name;
+    ist->frame = tist.frame;
+    if (tist.rotation != zero3f) {
+        auto rot = rotation_mat3(vec3f{0, 0, 1}, tist.rotation.z * pif / 180) *
+                   rotation_mat3(vec3f{0, 1, 0}, tist.rotation.y * pif / 180) *
+                   rotation_mat3(vec3f{1, 0, 0}, tist.rotation.x * pif / 180);
+        ist->frame.rot() = ist->frame.rot() * rot;
+    }
+    ist->shp = find_named_elem(scn->shapes, tist.shape);
+}
 
-inline const vector<pair<string, test_environment_type>>&
-test_environment_names() {
-    static auto names = vector<pair<string, test_environment_type>>{
-        {"none", test_environment_type::none},
-        {"sky1", test_environment_type::sky1},
-        {"sky2", test_environment_type::sky2},
+// Makes/updates a test shape
+void update_test_camera(
+    const scene* scn, camera* cam, const test_camera_params& tcam) {
+    if (tcam.name == "") throw runtime_error("cannot use empty name");
+    cam->name = tcam.name;
+    cam->frame = lookat_frame3(tcam.from, tcam.to, vec3f{0, 1, 0});
+    cam->yfov = tcam.yfov;
+    cam->aspect = tcam.aspect;
+    cam->near = 0.01f;
+    cam->far = 10000;
+    cam->aperture = 0;
+    cam->focus = length(tcam.from - tcam.to);
+}
+
+// Makes/updates a test shape
+void update_test_environment(
+    const scene* scn, environment* env, const test_environment_params& tenv) {
+    if (tenv.name == "") throw runtime_error("cannot use empty name");
+    env->name = tenv.name;
+    env->frame = identity_frame3f;
+    if (tenv.rotation) {
+        env->frame = rotation_frame3({0, 1, 0}, tenv.rotation);
+    }
+    env->ke = tenv.emission * tenv.color;
+    env->ke_txt.txt = find_named_elem(scn->textures, tenv.texture);
+}
+
+// Makes/updates a test shape
+void update_test_node(
+    const scene* scn, node* nde, const test_node_params& tnde) {
+    if (tnde.name == "") throw runtime_error("cannot use empty name");
+    nde->name = tnde.name;
+    nde->frame = tnde.frame;
+    nde->translation = tnde.translation;
+    nde->rotation = tnde.rotation;
+    nde->scaling = tnde.scaling;
+    nde->cam = find_named_elem(scn->cameras, tnde.camera);
+    nde->ist = find_named_elem(scn->instances, tnde.instance);
+    nde->env = find_named_elem(scn->environments, tnde.environment);
+}
+
+// Makes/updates a test animation
+void update_test_animation(
+    const scene* scn, animation_group* agr, const test_animation_params& tanm) {
+    if (tanm.name == "") throw runtime_error("cannot use empty name");
+    if (agr->animations.size() != 1) {
+        for (auto v : agr->animations) delete v;
+        agr->animations.clear();
+        agr->animations.push_back(new animation());
+    }
+    agr->name = tanm.name;
+    auto anm = agr->animations.front();
+    anm->name = tanm.name;
+    anm->type = (!tanm.bezier) ? keyframe_type::linear : keyframe_type::bezier;
+    anm->times = tanm.times;
+    for (auto& v : anm->times) v *= tanm.speed;
+    anm->translation = tanm.translation;
+    anm->rotation = tanm.rotation;
+    anm->scaling = tanm.scaling;
+    for (auto& v : anm->translation) v *= tanm.scale;
+    for (auto& v : anm->scaling) v *= tanm.scale;
+    agr->targets.clear();
+    for (auto& nde : tanm.nodes)
+        agr->targets.push_back({anm, find_named_elem(scn->nodes, nde)});
+}
+
+// Update test elements
+template <typename T, typename T1>
+void update_test_scene_elem(scene* scn, vector<T*>& elems,
+    const vector<T1>& telems, void (*update)(const scene*, T*, const T1&),
+    const unordered_set<void*>& refresh) {
+    auto emap = unordered_map<string, T*>();
+    for (auto elem : elems) emap[elem->name] = elem;
+    for (auto& telem : telems) {
+        if (!contains(emap, telem.name)) {
+            elems.push_back(new T());
+            update(scn, elems.back(), telem);
+        } else {
+            auto elem = emap.at(telem.name);
+            if (contains(refresh, elem)) update(scn, elem, telem);
+        }
+    }
+}
+
+// Makes/updates a test scene
+void update_test_scene(scene* scn, const test_scene_params& params,
+    const unordered_set<void*>& refresh) {
+    update_test_scene_elem(
+        scn, scn->cameras, params.cameras, update_test_camera, refresh);
+    update_test_scene_elem(
+        scn, scn->textures, params.textures, update_test_texture, refresh);
+    update_test_scene_elem(
+        scn, scn->materials, params.materials, update_test_material, refresh);
+    update_test_scene_elem(
+        scn, scn->shapes, params.shapes, update_test_shape, refresh);
+    update_test_scene_elem(
+        scn, scn->instances, params.instances, update_test_instance, refresh);
+    update_test_scene_elem(scn, scn->environments, params.environments,
+        update_test_environment, refresh);
+    update_test_scene_elem(
+        scn, scn->nodes, params.nodes, update_test_node, refresh);
+    update_test_scene_elem(scn, scn->animations, params.animations,
+        update_test_animation, refresh);
+}
+
+// remove duplicate elems
+template <typename T>
+void remove_duplicate_elems(vector<T>& telems) {
+    auto names = unordered_set<string>();
+    for (auto& elem : telems) names.insert(elem.name);
+    if (names.size() == telems.size()) return;
+    names.clear();
+    auto ntelems = vector<T>();
+    ntelems.reserve(names.size());
+    for (auto& elem : telems) {
+        if (contains(names, elem.name)) continue;
+        ntelems.push_back(elem);
+        names.insert(elem.name);
+    }
+    telems = ntelems;
+}
+
+// remove duplicates
+void remove_duplicates(test_scene_params& scn) {
+    remove_duplicate_elems(scn.cameras);
+    remove_duplicate_elems(scn.textures);
+    remove_duplicate_elems(scn.materials);
+    remove_duplicate_elems(scn.shapes);
+    remove_duplicate_elems(scn.instances);
+    remove_duplicate_elems(scn.environments);
+}
+
+unordered_map<string, test_texture_params>& test_texture_presets() {
+    static auto presets = unordered_map<string, test_texture_params>();
+    if (!presets.empty()) return presets;
+
+    auto make_test_texture = [](const string& name, test_texture_type type) {
+        auto params = test_texture_params();
+        params.name = name;
+        params.type = type;
+        return params;
     };
-    return names;
+
+    presets["grid"] = make_test_texture("grid", test_texture_type::grid);
+    presets["checker"] =
+        make_test_texture("checker", test_texture_type::checker);
+    presets["colored"] =
+        make_test_texture("colored", test_texture_type::colored);
+    presets["rcolored"] =
+        make_test_texture("rcolored", test_texture_type::rcolored);
+    presets["bump"] = make_test_texture("bump", test_texture_type::bump);
+    presets["bump"].tile_size = 32;
+    presets["tgrid"] = make_test_texture("tgrid", test_texture_type::bump);
+    presets["tgrid"].tile_size = 32;
+    presets["uv"] = make_test_texture("uv", test_texture_type::uv);
+    presets["gamma"] = make_test_texture("gamma", test_texture_type::gamma);
+    presets["gridn"] = make_test_texture("gridn", test_texture_type::grid);
+    presets["gridn"].bump_to_normal = true;
+    presets["gridn"].bump_to_normal = true;
+    presets["gridn"].bump_scale = 4;
+    presets["tgridn"] = make_test_texture("tgridn", test_texture_type::grid);
+    presets["tgridn"].tile_size = 32;
+    presets["tgridn"].bump_to_normal = true;
+    presets["tgridn"].bump_to_normal = true;
+    presets["tgridn"].bump_scale = 4;
+    presets["bumpn"] = make_test_texture("bumpn", test_texture_type::bump);
+    presets["bumpn"].tile_size = 32;
+    presets["bumpn"].bump_to_normal = true;
+    presets["bumpn"].bump_scale = 4;
+    presets["noise"] = make_test_texture("noise", test_texture_type::noise);
+    presets["ridge"] = make_test_texture("ridge", test_texture_type::ridge);
+    presets["fbm"] = make_test_texture("fbm", test_texture_type::fbm);
+    presets["turbulence"] =
+        make_test_texture("turbulence", test_texture_type::turbulence);
+
+    presets["gammaf"] = make_test_texture("gammaf", test_texture_type::gammaf);
+    presets["sky1"] = make_test_texture("sky1", test_texture_type::sky);
+    presets["sky1"].sky_sunangle = pif / 4;
+    presets["sky2"] = make_test_texture("sky2", test_texture_type::sky);
+    presets["sky2"].sky_sunangle = pif / 2;
+
+    return presets;
 }
 
-inline environment* add_test_environment(
-    scene* scn, test_environment_type type, const frame3f& frame) {
-    if (type == test_environment_type::none) return nullptr;
-    auto name = ""s;
-    for (auto kv : test_environment_names())
-        if (kv.second == type) name += kv.first;
-    for (auto env : scn->environments)
-        if (env->name == name) return env;
-    auto env = new environment();
-    env->name = name;
-    scn->environments += env;
+unordered_map<string, test_material_params>& test_material_presets() {
+    static auto presets = unordered_map<string, test_material_params>();
+    if (!presets.empty()) return presets;
 
-    switch (type) {
-        case test_environment_type::sky1: {
-            env->ke = {1, 1, 1};
-            env->ke_txt.txt = add_test_texture(scn, test_texture_type::sky1);
-        } break;
-        case test_environment_type::sky2: {
-            env->ke = {1, 1, 1};
-            env->ke_txt.txt = add_test_texture(scn, test_texture_type::sky2);
-        } break;
-        default: throw runtime_error("bad type");
-    }
+    auto make_test_material = [](const string& name, test_material_type type,
+                                  const vec3f& color, float roughness = 1) {
+        auto params = test_material_params();
+        params.name = name;
+        params.type = type;
+        params.color = color;
+        params.roughness = roughness;
+        return params;
+    };
+    auto make_test_materialt = [](const string& name, test_material_type type,
+                                   const string& txt, float roughness = 1) {
+        auto params = test_material_params();
+        params.name = name;
+        params.type = type;
+        params.color = {1, 1, 1};
+        params.roughness = roughness;
+        params.texture = txt;
+        return params;
+    };
 
-    return env;
+    auto emission = test_material_type::emission;
+    auto matte = test_material_type::matte;
+    auto plastic = test_material_type::plastic;
+    auto metal = test_material_type::metal;
+    auto transparent = test_material_type::transparent;
+
+    auto gray = vec3f{0.2f, 0.2f, 0.2f};
+    auto lgray = vec3f{0.5f, 0.5f, 0.5f};
+    auto red = vec3f{0.5f, 0.2f, 0.2f};
+    auto green = vec3f{0.2f, 0.5f, 0.2f};
+    auto blue = vec3f{0.2f, 0.2f, 0.5f};
+    auto white = vec3f{1, 1, 1};
+
+    auto gold = vec3f{0.66f, 0.45f, 0.34f};
+
+    auto rough = 0.25f;
+    auto sharp = 0.05f;
+
+    auto params = vector<test_material_params>();
+
+    presets["matte_floor"] = make_test_materialt("matte_floor", matte, "grid");
+
+    presets["matte_gray"] = make_test_material("matte_gray", matte, gray);
+    presets["matte_red"] = make_test_material("matte_red", matte, red);
+    presets["matte_green"] = make_test_material("matte_green", matte, green);
+    presets["matte_blue"] = make_test_material("matte_blue", matte, blue);
+    presets["matte_grid"] = make_test_materialt("matte_grid", matte, "grid");
+    presets["matte_colored"] =
+        make_test_materialt("matte_colored", matte, "colored");
+    presets["matte_uv"] = make_test_materialt("matte_uv", matte, "uv");
+
+    presets["plastic_red"] =
+        make_test_material("plastic_red", plastic, red, rough);
+    presets["plastic_green"] =
+        make_test_material("plastic_green", plastic, green, rough);
+    presets["plastic_blue"] =
+        make_test_material("plastic_blue", plastic, blue, sharp);
+    presets["plastic_colored"] =
+        make_test_materialt("plastic_colored", plastic, "colored", rough);
+    presets["plastic_blue_bumped"] =
+        make_test_material("plastic_blue_bumped", plastic, blue, sharp);
+    presets["plastic_blue_bumped"].normal = "bumpn";
+    presets["plastic_colored_bumped"] = make_test_materialt(
+        "plastic_colored_bumped", plastic, "colored", rough);
+    presets["plastic_colored_bumped"].normal = "bumpn";
+
+    presets["silver_sharp"] =
+        make_test_material("silver_sharp", metal, lgray, sharp);
+    presets["silver_rough"] =
+        make_test_material("silver_rough", metal, lgray, rough);
+    presets["gold_sharp"] =
+        make_test_material("gold_sharp", metal, gold, sharp);
+    presets["gold_rough"] =
+        make_test_material("gold_rough", metal, gold, rough);
+
+    presets["transparent_red"] =
+        make_test_material("transparent_red", transparent, red);
+    presets["transparent_red"].opacity = 0.9f;
+    presets["transparent_green"] =
+        make_test_material("transparent_green", transparent, green);
+    presets["transparent_green"].opacity = 0.5f;
+    presets["transparent_blue"] =
+        make_test_material("transparent_blue", transparent, blue);
+    presets["transparent_blue"].opacity = 0.2f;
+
+    presets["pointlight"] = make_test_material("pointlight", emission, white);
+    presets["pointlight"].emission = 80;
+    presets["arealight"] = make_test_material("arealight", emission, white);
+    presets["arealight"].emission = 80;
+
+    return presets;
 }
 
-instance* add_test_instance(scene* scn, test_shape_type stype,
-    test_material_type mtype, const frame3f& frame) {
-    auto ist = new instance();
-    ist->shp = add_test_shape(scn, stype, mtype);
-    auto count = 0;
-    for (auto ist2 : scn->instances)
-        if (ist->shp == ist2->shp) count++;
-    ist->name = ist->shp->name + ((count) ? "!" + to_string(count + 1) : ""s);
-    ist->frame = frame;
-    scn->instances += ist;
-    return ist;
+unordered_map<string, test_shape_params>& test_shape_presets() {
+    static auto presets = unordered_map<string, test_shape_params>();
+    if (!presets.empty()) return presets;
+
+    auto make_test_shape = [](const string& name, test_shape_type type,
+                               int tesselation = -1, int subdivision = 0,
+                               bool faceted = false) {
+        auto params = test_shape_params();
+        params.name = name;
+        params.type = type;
+        params.tesselation = tesselation;
+        params.subdivision = subdivision;
+        params.faceted = faceted;
+        return params;
+    };
+
+    presets["floor"] = make_test_shape("floor", test_shape_type::floor);
+    presets["quad"] = make_test_shape("quad", test_shape_type::quad);
+    presets["cube"] = make_test_shape("cube", test_shape_type::cube);
+    presets["sphere"] = make_test_shape("sphere", test_shape_type::sphere);
+    presets["spherecube"] =
+        make_test_shape("spherecube", test_shape_type::spherecube);
+    presets["spherizedcube"] =
+        make_test_shape("spherizedcube", test_shape_type::spherizedcube);
+    presets["flipcapsphere"] =
+        make_test_shape("flipcapsphere", test_shape_type::flipcapsphere);
+    presets["geosphere"] =
+        make_test_shape("geosphere", test_shape_type::geosphere, 5);
+    presets["geospheref"] =
+        make_test_shape("geospheref", test_shape_type::geosphere, 5, 0, true);
+    presets["geospherel"] =
+        make_test_shape("geospherel", test_shape_type::geosphere, 4, 0, true);
+    presets["cubep"] = make_test_shape("cubep", test_shape_type::cubep);
+    presets["cubes"] = make_test_shape("cubes", test_shape_type::cubep, 0, 4);
+    presets["suzanne"] = make_test_shape("suzanne", test_shape_type::suzanne);
+    presets["suzannes"] =
+        make_test_shape("suzannes", test_shape_type::suzanne, 0, 2);
+    presets["cubefv"] = make_test_shape("cubefv", test_shape_type::fvcube);
+    presets["cubefvs"] =
+        make_test_shape("cubefvs", test_shape_type::fvcube, 0, 4);
+    presets["spherefv"] =
+        make_test_shape("spherefv", test_shape_type::fvsphere);
+    presets["matball"] = make_test_shape("matball", test_shape_type::matball);
+    presets["matballi"] = make_test_shape("matballi", test_shape_type::sphere);
+    presets["matballi"].scale = 0.8f;
+    presets["pointscube"] =
+        make_test_shape("pointscube", test_shape_type::pointscube);
+    presets["hairball1"] =
+        make_test_shape("hairball1", test_shape_type::hairball);
+    presets["hairball1"].hair_params.radius = {0.001f, 0.0001f};
+    presets["hairball1"].hair_params.length = {0.1f, 0.1f};
+    presets["hairball1"].hair_params.noise = {0.5f, 8};
+    presets["hairball2"] =
+        make_test_shape("hairball2", test_shape_type::hairball);
+    presets["hairball2"].hair_params.radius = {0.001f, 0.0001f};
+    presets["hairball2"].hair_params.length = {0.1f, 0.1f};
+    presets["hairball2"].hair_params.clump = {0.5f, 128};
+    presets["hairball3"] =
+        make_test_shape("hairball3", test_shape_type::hairball);
+    presets["hairball3"].hair_params.radius = {0.001f, 0.0001f};
+    presets["hairball3"].hair_params.length = {0.1f, 0.1f};
+    presets["hairballi"] =
+        make_test_shape("hairballi", test_shape_type::sphere);
+    presets["hairballi"].scale = 0.8f;
+    presets["beziercircle"] =
+        make_test_shape("beziercircle", test_shape_type::beziercircle);
+    presets["point"] = make_test_shape("point", test_shape_type::point);
+
+    return presets;
 }
 
-instance* add_test_instance(scene* scn, test_shape_type stype,
-    test_material_type mtype, const vec3f& pos, const vec3f& rot = {0, 0, 0}) {
-    return add_test_instance(scn, stype, mtype,
-        {rotation_mat3f(vec3f{0, 0, 1}, rot[2] * pif / 180) *
-                rotation_mat3f(vec3f{0, 1, 0}, rot[1] * pif / 180) *
-                rotation_mat3f(vec3f{1, 0, 0}, rot[0] * pif / 180),
-            pos});
+unordered_map<string, test_environment_params>& test_environment_presets() {
+    static auto presets = unordered_map<string, test_environment_params>();
+    if (!presets.empty()) return presets;
+
+    auto make_test_environment = [](const string& name, const string& texture) {
+        auto params = test_environment_params();
+        params.name = name;
+        params.color = {1, 1, 1};
+        params.texture = texture;
+        return params;
+    };
+
+    presets["const"] = make_test_environment("const", "");
+    presets["sky1"] = make_test_environment("sky1", "sky1");
+    presets["sky2"] = make_test_environment("sky2", "sky2");
+
+    return presets;
 }
 
-enum struct test_light_type {
-    none,
-    pointlight,
-    arealight,
-    arealight1,
-    envlight
-};
+unordered_map<string, test_animation_params>& test_animation_presets() {
+    static auto presets = unordered_map<string, test_animation_params>();
+    if (!presets.empty()) return presets;
 
-inline const vector<pair<string, test_light_type>>& test_light_names() {
-    static auto names =
-        vector<pair<string, test_light_type>>{{"none", test_light_type::none},
-            {"pointlight", test_light_type::pointlight},
-            {"arealight", test_light_type::arealight},
-            {"arealight1", test_light_type::arealight1},
-            {"envlight", test_light_type::envlight}};
-    return names;
+    auto make_test_animation =
+        [](const string& name, bool bezier, const vector<float>& times,
+            const vector<vec3f>& translation, const vector<quat4f>& rotation,
+            const vector<vec3f>& scaling) {
+            auto params = test_animation_params();
+            params.name = name;
+            params.speed = 1;
+            params.scale = 1;
+            params.bezier = bezier;
+            params.times = times;
+            params.translation = translation;
+            params.rotation = rotation;
+            params.scaling = scaling;
+            return params;
+        };
+
+    presets["bounce"] = make_test_animation(
+        "bounce", false, {0, 1, 2}, {{0, 0, 0}, {0, 1, 0}, {0, 0, 0}}, {}, {});
+    presets["scale"] = make_test_animation("scale", false, {0, 1, 2}, {}, {},
+        {{1, 1, 1}, {0.1f, 0.1f, 0.1f}, {1, 1, 1}});
+    presets["rotation"] = make_test_animation("rotation", false, {0, 1, 2}, {},
+        {{{0, 1, 0}, 0}, {{0, 1, 0}, pif}, {{0, 1, 0}, 0}}, {});
+
+    return presets;
 }
 
-tuple<vector<instance*>, environment*> add_test_lights(
-    scene* scn, test_light_type type) {
-    auto ists = vector<instance*>{};
-    auto env = (environment*)nullptr;
-    switch (type) {
-        case test_light_type::none: break;
-        case test_light_type::pointlight: {
-            ists.push_back(add_test_instance(scn, test_shape_type::plight,
-                test_material_type::light_point, {-2, 10, 8}));
-            ists.push_back(add_test_instance(scn, test_shape_type::plight,
-                test_material_type::light_point, {+2, 10, 8}));
-        } break;
-        case test_light_type::arealight: {
-            ists.push_back(add_test_instance(scn, test_shape_type::alight,
-                test_material_type::light_area,
-                lookat_frame3f({-4, 5, 8}, {0, 3, 0}, {0, 1, 0}, true)));
-            ists.push_back(add_test_instance(scn, test_shape_type::alight,
-                test_material_type::light_area,
-                lookat_frame3f({+4, 5, 8}, {0, 3, 0}, {0, 1, 0}, true)));
-        } break;
-        case test_light_type::arealight1: {
-            ists.push_back(add_test_instance(scn, test_shape_type::alightt,
-                test_material_type::light_areat,
-                lookat_frame3f({0, 64, 0}, {0, 1, 0}, {0, 0, 1}, true)));
-            ists.push_back(add_test_instance(scn, test_shape_type::alightf,
-                test_material_type::light_areaf,
-                lookat_frame3f({0, 64, 64}, {0, 1, 0}, {0, 1, 0}, true)));
-        } break;
-        case test_light_type::envlight: {
-            env = add_test_environment(scn, test_environment_type::sky1,
-                lookat_frame3f({0, 1, 0}, {0, 1, 1}, {0, 1, 0}, true));
-        } break;
-        default: throw runtime_error("bad value");
-    }
-    return tuple<vector<instance*>, environment*>{ists, env};
+unordered_map<string, test_camera_params>& test_camera_presets() {
+    static auto presets = unordered_map<string, test_camera_params>();
+    if (!presets.empty()) return presets;
+
+    auto make_test_camera = [](const string& name, const vec3f& from,
+                                const vec3f& to, float yfov, float aspect) {
+        auto params = test_camera_params();
+        params.name = name;
+        params.from = from;
+        params.to = to;
+        params.yfov = yfov;
+        params.aspect = aspect;
+        return params;
+    };
+
+    presets["cam1"] =
+        make_test_camera("cam1", {0, 4, 10}, {0, 1, 0}, 15 * pif / 180, 1);
+    presets["cam2"] = make_test_camera(
+        "cam2", {0, 4, 10}, {0, 1, 0}, 15 * pif / 180, 16.0f / 9.0f);
+    presets["cam3"] = make_test_camera(
+        "cam3", {0, 6, 24}, {0, 1, 0}, 7.5f * pif / 180, 2.35f / 1.0f);
+
+    return presets;
 }
 
-enum struct test_camera_type { none, cam1, cam2, cam3 };
+unordered_map<string, test_scene_params>& test_scene_presets() {
+    static auto presets = unordered_map<string, test_scene_params>();
+    if (!presets.empty()) return presets;
 
-inline const vector<pair<string, test_camera_type>>& test_camera_names() {
-    static auto names = vector<pair<string, test_camera_type>>{
-        {"none", test_camera_type::none}, {"cam1", test_camera_type::cam1},
-        {"cam2", test_camera_type::cam2}, {"cam3", test_camera_type::cam3}};
-    return names;
-}
+    auto make_test_scene = [](const string& name) {
+        auto params = test_scene_params();
+        params.name = name;
+        return params;
+    };
+    auto make_test_instance = [](const string& name, const string& shape,
+                                  const vec3f& pos = {0, 0, 0}) {
+        auto params = test_instance_params();
+        params.name = name;
+        params.shape = shape;
+        params.frame.o = pos;
+        return params;
+    };
 
-camera* add_test_camera(scene* scn, test_camera_type type) {
-    if (type == test_camera_type::none) return nullptr;
-    auto name = ""s;
-    for (auto kv : test_camera_names())
-        if (kv.second == type) name = kv.first;
-    for (auto cam : scn->cameras)
-        if (cam->name == name) return cam;
-    auto cam = new camera();
-    cam->name = name;
-    scn->cameras += cam;
-    switch (type) {
-        case test_camera_type::cam1: {
-            cam->frame = lookat_frame3f({0, 4, 10}, {0, 1, 0}, {0, 1, 0});
-            cam->focus = length(vec3f{0, 4, 10} - vec3f{0, 1, 0});
-            cam->yfov = 15 * pif / 180;
-            cam->aperture = 0;
-            cam->aspect = 1;
-        } break;
-        case test_camera_type::cam2: {
-            cam->frame = lookat_frame3f({0, 4, 10}, {0, 1, 0}, {0, 1, 0});
-            cam->focus = length(vec3f{0, 4, 10} - vec3f{0, 1, 0});
-            cam->yfov = 15 * pif / 180;
-            cam->aperture = 0;
-            cam->aspect = 16.0f / 9.0f;
-        } break;
-        case test_camera_type::cam3: {
-            cam->frame = lookat_frame3f({0, 6, 24}, {0, 1, 0}, {0, 1, 0});
-            cam->focus = length(vec3f{0, 6, 24} - vec3f{0, 1, 0});
-            cam->yfov = 7.5f * pif / 180;
-            cam->aperture = 0;
-            cam->aspect = 2.35f / 1.0f;  // widescreen cinema
-        } break;
-        default: throw runtime_error("bad value");
-    }
-    return cam;
-}
+    // textures
+    presets["textures"] = make_test_scene("textures");
+    for (auto& txt_kv : test_texture_presets())
+        presets["textures"].textures.push_back(txt_kv.second);
 
-scene* make_simple_test_scene(test_camera_type ctype,
-    const vector<pair<test_shape_type, test_material_type>>& otypes,
-    test_light_type ltype,
-    const vector<pair<test_shape_type, test_material_type>>& itypes = {},
-    bool rotate = false,
-    test_material_type fmat = test_material_type::matte_grid) {
-    auto scn = new scene();
-    add_test_camera(scn, ctype);
-    add_test_lights(scn, ltype);
+    // shapes
+    presets["shapes"] = make_test_scene("shapes");
+    for (auto& shp_kv : test_shape_presets())
+        presets["shapes"].shapes.push_back(shp_kv.second);
 
-    if (fmat != test_material_type::none) {
-        add_test_instance(scn, test_shape_type::floor, fmat, identity_frame3f);
-    }
+    // envmap
+    presets["environments"] = make_test_scene("envmaps");
+    for (auto& env_kv : test_environment_presets())
+        presets["environments"].environments.push_back(env_kv.second);
 
-    auto frames = std::vector<frame3f>{
-        identity_frame3f, identity_frame3f, identity_frame3f};
-    for (auto fi : enumerate(frames)) {
-        auto& f = fi.second;
-        if (otypes.size() == 2) f.o.x = vector<float>{-1.25f, +1.25f}[fi.first];
-        if (otypes.size() == 3)
-            f.o.x = vector<float>{-2.50f, 0, +2.50f}[fi.first];
-        f.o.y = 1;
-        if (rotate)
-            f = lookat_frame3f(f.o, f.o + vec3f{1, 1, 1}, {0, 1, 0}, true);
-    }
-
-    for (auto i : range(otypes.size())) {
-        add_test_instance(scn, otypes[i].first, otypes[i].second, frames[i]);
-        if (itypes.empty()) continue;
-        add_test_instance(scn, itypes[i].first, itypes[i].second, frames[i]);
-    }
-
-    return scn;
-}
-
-scene* make_instance_scene(
-    const vec2i& num, const bbox2f& bbox, uint32_t seed = 13) {
-    auto scn = new scene();
-    add_test_camera(scn, test_camera_type::cam3);
-    add_test_instance(
-        scn, test_shape_type::floor, test_material_type::matte_gray, {0, 0, 0});
-    add_test_lights(scn, test_light_type::pointlight);
-
-    auto mtypes = vector<test_material_type>{test_material_type::plastic_red,
-        test_material_type::plastic_green, test_material_type::plastic_blue};
-    auto stypes = vector<test_shape_type>{test_shape_type::sphere,
-        test_shape_type::flipcapsphere, test_shape_type::cube};
-
-    auto rscale = 0.9f * 0.25f *
-                  min((bbox.max.x - bbox.min.x) / num.x,
-                      (bbox.max.x - bbox.min.x) / num.y);
-    auto rng = init_rng(seed, 7);
-    auto shps = unordered_set<shape*>();
-    for (auto j = 0; j < num.y; j++) {
-        for (auto i = 0; i < num.x; i++) {
-            auto rpos = next_rand2f(rng);
-            auto pos = vec3f{
-                bbox.min.x + (bbox.max.x - bbox.min.x) *
-                                 (i + 0.45f + 0.1f * rpos.x) / num.x,
-                rscale,
-                bbox.min.y + (bbox.max.y - bbox.min.y) *
-                                 (j + 0.45f + 0.1f * rpos.y) / num.y,
-            };
-            auto ist =
-                add_test_instance(scn, stypes[next_rand1i(rng, stypes.size())],
-                    mtypes[next_rand1i(rng, mtypes.size())],
-                    {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, pos});
-            shps.insert(ist->shp);
+    // simple scenes shared functions
+    auto make_simple_scene = [&](const string& name,
+                                 const vector<string>& shapes,
+                                 const vector<string>& mats,
+                                 const string& lights, bool nodes = false,
+                                 const vector<string>& animations = {}) {
+        auto pos = vector<vec3f>{{-2.50f, 1, 0}, {0, 1, 0}, {+2.50f, 1, 0}};
+        auto params = make_test_scene(name);
+        params.cameras.push_back(test_camera_presets().at("cam3"));
+        params.materials.push_back(test_material_presets().at("matte_floor"));
+        if (params.materials.back().texture != "")
+            params.textures.push_back(
+                test_texture_presets().at(params.materials.back().texture));
+        params.shapes.push_back(test_shape_presets().at("floor"));
+        params.shapes.back().material = params.materials.back().name;
+        params.instances.push_back(
+            make_test_instance("floor", "floor", {0, 0, 0}));
+        for (auto i = 0; i < shapes.size(); i++) {
+            auto name = "obj" + to_string(i + 1);
+            params.materials.push_back(test_material_presets().at(mats[i]));
+            params.shapes.push_back(test_shape_presets().at(shapes[i]));
+            params.shapes.back().name = name;
+            params.shapes.back().material = mats[i];
+            if (params.shapes.back().type == test_shape_type::hairball ||
+                params.shapes.back().type == test_shape_type::matball) {
+                params.materials.push_back(
+                    test_material_presets().at("matte_gray"));
+                params.shapes.back().interior = "matte_gray";
+            }
+            params.instances.push_back(make_test_instance(name, name, pos[i]));
+            if (!animations.empty()) {
+                params.animations.push_back(
+                    test_animation_presets().at(animations[i]));
+                params.animations.back().nodes.push_back(name);
+            }
         }
-    }
+        if (lights == "pointlights" || lights == "arealights" ||
+            lights == "arealights1") {
+            auto emission = 120;
+            auto shp = "point";
+            auto mat = "pointlight";
+            auto pos = vector<vec3f>{{-2, 10, 8}, {+2, 10, 8}};
+            auto scale = 1.0f;
+            if (lights == "arealights") {
+                emission = 8;
+                shp = "quad";
+                mat = "arealight";
+                pos = {{0, 16, 0}, {0, 16, 16}};
+                scale = 8;
+            }
+            if (lights == "arealights1") {
+                emission = 80;
+                shp = "quad";
+                mat = "arealight";
+                pos = {{-4, 5, 8}, {+4, 5, 8}};
+                scale = 2;
+            }
+            for (auto i = 0; i < 2; i++) {
+                auto name = "light" + to_string(i + 1);
+                params.materials.push_back(test_material_presets().at(mat));
+                params.materials.back().name = name;
+                params.materials.back().emission = emission;
+                params.shapes.push_back(test_shape_presets().at(shp));
+                params.shapes.back().name = name;
+                params.shapes.back().material = name;
+                params.shapes.back().scale = scale;
+                params.instances.push_back(
+                    make_test_instance(name, name, pos[i]));
+                if (lights == "arealights" || lights == "arealights1")
+                    params.instances.back().frame =
+                        lookat_frame3(pos[i], {0, 1, 0}, {0, 0, 1}, true);
+            }
+        }
+        if (lights == "envlights") {
+            params.environments.push_back(
+                test_environment_presets().at("sky1"));
+            params.environments.back().frame =
+                lookat_frame3(pos[1], pos[1] + vec3f{0, 0, 1}, {0, 1, 0}, true);
+            params.textures.push_back(test_texture_presets().at("sky1"));
+        }
+        if (!animations.empty() || nodes) {
+            for (auto& cam : params.cameras) {
+                auto nde = test_node_params();
+                nde.name = cam.name;
+                nde.frame = lookat_frame3(cam.from, cam.to, vec3f{0, 1, 0});
+                nde.camera = cam.name;
+                params.nodes.push_back(nde);
+            }
+            for (auto& ist : params.instances) {
+                auto nde = test_node_params();
+                nde.name = ist.name;
+                nde.frame = ist.frame;
+                nde.instance = ist.name;
+                params.nodes.push_back(nde);
+            }
+            for (auto& env : params.environments) {
+                auto nde = test_node_params();
+                nde.name = env.name;
+                nde.frame = env.frame;
+                nde.environment = env.name;
+                params.nodes.push_back(nde);
+            }
+        }
+        return params;
+    };
 
-    for (auto shp : shps) {
-        for (auto& p : shp->pos) p *= rscale;
-    }
+    // plane only
+    presets["plane_pl"] = make_simple_scene("plane_pl", {}, {}, "pointlights");
+    presets["plane_al"] = make_simple_scene("plane_al", {}, {}, "arealights");
 
-    return scn;
-}
+    // basic shapes
+    presets["basic_pl"] = make_simple_scene("basic_pl",
+        {"flipcapsphere", "spherecube", "spherizedcube"},
+        {"plastic_red", "plastic_green", "plastic_blue"}, "arealights");
 
-scene* make_test_scene(test_scene_type otype) {
-    switch (otype) {
-        case test_scene_type::cornell_box: {
-            return make_cornell_box_scene();
-        } break;
-        case test_scene_type::textures: {
-            auto scn = new scene();
-            for (auto ttype : test_texture_names())
-                add_test_texture(scn, ttype.second);
-            return scn;
-        } break;
-        case test_scene_type::shapes: {
-            auto scn = new scene();
-            for (auto stype : {test_shape_type::quad, test_shape_type::cube,
-                     test_shape_type::sphere, test_shape_type::spherecube,
-                     test_shape_type::spherizedcube,
-                     test_shape_type::flipcapsphere, test_shape_type::geosphere,
-                     test_shape_type::geospheref, test_shape_type::cubes,
-                     test_shape_type::suzanne, test_shape_type::suzannes,
-                     test_shape_type::cubefv, test_shape_type::cubefvs,
-                     test_shape_type::quads, test_shape_type::spherefv,
-                     test_shape_type::matball, test_shape_type::matballi,
-                     test_shape_type::bcircle})
-                add_test_shape(scn, stype, test_material_type::none);
-            return scn;
-        } break;
-        case test_scene_type::instances_pl: {
-            return make_instance_scene({10, 10}, {{-3, -3}, {3, 3}});
-        } break;
-        case test_scene_type::instancel_pl: {
-            return make_instance_scene({100, 100}, {{-3, -3}, {3, 3}});
-        } break;
-        case test_scene_type::plane_al: {
-            return make_simple_test_scene(
-                test_camera_type::cam3, {}, test_light_type::arealight);
-        } break;
-        case test_scene_type::nothing_el: {
-            return make_simple_test_scene(test_camera_type::cam3, {},
-                test_light_type::envlight, {}, false, test_material_type::none);
-        } break;
-        case test_scene_type::basic_pl: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::plastic_red},
-                    {test_shape_type::spherecube,
-                        test_material_type::plastic_green},
-                    {test_shape_type::spherizedcube,
-                        test_material_type::plastic_blue},
-                },
-                test_light_type::pointlight);
-        } break;
-        case test_scene_type::simple_pl: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::plastic_colored},
-                    {test_shape_type::spherecube,
-                        test_material_type::plastic_colored},
-                    {test_shape_type::spherizedcube,
-                        test_material_type::plastic_colored},
-                },
-                test_light_type::pointlight);
-        } break;
-        case test_scene_type::simple_al: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::plastic_colored},
-                    {test_shape_type::spherecube,
-                        test_material_type::plastic_colored},
-                    {test_shape_type::spherizedcube,
-                        test_material_type::plastic_colored},
-                },
-                test_light_type::arealight1);
-        } break;
-        case test_scene_type::simple_el: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::plastic_colored},
-                    {test_shape_type::spherecube,
-                        test_material_type::plastic_colored},
-                    {test_shape_type::spherizedcube,
-                        test_material_type::plastic_colored},
-                },
-                test_light_type::envlight);
-        } break;
-        case test_scene_type::transparent_al: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::quad,
-                        test_material_type::transparent_red},
-                    {test_shape_type::quad,
-                        test_material_type::transparent_green},
-                    {test_shape_type::quad,
-                        test_material_type::transparent_blue},
-                },
-                test_light_type::arealight1);
-        } break;
-        case test_scene_type::points_al: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::points, test_material_type::matte_gray},
-                    {test_shape_type::points, test_material_type::matte_gray},
-                    {test_shape_type::points, test_material_type::matte_gray},
-                },
-                test_light_type::arealight);
-        } break;
-        case test_scene_type::lines_al: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::lines1, test_material_type::matte_gray},
-                    {test_shape_type::lines2, test_material_type::matte_gray},
-                    {test_shape_type::lines2, test_material_type::matte_gray},
-                },
-                test_light_type::arealight1,
-                {
-                    {test_shape_type::linesi, test_material_type::matte_gray},
-                    {test_shape_type::linesi, test_material_type::matte_gray},
-                    {test_shape_type::linesi, test_material_type::matte_gray},
-                });
-        } break;
-        case test_scene_type::subdiv_al: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::cubes, test_material_type::plastic_red},
-                    {test_shape_type::suzannes,
-                        test_material_type::plastic_green},
-                    {test_shape_type::suzannes,
-                        test_material_type::plastic_blue},
-                },
-                test_light_type::arealight1);
-        } break;
-        case test_scene_type::plastics_al: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::matball, test_material_type::matte_green},
-                    {test_shape_type::matball,
-                        test_material_type::plastic_green},
-                    {test_shape_type::matball,
-                        test_material_type::plastic_colored},
-                },
-                test_light_type::arealight1,
-                {{test_shape_type::matballi, test_material_type::matte_gray},
-                    {test_shape_type::matballi, test_material_type::matte_gray},
-                    {test_shape_type::matballi,
-                        test_material_type::matte_gray}});
-        } break;
-        case test_scene_type::plastics_el: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::matball, test_material_type::matte_green},
-                    {test_shape_type::matball,
-                        test_material_type::plastic_green},
-                    {test_shape_type::matball,
-                        test_material_type::plastic_colored},
-                },
-                test_light_type::envlight,
-                {{test_shape_type::matballi, test_material_type::matte_gray},
-                    {test_shape_type::matballi, test_material_type::matte_gray},
-                    {test_shape_type::matballi,
-                        test_material_type::matte_gray}});
-        } break;
-        case test_scene_type::metals_al: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::matball, test_material_type::gold_rough},
-                    {test_shape_type::matball, test_material_type::gold_mirror},
-                    {test_shape_type::matball,
-                        test_material_type::silver_mirror},
-                },
-                test_light_type::arealight1,
-                {{test_shape_type::matballi, test_material_type::matte_gray},
-                    {test_shape_type::matballi, test_material_type::matte_gray},
-                    {test_shape_type::matballi,
-                        test_material_type::matte_gray}});
-        } break;
-        case test_scene_type::metals_el: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::matball, test_material_type::gold_rough},
-                    {test_shape_type::matball, test_material_type::gold_mirror},
-                    {test_shape_type::matball,
-                        test_material_type::silver_mirror},
-                },
-                test_light_type::envlight,
-                {{test_shape_type::matballi, test_material_type::matte_gray},
-                    {test_shape_type::matballi, test_material_type::matte_gray},
-                    {test_shape_type::matballi,
-                        test_material_type::matte_gray}});
-        } break;
-        case test_scene_type::tesselation_pl: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::geospherel,
-                        test_material_type::matte_gray},
-                    {test_shape_type::geospheref,
-                        test_material_type::matte_gray},
-                    {test_shape_type::geosphere,
-                        test_material_type::matte_gray},
-                },
-                test_light_type::pointlight);
-        } break;
-        case test_scene_type::textureuv_pl: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::matte_green},
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::matte_colored},
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::matte_uv},
-                },
-                test_light_type::pointlight);
-        } break;
-        case test_scene_type::normalmap_pl: {
-            return make_simple_test_scene(test_camera_type::cam3,
-                {
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::plastic_blue},
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::plastic_bumped},
-                    {test_shape_type::flipcapsphere,
-                        test_material_type::plastic_bumped},
-                },
-                test_light_type::pointlight);
-        } break;
+    // simple shapes
+    presets["simple_pl"] = make_simple_scene("simple_pl",
+        {"flipcapsphere", "spherecube", "spherizedcube"},
+        {"plastic_colored", "plastic_colored", "plastic_colored"},
+        "pointlights");
+    presets["simple_al"] = make_simple_scene("simple_al",
+        {"flipcapsphere", "spherecube", "spherizedcube"},
+        {"plastic_colored", "plastic_colored", "plastic_colored"},
+        "arealights");
+    presets["simple_el"] = make_simple_scene("simple_el",
+        {"flipcapsphere", "spherecube", "spherizedcube"},
+        {"plastic_colored", "plastic_colored", "plastic_colored"}, "envlights");
+
+    // transparent shapes
+    presets["transparent_al"] =
+        make_simple_scene("transparent_al", {"quad", "quad", "quad"},
+            {"transparent_red", "transparent_green", "transparent_blue"},
+            "arealights");
+
+    // points shapes
+    presets["points_al"] = make_simple_scene("transparent_al",
+        {"pointscube", "pointscube", "pointscube"},
+        {"matte_gray", "matte_gray", "matte_gray"}, "arealights");
+
+    // lines shapes
+    presets["lines_al"] =
+        make_simple_scene("lines_al", {"hairball1", "hairball2", "hairball3"},
+            {"matte_gray", "matte_gray", "matte_gray"}, "arealights");
+
+    // subdiv shapes
+    presets["subdiv_al"] =
+        make_simple_scene("subdiv_al", {"cubes", "suzannes", "suzannes"},
+            {"plastic_red", "plastic_green", "plastic_blue"}, "arealights");
+
+    // plastics shapes
+    presets["plastics_al"] =
+        make_simple_scene("plastics_al", {"matball", "matball", "matball"},
+            {"matte_green", "plastic_green", "plastic_colored"}, "arealights",
+            true);
+    presets["plastics_el"] =
+        make_simple_scene("plastics_el", {"matball", "matball", "matball"},
+            {"matte_green", "plastic_green", "plastic_colored"}, "envlights");
+
+    // metals shapes
+    presets["metals_al"] =
+        make_simple_scene("metals_al", {"matball", "matball", "matball"},
+            {"gold_rough", "gold_sharp", "silver_sharp"}, "arealights");
+    presets["metals_el"] =
+        make_simple_scene("metals_el", {"matball", "matball", "matball"},
+            {"gold_rough", "gold_sharp", "silver_sharp"}, "envlights");
+
+    // tesselation shapes
+    presets["tesselation_pl"] = make_simple_scene("tesselation_pl",
+        {"geospherel", "geospheref", "geosphere"},
+        {"matte_gray", "matte_gray", "matte_gray"}, "pointlights");
+
+    // textureuv shapes
+    presets["textureuv_pl"] = make_simple_scene("textureuv_pl",
+        {"flipcapsphere", "flipcapsphere", "flipcapsphere"},
+        {"matte_green", "matte_colored", "matte_uv"}, "pointlights");
+
+    // normalmap shapes
+    presets["normalmap_pl"] = make_simple_scene("normalmap_pl",
+        {"flipcapsphere", "flipcapsphere", "flipcapsphere"},
+        {"plastic_blue", "plastic_blue_bumped", "plastic_colored_bumped"},
+        "pointlights");
+
+    // animated shapes
+    presets["animated_pl"] = make_simple_scene("animated_pl",
+        {"flipcapsphere", "spherecube", "spherizedcube"},
+        {"plastic_colored", "plastic_colored", "plastic_colored"},
+        "pointlights", true, {"bounce", "scale", "rotation"});
+
+    // instances shared functions
+    auto make_random_scene = [&](const string& name, const vec2i& num,
+                                 const bbox2f& bbox, uint32_t seed = 13) {
+        auto rscale = 0.9f * 0.25f *
+                      min((bbox.max.x - bbox.min.x) / num.x,
+                          (bbox.max.x - bbox.min.x) / num.y);
+
+        auto params = make_test_scene(name);
+        params.cameras.push_back(test_camera_presets().at("cam3"));
+        params.materials.push_back(test_material_presets().at("matte_floor"));
+        params.shapes.push_back(test_shape_presets().at("floor"));
+        params.instances.push_back(
+            make_test_instance("floor", "floor", {0, 0, 0}));
+        auto shapes = vector<string>();
+        for (auto mat : {"plastic_red", "plastic_green", "plastic_blue"})
+            params.materials.push_back(test_material_presets().at(mat));
+        for (auto shp : {"sphere", "flipcapsphere", "cube"}) {
+            for (auto mat : {"plastic_red", "plastic_green", "plastic_blue"}) {
+                params.shapes.push_back(test_shape_presets().at(shp));
+                params.shapes.back().name += "_"s + mat;
+                params.shapes.back().material = mat;
+                params.shapes.back().scale *= rscale;
+                shapes.push_back(params.shapes.back().name);
+            }
+        }
+
+        auto rng = init_rng(seed, 7);
+        auto count = 0;
+        for (auto j = 0; j < num.y; j++) {
+            for (auto i = 0; i < num.x; i++) {
+                auto rpos = next_rand2f(rng);
+                auto pos = vec3f{
+                    bbox.min.x + (bbox.max.x - bbox.min.x) *
+                                     (i + 0.45f + 0.1f * rpos.x) / num.x,
+                    rscale,
+                    bbox.min.y + (bbox.max.y - bbox.min.y) *
+                                     (j + 0.45f + 0.1f * rpos.y) / num.y,
+                };
+                params.instances.push_back(
+                    make_test_instance("instance" + to_string(count++),
+                        shapes[next_rand1i(rng, (int)shapes.size())], pos));
+            }
+        }
+
+        auto pos = vector<vec3f>{{-2, 10, 8}, {+2, 10, 8}};
+        for (auto i = 0; i < 2; i++) {
+            auto name = "light" + to_string(i + 1);
+            params.materials.push_back(
+                test_material_presets().at("pointlight"));
+            params.materials.back().name = name;
+            params.materials.back().emission = 80;
+            params.shapes.push_back(test_shape_presets().at("point"));
+            params.shapes.back().name = name;
+            params.shapes.back().material = name;
+            params.instances.push_back(make_test_instance(name, name, pos[i]));
+        }
+
+        return params;
+    };
+
+    // instances
+    presets["instances_pl"] =
+        make_random_scene("instances_pl", {10, 10}, {{-3, -3}, {3, 3}});
+    presets["instancel_pl"] =
+        make_random_scene("instancel_pl", {100, 100}, {{-3, -3}, {3, 3}});
+
 #if 0
-    else if (otype == "normdisp") {
-        auto mat = vector<material*>{
-            add_test_material(scn, test_material_type::plastic_bumped),
-            add_test_material(scn, test_material_type::plastic_bumped)};
-        add_test_instance(scn, "obj01",
-            add_uvspherecube(scn, "base_obj01", mat[0], 4), {-1.25f, 1, 0});
-        add_test_instance(scn, "obj03",
-            add_uvspherecube(scn, "subdiv_02_obj02", mat[1], 4), {1.25f, 1, 0});
-        }
+        else if (otype == "normdisp") {
+            auto mat = vector<material*>{
+                add_test_material(scn, test_material_type::plastic_bumped),
+                add_test_material(scn, test_material_type::plastic_bumped)};
+            add_test_instance(scn, "obj01",
+                add_uvspherecube(scn, "base_obj01", mat[0], 4), {-1.25f, 1, 0});
+            add_test_instance(scn, "obj03",
+                add_uvspherecube(scn, "subdiv_02_obj02", mat[1], 4), {1.25f, 1, 0});
+            }
 #endif
-        default: throw runtime_error("bad value");
+
+    // add missing textures
+    for (auto& kv : presets) {
+        auto& preset = kv.second;
+        auto used = unordered_set<string>();
+        for (auto& mat : preset.materials) used.insert(mat.texture);
+        for (auto& mat : preset.materials) used.insert(mat.normal);
+        for (auto& env : preset.environments) used.insert(env.texture);
+        used.erase("");
+        for (auto& txt : preset.textures) used.erase(txt.name);
+        for (auto& txt : used)
+            preset.textures.push_back(test_texture_presets().at(txt));
     }
+
+    // remove duplicates
+    for (auto& kv : presets) remove_duplicates(kv.second);
+
+    return presets;
+}
+
+// Parses a test_camera object
+void serialize(test_camera_params& val, json& js, bool reading) {
+    static auto def = test_camera_params();
+    serialize_obj(js, reading);
+    serialize_attr(val.name, js, "name", reading);
+    serialize_attr(val.from, js, "from", reading);
+    serialize_attr(val.to, js, "to", reading);
+    serialize_attr(val.yfov, js, "yfov", reading);
+    serialize_attr(val.aspect, js, "aspect", reading);
+}
+
+// Parses a test_camera object
+void serialize(test_texture_type& val, json& js, bool reading) {
+    serialize(val, js, reading, test_texture_names());
+}
+
+// Parses a test_camera object
+void serialize(test_texture_params& val, json& js, bool reading) {
+    static auto def = test_texture_params();
+    serialize_obj(js, reading);
+    serialize_attr(val.name, js, "name", reading);
+    serialize_attr(val.type, js, "type", reading);
+    serialize_attr(val.resolution, js, "resolution", reading);
+    serialize_attr(
+        val.tile_size, js, "tile_size", reading, false, def.tile_size);
+    serialize_attr(
+        val.noise_scale, js, "noise_scale", reading, false, def.noise_scale);
+    serialize_attr(
+        val.sky_sunangle, js, "sky_sunangle", reading, false, def.sky_sunangle);
+    serialize_attr(val.bump_to_normal, js, "bump_to_normal", reading, false,
+        def.bump_to_normal);
+    serialize_attr(
+        val.bump_scale, js, "bump_scale", reading, false, def.bump_scale);
+}
+
+// Parses a test_camera object
+void serialize(test_material_type& val, json& js, bool reading) {
+    serialize(val, js, reading, test_material_names());
+}
+
+// Parses a test_camera object
+void serialize(test_material_params& val, json& js, bool reading) {
+    static auto def = test_material_params();
+    serialize_obj(js, reading);
+    serialize_attr(val.name, js, "name", reading);
+    serialize_attr(val.type, js, "type", reading);
+    serialize_attr(val.emission, js, "emission", reading, false, def.emission);
+    serialize_attr(val.color, js, "color", reading, false, def.color);
+    serialize_attr(val.opacity, js, "opacity", reading, false, def.opacity);
+    serialize_attr(
+        val.roughness, js, "roughness", reading, false, def.roughness);
+    serialize_attr(val.texture, js, "texture", reading, false, def.texture);
+    serialize_attr(val.normal, js, "normal", reading, false, def.normal);
+}
+
+// Parses a test_camera object
+void serialize(test_shape_type& val, json& js, bool reading) {
+    serialize(val, js, reading, test_shape_names());
+}
+
+// Parses a test_camera object
+void serialize(test_shape_params& val, json& js, bool reading) {
+    static auto def = test_shape_params();
+    serialize_obj(js, reading);
+    serialize_attr(val.name, js, "name", reading);
+    serialize_attr(val.type, js, "type", reading);
+    serialize_attr(val.material, js, "material", reading, false, def.material);
+    serialize_attr(
+        val.tesselation, js, "tesselation", reading, false, def.tesselation);
+    serialize_attr(
+        val.subdivision, js, "subdivision", reading, false, def.subdivision);
+    serialize_attr(val.scale, js, "scale", reading, false, def.scale);
+    serialize_attr(val.radius, js, "radius", reading, false, def.radius);
+    serialize_attr(val.faceted, js, "faceted", reading, false, def.faceted);
+    serialize_attr(val.num, js, "num", reading, false, def.num);
+    // TODO: hair parameters
+}
+
+// Parses a test_camera object
+void serialize(test_instance_params& val, json& js, bool reading) {
+    static auto def = test_instance_params();
+    serialize_obj(js, reading);
+    serialize_attr(val.name, js, "name", reading);
+    serialize_attr(val.shape, js, "shape", reading);
+    serialize_attr(val.frame, js, "frame", reading, false, def.frame);
+    serialize_attr(val.rotation, js, "rotation", reading, false, def.rotation);
+}
+
+// Parses a test_camera object
+void serialize(test_environment_params& val, json& js, bool reading) {
+    static auto def = test_environment_params();
+    serialize_obj(js, reading);
+    serialize_attr(val.name, js, "name", reading);
+    serialize_attr(val.emission, js, "emission", reading, false, def.emission);
+    serialize_attr(val.color, js, "color", reading, false, def.color);
+    serialize_attr(val.texture, js, "texture", reading, false, def.texture);
+    serialize_attr(val.frame, js, "frame", reading, false, def.frame);
+    serialize_attr(val.rotation, js, "rotation", reading, false, def.rotation);
+}
+
+// Parses a test_camera object
+void serialize(test_scene_params& val, json& js, bool reading) {
+    static auto def = test_scene_params();
+    serialize_obj(js, reading);
+    serialize_attr(val.name, js, "name", reading, false, def.name);
+    serialize_attr(val.cameras, js, "cameras", reading, false, def.cameras);
+    serialize_attr(val.textures, js, "textures", reading, false, def.textures);
+    serialize_attr(
+        val.materials, js, "materials", reading, false, def.materials);
+    serialize_attr(val.shapes, js, "shapes", reading, false, def.shapes);
+    serialize_attr(
+        val.environments, js, "environments", reading, false, def.environments);
+}
+
+// Load test scene
+test_scene_params load_test_scene(const string& filename) {
+    // load json
+    std::ifstream stream(filename.c_str());
+    if (!stream) throw runtime_error("could not load json " + filename);
+    auto js = json();
+    try {
+        stream >> js;
+    } catch (const exception& e) {
+        throw runtime_error(
+            string("could not load json with error ") + e.what());
+    }
+
+    // clear data
+    auto scn = test_scene_params();
+    try {
+        serialize(scn, js, true);
+    } catch (const exception& e) {
+        throw runtime_error("error parsing test scene " + string(e.what()));
+    }
+
+    // done
+    return scn;
+}
+
+// Save test scene
+void save_test_scene(const string& filename, const test_scene_params& scn) {
+    auto js = json();
+    serialize((test_scene_params&)scn, js, false);
+    save_text(filename, js.dump(2));
 }
 
 }  // namespace ygl
@@ -9139,7 +11558,7 @@ void gl_read_imagef(float* pixels, int w, int h, int nc) {
 }  // namespace ygl
 
 // -----------------------------------------------------------------------------
-// TEXTURE FUNCTIONS
+// IMPLEMENTATION OF OPENGL TEXTURE FUNCTIONS
 // -----------------------------------------------------------------------------
 namespace ygl {
 
@@ -9218,9 +11637,12 @@ void clear_texture(gl_texture& txt) {
     assert(gl_check_error());
 }
 
+}  // namespace ygl
+
 // -----------------------------------------------------------------------------
-// VERTEX ARRAY BUFFER
+// IMPLEMENTATION OF OPENGL VERTEX ARRAY BUFFER
 // -----------------------------------------------------------------------------
+namespace ygl {
 
 // Updates the buffer with new data.
 void _update_vertex_buffer(gl_vertex_buffer& buf, int n, int nc,
@@ -9281,9 +11703,12 @@ void clear_vertex_buffer(gl_vertex_buffer& buf) {
     assert(gl_check_error());
 }
 
+}  // namespace ygl
+
 // -----------------------------------------------------------------------------
-// VERTEX ELEMENTS BUFFER
+// IMPLEMENTATION OF OPENGL VERTEX ELEMENTS BUFFER
 // -----------------------------------------------------------------------------
+namespace ygl {
 
 // Updates the buffer bid with new data.
 void _update_element_buffer(
@@ -9341,9 +11766,13 @@ void clear_element_buffer(gl_element_buffer& buf) {
     assert(gl_check_error());
 }
 
+}  // namespace ygl
+
 // -----------------------------------------------------------------------------
-// PROGRAM FUNCTIONS
+// IMPLEMENTATION OF OPENGL PROGRAM FUNCTIONS
 // -----------------------------------------------------------------------------
+namespace ygl {
+
 // Creates and OpenGL program from vertex and fragment code. Returns the
 // program id. Optionally return vertex and fragment shader ids. A VAO is
 // created.
@@ -9663,6 +12092,160 @@ void unbind_program(const gl_program& prog) {
     assert(gl_check_error());
 }
 
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION OF SCENE SHADER FUNCTIONS
+// -----------------------------------------------------------------------------
+namespace ygl {
+
+// Clear gl state
+void clear_shape(gl_shape& shp) {
+    clear_vertex_buffer(shp.pos);
+    clear_vertex_buffer(shp.norm);
+    clear_vertex_buffer(shp.texcoord);
+    clear_vertex_buffer(shp.color);
+    clear_vertex_buffer(shp.tangsp);
+    clear_element_buffer(shp.points);
+    clear_element_buffer(shp.lines);
+    clear_element_buffer(shp.triangles);
+    clear_element_buffer(shp.quads);
+    clear_element_buffer(shp.edges);
+}
+
+// Clear scene textures on the GPU.
+void clear_textures(unordered_map<texture*, gl_texture>& gtextures) {
+    for (auto& kv : gtextures) clear_texture(kv.second);
+    gtextures.clear();
+}
+
+// Clear scene shapes on the GPU.
+void clear_shapes(unordered_map<shape*, gl_shape>& gshapes) {
+    for (auto& kv : gshapes) clear_shape(kv.second);
+    gshapes.clear();
+}
+
+// Init shading
+void update_textures(const scene* scn,
+    unordered_map<texture*, gl_texture>& gtextures,
+    const unordered_set<texture*>& refresh, bool clear) {
+    if (clear) clear_textures(gtextures);
+    for (auto txt : scn->textures) {
+        if (gtextures.find(txt) == gtextures.end()) {
+            gtextures[txt] = gl_texture();
+        } else {
+            if (refresh.find(txt) == refresh.end()) continue;
+        }
+        auto& gtxt = gtextures.at(txt);
+        if (txt->hdr) {
+            update_texture(gtxt, txt->hdr, true, true, true);
+        } else if (txt->ldr) {
+            update_texture(gtxt, txt->ldr, true, true, true);
+        } else
+            assert(false);
+    }
+}
+
+// Init shading
+void update_shapes(const scene* scn, unordered_map<shape*, gl_shape>& gshapes,
+    const unordered_set<shape*>& refresh,
+    const unordered_set<shape_group*>& refreshg, bool clear) {
+    if (clear) clear_shapes(gshapes);
+    for (auto sgr : scn->shapes) {
+        for (auto shp : sgr->shapes) {
+            if (gshapes.find(shp) == gshapes.end()) {
+                gshapes[shp] = gl_shape();
+            } else {
+                if (refresh.find(shp) == refresh.end() &&
+                    refreshg.find(sgr) == refreshg.end())
+                    continue;
+            }
+            auto& gshp = gshapes.at(shp);
+            if (!shp->quads_pos.empty()) {
+                auto pos = vector<vec3f>();
+                auto norm = vector<vec3f>();
+                auto texcoord = vector<vec2f>();
+                auto quads = vector<vec4i>();
+                tie(quads, pos, norm, texcoord) = convert_face_varying(
+                    shp->quads_pos, shp->quads_norm, shp->quads_texcoord,
+                    shp->pos, shp->norm, shp->texcoord);
+                update_vertex_buffer(gshp.pos, pos);
+                update_vertex_buffer(gshp.norm, norm);
+                update_vertex_buffer(gshp.texcoord, texcoord);
+                update_element_buffer(
+                    gshp.quads, convert_quads_to_triangles(quads));
+                update_element_buffer(
+                    gshp.edges, get_edges({}, {}, shp->quads));
+                update_vertex_buffer(gshp.color, vector<vec4f>{});
+                update_vertex_buffer(gshp.tangsp, vector<vec4f>{});
+            } else {
+                update_vertex_buffer(gshp.pos, shp->pos);
+                update_vertex_buffer(gshp.norm, shp->norm);
+                update_vertex_buffer(gshp.texcoord, shp->texcoord);
+                update_vertex_buffer(gshp.color, shp->color);
+                update_vertex_buffer(gshp.tangsp, shp->tangsp);
+                update_element_buffer(gshp.points, shp->points);
+                update_element_buffer(gshp.lines, shp->lines);
+                update_element_buffer(gshp.triangles, shp->triangles);
+                update_element_buffer(
+                    gshp.quads, convert_quads_to_triangles(shp->quads));
+                update_element_buffer(
+                    gshp.beziers, convert_bezier_to_lines(shp->beziers));
+                update_element_buffer(
+                    gshp.edges, get_edges({}, shp->triangles, shp->quads));
+            }
+        }
+    }
+}
+
+// Initialize gl lights
+gl_lights make_gl_lights(const scene* scn) {
+    auto lights = gl_lights();
+    for (auto ist : scn->instances) {
+        if (!ist->shp) continue;
+        for (auto shp : ist->shp->shapes) {
+            if (!shp->mat) continue;
+            if (shp->mat->ke == zero3f) continue;
+            if (lights.pos.size() >= 16) break;
+            if (!shp->points.empty()) {
+                for (auto p : shp->points) {
+                    if (lights.pos.size() >= 16) break;
+                    lights.pos.push_back(
+                        transform_point(ist->frame, shp->pos[p]));
+                    lights.ke.push_back(shp->mat->ke);
+                    lights.type.push_back(gl_light_type::point);
+                }
+            } else {
+                auto bbox = make_bbox(shp->pos.size(), shp->pos.data());
+                auto pos = bbox_center(bbox);
+                auto area = 0.0f;
+                for (auto l : shp->lines)
+                    area += line_length(shp->pos[l.x], shp->pos[l.y]);
+                for (auto t : shp->triangles)
+                    area += triangle_area(
+                        shp->pos[t.x], shp->pos[t.y], shp->pos[t.z]);
+                for (auto t : shp->quads)
+                    area += quad_area(shp->pos[t.x], shp->pos[t.y],
+                        shp->pos[t.z], shp->pos[t.w]);
+                auto ke = shp->mat->ke * area;
+                if (lights.pos.size() < 16) {
+                    lights.pos.push_back(transform_point(ist->frame, pos));
+                    lights.ke.push_back(ke);
+                    lights.type.push_back(gl_light_type::point);
+                }
+            }
+        }
+    }
+    return lights;
+}
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR OPRNGL IMAGE SHADER FUNCTIONS
+// -----------------------------------------------------------------------------
+namespace ygl {
+
 // Initialize the program. Call with true only after the GL is initialized.
 gl_stdimage_program make_stdimage_program() {
     string _header =
@@ -9748,6 +12331,13 @@ gl_stdimage_program make_stdimage_program() {
     prog._ebo = make_element_buffer(vector<vec3i>{{0, 1, 2}, {0, 2, 3}}, false);
     return prog;
 }
+
+}  // namespace ygl
+
+// -----------------------------------------------------------------------------
+// IMPLEMENTATION FOR OPRNGL STANDARD SURFACE SHADER FUNCTIONS
+// -----------------------------------------------------------------------------
+namespace ygl {
 
 // Initialize a standard shader. Call with true only after the gl has
 // been initialized
@@ -9988,7 +12578,7 @@ gl_stdsurface_program make_stdsurface_program() {
     string _frag_material =
         R"(
         struct Material {
-            int mtype;         // material type
+            int type;         // material type
             int etype;         // element type
             vec3 ke;           // material ke
             vec3 kd;           // material kd
@@ -10021,7 +12611,7 @@ gl_stdsurface_program make_stdsurface_program() {
 
         void eval_material(vec2 texcoord, vec4 color, out int type, out vec3 ke,
                            out vec3 kd, out vec3 ks, out float rs, out float op, out bool cutout) {
-            if(material.mtype == 0) {
+            if(material.type == 0) {
                 type = 0;
                 ke = material.ke;
                 kd = vec3(0,0,0);
@@ -10044,15 +12634,15 @@ gl_stdsurface_program make_stdsurface_program() {
             ke *= ke_txt;
 
             // get material color from textures and adjust values
-            if(material.mtype == 0) {
+            if(material.type == 0) {
                 type = 0;
-            } else if(material.mtype == 1) {
+            } else if(material.type == 1) {
                 type = material.etype;
                 kd *= kd_txt.xyz;
                 ks *= ks_txt.xyz;
                 rs *= rs_txt;
                 rs = rs*rs;
-            } else if(material.mtype == 2) {
+            } else if(material.type == 2) {
                 type = material.etype;
                 vec3 kb = kd * kd_txt.xyz;
                 float km = ks.x * ks_txt.z;
@@ -10061,7 +12651,7 @@ gl_stdsurface_program make_stdsurface_program() {
                 rs *= ks_txt.y;
                 rs = rs*rs;
                 op *= kd_txt.w;
-            } else if(material.mtype == 3) {
+            } else if(material.type == 3) {
                 type = material.etype;
                 kd *= kd_txt.xyz;
                 ks *= ks_txt.xyz;
@@ -10177,218 +12767,402 @@ gl_stdsurface_program make_stdsurface_program() {
     return prog;
 }
 
-// Initialize gl_stdsurface_program draw state
-gl_stdsurface_state* make_stdsurface_state() {
-    auto st = new gl_stdsurface_state();
-    if (!is_program_valid(st->prog)) st->prog = make_stdsurface_program();
-    st->txt[nullptr] = {};
-    return st;
+// Starts a frame by setting exposure/gamma values, camera transforms and
+// projection. Sets also whether to use full shading or a quick eyelight
+// preview.
+void begin_stdsurface_frame(gl_stdsurface_program& prog, bool shade_eyelight,
+    float tonemap_exposure, float tonemap_gamma, bool tonemap_filmic,
+    const mat4f& camera_xform, const mat4f& camera_xform_inv,
+    const mat4f& camera_proj) {
+    static auto eyelight_id =
+        get_program_uniform_location(prog._prog, "lighting.eyelight");
+    static auto exposure_id =
+        get_program_uniform_location(prog._prog, "tonemap.exposure");
+    static auto gamma_id =
+        get_program_uniform_location(prog._prog, "tonemap.gamma");
+    static auto filmic_id =
+        get_program_uniform_location(prog._prog, "tonemap.filmic");
+    static auto xform_id =
+        get_program_uniform_location(prog._prog, "camera.xform");
+    static auto xform_inv_id =
+        get_program_uniform_location(prog._prog, "camera.xform_inv");
+    static auto proj_id =
+        get_program_uniform_location(prog._prog, "camera.proj");
+    assert(gl_check_error());
+    bind_program(prog._prog);
+    set_program_uniform(prog._prog, eyelight_id, shade_eyelight);
+    set_program_uniform(prog._prog, exposure_id, tonemap_exposure);
+    set_program_uniform(prog._prog, gamma_id, tonemap_gamma);
+    set_program_uniform(prog._prog, filmic_id, tonemap_filmic);
+    set_program_uniform(prog._prog, xform_id, camera_xform);
+    set_program_uniform(prog._prog, xform_inv_id, camera_xform_inv);
+    set_program_uniform(prog._prog, proj_id, camera_proj);
+    assert(gl_check_error());
 }
 
-// Init shading
-void update_stdsurface_state(gl_stdsurface_state* st, const scene* scn,
-    const gl_stdsurface_params& params,
-    const unordered_set<shape*>& refresh_shapes,
-    const unordered_set<texture*>& refresh_textures) {
-    // update textures -----------------------------------------------------
-    for (auto txt : scn->textures) {
-        if (st->txt.find(txt) == st->txt.end()) {
-            st->txt[txt] = gl_texture();
-        } else {
-            if (refresh_textures.find(txt) == refresh_textures.end()) continue;
-        }
-        if (txt->hdr) {
-            update_texture(st->txt[txt], txt->hdr, true, true, true);
-        } else if (txt->ldr) {
-            update_texture(st->txt[txt], txt->ldr, true, true, true);
-        } else
-            assert(false);
-    }
+// Ends a frame.
+void end_stdsurface_frame(gl_stdsurface_program& prog) {
+    assert(gl_check_error());
+    unbind_program(prog._prog);
+    //    glBindVertexArray(0);
+    //    glUseProgram(0);
+    assert(gl_check_error());
+}
 
-    // refresh vbos --------------------------------------------------------
-    for (auto shp : scn->shapes) {
-        if (st->vbo.find(shp) == st->vbo.end()) {
-            st->vbo[shp] = gl_stdsurface_vbo();
-        } else {
-            if (refresh_shapes.find(shp) == refresh_shapes.end()) continue;
-        }
-        if (!shp->quads_pos.empty()) {
-            auto pos = vector<vec3f>();
-            auto norm = vector<vec3f>();
-            auto texcoord = vector<vec2f>();
-            auto quads = vector<vec4i>();
-            tie(quads, pos, norm, texcoord) =
-                convert_face_varying(shp->quads_pos, shp->quads_norm,
-                    shp->quads_texcoord, shp->pos, shp->norm, shp->texcoord);
-            update_vertex_buffer(st->vbo[shp].pos, pos);
-            update_vertex_buffer(st->vbo[shp].norm, norm);
-            update_vertex_buffer(st->vbo[shp].texcoord, texcoord);
-            update_element_buffer(
-                st->vbo[shp].quads, convert_quads_to_triangles(quads));
-            update_element_buffer(
-                st->vbo[shp].edges, get_edges({}, {}, shp->quads));
-            update_vertex_buffer(st->vbo[shp].color, vector<vec4f>{});
-            update_vertex_buffer(st->vbo[shp].tangsp, vector<vec4f>{});
-        } else {
-            update_vertex_buffer(st->vbo[shp].pos, shp->pos);
-            update_vertex_buffer(st->vbo[shp].norm, shp->norm);
-            update_vertex_buffer(st->vbo[shp].texcoord, shp->texcoord);
-            update_vertex_buffer(st->vbo[shp].color, shp->color);
-            update_vertex_buffer(st->vbo[shp].tangsp, shp->tangsp);
-            update_element_buffer(st->vbo[shp].points, shp->points);
-            update_element_buffer(st->vbo[shp].lines, shp->lines);
-            update_element_buffer(st->vbo[shp].triangles, shp->triangles);
-            update_element_buffer(
-                st->vbo[shp].quads, convert_quads_to_triangles(shp->quads));
-            update_element_buffer(
-                st->vbo[shp].beziers, convert_bezier_to_lines(shp->beziers));
-            update_element_buffer(
-                st->vbo[shp].edges, get_edges({}, shp->triangles, shp->quads));
-        }
-    }
+// Set num lights with position pos, color ke, type ltype. Also set the
+// ambient illumination amb.
+void set_stdsurface_lights(
+    gl_stdsurface_program& prog, const vec3f& amb, const gl_lights& lights) {
+    static auto amb_id =
+        get_program_uniform_location(prog._prog, "lighting.amb");
+    static auto lnum_id =
+        get_program_uniform_location(prog._prog, "lighting.lnum");
+    static auto lpos_id =
+        get_program_uniform_location(prog._prog, "lighting.lpos");
+    static auto lke_id =
+        get_program_uniform_location(prog._prog, "lighting.lke");
+    static auto ltype_id =
+        get_program_uniform_location(prog._prog, "lighting.ltype");
+    assert(gl_check_error());
+    set_program_uniform(prog._prog, amb_id, amb);
+    set_program_uniform(prog._prog, lnum_id, (int)lights.pos.size());
+    set_program_uniform(
+        prog._prog, lpos_id, lights.pos.data(), (int)lights.pos.size());
+    set_program_uniform(
+        prog._prog, lke_id, lights.ke.data(), (int)lights.pos.size());
+    set_program_uniform(
+        prog._prog, ltype_id, (int*)lights.type.data(), (int)lights.pos.size());
+    assert(gl_check_error());
+}
 
-    // updating lights -----------------------------------------------------
-    st->lights_pos.clear();
-    st->lights_ke.clear();
-    st->lights_ltype.clear();
+// Begins drawing a shape with transform xform.
+void begin_stdsurface_shape(
+    gl_stdsurface_program& prog, const mat4f& xform, float normal_offset) {
+    static auto xform_id =
+        get_program_uniform_location(prog._prog, "shape_xform");
+    static auto normal_offset_id =
+        get_program_uniform_location(prog._prog, "shape_normal_offset");
+    assert(gl_check_error());
+    set_program_uniform(prog._prog, xform_id, xform);
+    set_program_uniform(prog._prog, normal_offset_id, normal_offset);
+    assert(gl_check_error());
+}
 
-    for (auto lgt : scn->lights) {
-        if (!lgt->ist) continue;
-        auto shp = lgt->ist->shp;
-        if (!shp->points.empty()) {
-            for (auto p : shp->points) {
-                if (st->lights_pos.size() >= 16) break;
-                st->lights_pos += transform_point(lgt->ist->frame, shp->pos[p]);
-                st->lights_ke += shp->mat->ke;
-                st->lights_ltype += gl_ltype::point;
-            }
-        } else {
-            auto bbox = make_bbox(shp->pos.size(), shp->pos.data());
-            auto pos = bbox_center(bbox);
-            auto area = 0.0f;
-            for (auto l : shp->lines)
-                area += line_length(shp->pos[l.x], shp->pos[l.y]);
-            for (auto t : shp->triangles)
-                area +=
-                    triangle_area(shp->pos[t.x], shp->pos[t.y], shp->pos[t.z]);
-            for (auto t : shp->quads)
-                area += quad_area(
-                    shp->pos[t.x], shp->pos[t.y], shp->pos[t.z], shp->pos[t.w]);
-            auto ke = shp->mat->ke * area;
-            if (st->lights_pos.size() < 16) {
-                st->lights_pos += transform_point(lgt->ist->frame, pos);
-                st->lights_ke += ke;
-                st->lights_ltype += gl_ltype::point;
-            }
-        }
-    }
+// End shade drawing.
+void end_stdsurface_shape(gl_stdsurface_program& prog) {
+    assert(gl_check_error());
+    for (int i = 0; i < 16; i++) unbind_vertex_buffer(i);
+    assert(gl_check_error());
+}
+
+// Sets normal offset.
+void set_stdsurface_normaloffset(
+    gl_stdsurface_program& prog, float normal_offset) {
+    static auto normal_offset_id =
+        get_program_uniform_location(prog._prog, "shape_normal_offset");
+    assert(gl_check_error());
+    set_program_uniform(prog._prog, normal_offset_id, normal_offset);
+    assert(gl_check_error());
+}
+
+// Set the object as highlighted.
+void set_stdsurface_highlight(
+    gl_stdsurface_program& prog, const vec4f& highlight) {
+    static auto highlight_id =
+        get_program_uniform_location(prog._prog, "highlight");
+    set_program_uniform(prog._prog, highlight_id, highlight);
+}
+
+// Set material values with emission ke, diffuse kd, specular ks and
+// specular roughness rs, opacity op. Indicates textures ids with the
+// correspoinding XXX_txt variables. Sets also normal and occlusion
+// maps. Works for points/lines/triangles (diffuse for points,
+// Kajiya-Kay for lines, GGX/Phong for triangles).
+// Material type matches the scene material type.
+void set_stdsurface_material(gl_stdsurface_program& prog, material_type type,
+    gl_elem_type etype, const vec3f& ke, const vec3f& kd, const vec3f& ks,
+    float rs, float op, const gl_texture_info& ke_txt,
+    const gl_texture_info& kd_txt, const gl_texture_info& ks_txt,
+    const gl_texture_info& rs_txt, const gl_texture_info& norm_txt,
+    const gl_texture_info& occ_txt, bool use_phong, bool double_sided,
+    bool alpha_cutout) {
+    static auto mtype_id =
+        get_program_uniform_location(prog._prog, "material.type");
+    static auto etype_id =
+        get_program_uniform_location(prog._prog, "material.etype");
+    static auto ke_id = get_program_uniform_location(prog._prog, "material.ke");
+    static auto kd_id = get_program_uniform_location(prog._prog, "material.kd");
+    static auto ks_id = get_program_uniform_location(prog._prog, "material.ks");
+    static auto rs_id = get_program_uniform_location(prog._prog, "material.rs");
+    static auto op_id = get_program_uniform_location(prog._prog, "material.op");
+    static auto ke_txt_id =
+        get_program_uniform_location(prog._prog, "material.txt_ke");
+    static auto ke_txt_on_id =
+        get_program_uniform_location(prog._prog, "material.txt_ke_on");
+    static auto kd_txt_id =
+        get_program_uniform_location(prog._prog, "material.txt_kd");
+    static auto kd_txt_on_id =
+        get_program_uniform_location(prog._prog, "material.txt_kd_on");
+    static auto ks_txt_id =
+        get_program_uniform_location(prog._prog, "material.txt_ks");
+    static auto ks_txt_on_id =
+        get_program_uniform_location(prog._prog, "material.txt_ks_on");
+    static auto rs_txt_id =
+        get_program_uniform_location(prog._prog, "material.txt_rs");
+    static auto rs_txt_on_id =
+        get_program_uniform_location(prog._prog, "material.txt_rs_on");
+    static auto norm_txt_id =
+        get_program_uniform_location(prog._prog, "material.txt_norm");
+    static auto norm_txt_on_id =
+        get_program_uniform_location(prog._prog, "material.txt_norm_on");
+    static auto occ_txt_id =
+        get_program_uniform_location(prog._prog, "material.txt_occ");
+    static auto occ_txt_on_id =
+        get_program_uniform_location(prog._prog, "material.txt_occ_on");
+    static auto norm_scale_id =
+        get_program_uniform_location(prog._prog, "material.norm_scale");
+    static auto occ_scale_id =
+        get_program_uniform_location(prog._prog, "material.occ_scale");
+    static auto use_phong_id =
+        get_program_uniform_location(prog._prog, "material.use_phong");
+    static auto double_sided_id =
+        get_program_uniform_location(prog._prog, "material.double_sided");
+    static auto alpha_cutout_id =
+        get_program_uniform_location(prog._prog, "material.alpha_cutout");
+
+    static auto mtypes = unordered_map<material_type, int>{
+        {material_type::specular_roughness, 1},
+        {material_type::metallic_roughness, 2},
+        {material_type::specular_glossiness, 3}};
+
+    assert(gl_check_error());
+    set_program_uniform(prog._prog, mtype_id, mtypes.at(type));
+    set_program_uniform(prog._prog, etype_id, (int)etype);
+    set_program_uniform(prog._prog, ke_id, ke);
+    set_program_uniform(prog._prog, kd_id, kd);
+    set_program_uniform(prog._prog, ks_id, ks);
+    set_program_uniform(prog._prog, rs_id, rs);
+    set_program_uniform(prog._prog, op_id, op);
+    set_program_uniform_texture(prog._prog, ke_txt_id, ke_txt_on_id, ke_txt, 0);
+    set_program_uniform_texture(prog._prog, kd_txt_id, kd_txt_on_id, kd_txt, 1);
+    set_program_uniform_texture(prog._prog, ks_txt_id, ks_txt_on_id, ks_txt, 2);
+    set_program_uniform_texture(prog._prog, rs_txt_id, rs_txt_on_id, rs_txt, 3);
+    set_program_uniform_texture(
+        prog._prog, norm_txt_id, norm_txt_on_id, norm_txt, 4);
+    set_program_uniform_texture(
+        prog._prog, occ_txt_id, occ_txt_on_id, occ_txt, 5);
+    set_program_uniform(prog._prog, norm_scale_id, norm_txt.scale);
+    set_program_uniform(prog._prog, occ_scale_id, occ_txt.scale);
+    set_program_uniform(prog._prog, use_phong_id, use_phong);
+    set_program_uniform(prog._prog, double_sided_id, double_sided);
+    set_program_uniform(prog._prog, alpha_cutout_id, alpha_cutout);
+    assert(gl_check_error());
+}
+
+// Set constant material values with emission ke.
+void set_stdsurface_constmaterial(
+    gl_stdsurface_program& prog, const vec3f& ke, float op) {
+    static auto mtype_id =
+        get_program_uniform_location(prog._prog, "material.type");
+    static auto etype_id =
+        get_program_uniform_location(prog._prog, "material.etype");
+    static auto ke_id = get_program_uniform_location(prog._prog, "material.ke");
+    static auto op_id = get_program_uniform_location(prog._prog, "material.op");
+
+    assert(gl_check_error());
+    set_program_uniform(prog._prog, mtype_id, 0);
+    set_program_uniform(prog._prog, etype_id, 0);
+    set_program_uniform(prog._prog, ke_id, ke);
+    set_program_uniform(prog._prog, op_id, op);
+    assert(gl_check_error());
+}
+
+// Set vertex data with buffers for position pos, normals norm, texture
+// coordinates texcoord, per-vertex color color and tangent space tangsp.
+void set_stdsurface_vert(gl_stdsurface_program& prog,
+    const gl_vertex_buffer& pos, const gl_vertex_buffer& norm,
+    const gl_vertex_buffer& texcoord, const gl_vertex_buffer& color,
+    const gl_vertex_buffer& tangsp) {
+    static auto pos_id = get_program_attrib_location(prog._prog, "vert_pos");
+    static auto norm_id = get_program_attrib_location(prog._prog, "vert_norm");
+    static auto texcoord_id =
+        get_program_attrib_location(prog._prog, "vert_texcoord");
+    static auto color_id =
+        get_program_attrib_location(prog._prog, "vert_color");
+    static auto tangsp_id =
+        get_program_attrib_location(prog._prog, "vert_tangsp");
+    assert(gl_check_error());
+    set_program_vertattr(prog._prog, pos_id, pos, zero3f);
+    set_program_vertattr(prog._prog, norm_id, norm, zero3f);
+    set_program_vertattr(prog._prog, texcoord_id, texcoord, zero2f);
+    set_program_vertattr(prog._prog, color_id, color, vec4f{1, 1, 1, 1});
+    set_program_vertattr(prog._prog, tangsp_id, tangsp, zero4f);
+    assert(gl_check_error());
+}
+
+// Set vertex data with buffers for skinning.
+void set_stdsurface_vert_skinning(gl_stdsurface_program& prog,
+    const gl_vertex_buffer& weights, const gl_vertex_buffer& joints,
+    int nxforms, const mat4f* xforms) {
+    static auto type_id = get_program_uniform_location(prog._prog, "skin_type");
+    static auto xforms_id =
+        get_program_uniform_location(prog._prog, "skin_xforms");
+    static auto weights_id =
+        get_program_attrib_location(prog._prog, "vert_skin_weights");
+    static auto joints_id =
+        get_program_attrib_location(prog._prog, "vert_skin_joints");
+    int type = 1;
+    set_program_uniform(prog._prog, type_id, type);
+    set_program_uniform(prog._prog, xforms_id, xforms, min(nxforms, 32));
+    set_program_vertattr(prog._prog, weights_id, weights, zero4f);
+    set_program_vertattr(prog._prog, joints_id, joints, zero4f);
+}
+
+// Set vertex data with buffers for skinning.
+void set_stdsurface_vert_gltf_skinning(gl_stdsurface_program& prog,
+    const gl_vertex_buffer& weights, const gl_vertex_buffer& joints,
+    int nxforms, const mat4f* xforms) {
+    static auto type_id = get_program_uniform_location(prog._prog, "skin_type");
+    static auto xforms_id =
+        get_program_uniform_location(prog._prog, "skin_xforms");
+    static auto weights_id =
+        get_program_attrib_location(prog._prog, "vert_skin_weights");
+    static auto joints_id =
+        get_program_attrib_location(prog._prog, "vert_skin_joints");
+    int type = 2;
+    set_program_uniform(prog._prog, type_id, type);
+    set_program_uniform(prog._prog, xforms_id, xforms, min(nxforms, 32));
+    set_program_vertattr(prog._prog, weights_id, weights, zero4f);
+    set_program_vertattr(prog._prog, joints_id, joints, zero4f);
+}
+
+// Disables vertex skinning.
+void set_stdsurface_vert_skinning_off(gl_stdsurface_program& prog) {
+    static auto type_id = get_program_uniform_location(prog._prog, "skin_type");
+    // static auto xforms_id = get_program_uniform_location(prog._prog,
+    // "skin_xforms");
+    static auto weights_id =
+        get_program_attrib_location(prog._prog, "vert_skin_weights");
+    static auto joints_id =
+        get_program_attrib_location(prog._prog, "vert_skin_joints");
+    int type = 0;
+    set_program_uniform(prog._prog, type_id, type);
+    set_program_vertattr(prog._prog, weights_id, {}, zero4f);
+    set_program_vertattr(prog._prog, joints_id, {}, zero4f);
 }
 
 // Draw a shape
-inline void draw_stdsurface_shape(gl_stdsurface_state* st, const shape* shp,
-    const mat4f& xform, bool highlighted, const gl_stdsurface_params& params) {
+void draw_stdsurface_shape(const shape* shp, const mat4f& xform,
+    bool highlighted, gl_stdsurface_program& prog,
+    unordered_map<shape*, gl_shape>& shapes,
+    unordered_map<texture*, gl_texture>& textures,
+    const gl_stdsurface_params& params) {
     static auto default_material = material();
     default_material.kd = {0.2f, 0.2f, 0.2f};
 
-    begin_stdsurface_shape(st->prog, xform);
+    begin_stdsurface_shape(prog, xform);
 
-    auto etype = gl_etype::triangle;
-    if (!shp->lines.empty()) etype = gl_etype::line;
-    if (!shp->points.empty()) etype = gl_etype::point;
+    auto etype = gl_elem_type::triangle;
+    if (!shp->lines.empty()) etype = gl_elem_type::line;
+    if (!shp->points.empty()) etype = gl_elem_type::point;
 
-    auto txt = [&st](texture_info& info) -> gl_texture_info {
+    auto txt = [&textures](texture_info& info) -> gl_texture_info {
         if (!info.txt) return {};
-        return st->txt.at(info.txt);
+        return textures.at(info.txt);
     };
 
     auto mat = (shp->mat) ? shp->mat : &default_material;
-    set_stdsurface_material(st->prog, mat->mtype, etype, mat->ke, mat->kd,
-        mat->ks, mat->rs, mat->op, txt(mat->ke_txt), txt(mat->kd_txt),
-        txt(mat->ks_txt), txt(mat->rs_txt), txt(mat->norm_txt),
-        txt(mat->occ_txt), false, mat->double_sided, params.cutout);
+    set_stdsurface_material(prog, mat->type, etype, mat->ke, mat->kd, mat->ks,
+        mat->rs, mat->op, txt(mat->ke_txt), txt(mat->kd_txt), txt(mat->ks_txt),
+        txt(mat->rs_txt), txt(mat->norm_txt), txt(mat->occ_txt), false,
+        mat->double_sided, params.cutout);
 
-    auto& vbo = st->vbo.at((shape*)shp);
+    auto& gshp = shapes.at((shape*)shp);
     set_stdsurface_vert(
-        st->prog, vbo.pos, vbo.norm, vbo.texcoord, vbo.color, vbo.tangsp);
+        prog, gshp.pos, gshp.norm, gshp.texcoord, gshp.color, gshp.tangsp);
 
-    draw_elems(vbo.points);
-    draw_elems(vbo.lines);
-    draw_elems(vbo.triangles);
-    draw_elems(vbo.quads);
-    draw_elems(vbo.beziers);
+    draw_elems(gshp.points);
+    draw_elems(gshp.lines);
+    draw_elems(gshp.triangles);
+    draw_elems(gshp.quads);
+    draw_elems(gshp.beziers);
 
     if ((params.edges && !params.wireframe) || highlighted) {
         gl_enable_culling(false);
-        set_stdsurface_constmaterial(st->prog,
+        set_stdsurface_constmaterial(prog,
             (highlighted) ? params.highlight_color : params.edge_color,
             (highlighted) ? 1 : mat->op);
-        set_stdsurface_normaloffset(st->prog, params.edge_offset);
-        draw_elems(vbo.edges);
+        set_stdsurface_normaloffset(prog, params.edge_offset);
+        draw_elems(gshp.edges);
         gl_enable_culling(params.cull_backface);
     }
 
     if (highlighted && false) {
-        set_stdsurface_constmaterial(st->prog, params.highlight_color, 1);
-        set_stdsurface_normaloffset(st->prog, params.edge_offset);
-        draw_elems(vbo.points);
-        draw_elems(vbo.lines);
-        draw_elems(vbo.triangles);
-        draw_elems(vbo.quads);
-        draw_elems(vbo.beziers);
+        set_stdsurface_constmaterial(prog, params.highlight_color, 1);
+        set_stdsurface_normaloffset(prog, params.edge_offset);
+        draw_elems(gshp.points);
+        draw_elems(gshp.lines);
+        draw_elems(gshp.triangles);
+        draw_elems(gshp.quads);
+        draw_elems(gshp.beziers);
     }
 
-    end_stdsurface_shape(st->prog);
+    end_stdsurface_shape(prog);
 }
 
 // Display a scene
-void draw_stdsurface_scene(gl_stdsurface_state* st, const scene* scn,
+void draw_stdsurface_scene(const scene* scn, const camera* view,
+    gl_stdsurface_program& prog, unordered_map<shape*, gl_shape>& shapes,
+    unordered_map<texture*, gl_texture>& textures, const gl_lights& lights,
     const gl_stdsurface_params& params) {
     // begin frame
     gl_enable_depth_test(true);
-    gl_enable_culling(false);
+    gl_enable_culling(params.cull_backface);
     gl_enable_wireframe(params.wireframe);
     gl_set_viewport({params.width, params.height});
 
-    auto cam = scn->cameras[params.camera_id];
-    mat4f camera_xform, camera_view, camera_proj;
-    camera_xform = to_mat4f(cam->frame);
-    camera_view = to_mat4f(inverse(cam->frame));
-    camera_proj =
-        perspective_mat4f(cam->yfov, cam->aspect, cam->near, cam->far);
+    auto cam = (params.camera_id < 0) ? view : scn->cameras[params.camera_id];
+    auto camera_xform = to_mat(cam->frame);
+    auto camera_view = to_mat(inverse(cam->frame));
+    auto camera_proj = perspective_mat4(cam->yfov,
+        (float)params.width / (float)params.height, cam->near, cam->far);
 
-    begin_stdsurface_frame(st->prog, params.camera_lights, params.exposure,
+    begin_stdsurface_frame(prog, params.camera_lights, params.exposure,
         params.gamma, params.filmic, camera_xform, camera_view, camera_proj);
 
     if (!params.camera_lights) {
-        set_stdsurface_lights(st->prog, params.ambient,
-            (int)st->lights_pos.size(), st->lights_pos.data(),
-            st->lights_ke.data(), st->lights_ltype.data());
+        set_stdsurface_lights(prog, params.ambient, lights);
     }
 
     if (!scn->instances.empty()) {
         for (auto ist : scn->instances) {
-            draw_stdsurface_shape(st, ist->shp, ist->xform(),
-                (ist == params.highlighted || ist->shp == params.highlighted),
-                params);
+            for (auto shp : ist->shp->shapes) {
+                draw_stdsurface_shape(shp, to_mat(ist->frame),
+                    (ist == params.highlighted ||
+                        ist->shp == params.highlighted),
+                    prog, shapes, textures, params);
+            }
         }
     } else {
-        for (auto shp : scn->shapes) {
-            draw_stdsurface_shape(
-                st, shp, identity_mat4f, shp == params.highlighted, params);
+        for (auto sgr : scn->shapes) {
+            for (auto shp : sgr->shapes) {
+                draw_stdsurface_shape(shp, identity_mat4f,
+                    shp == params.highlighted, prog, shapes, textures, params);
+            }
         }
     }
 
-    end_stdsurface_frame(st->prog);
+    end_stdsurface_frame(prog);
     gl_enable_wireframe(false);
 }
 
 // Support
-inline void _glfw_error_cb(int error, const char* description) {
+void _glfw_error_cb(int error, const char* description) {
     printf("GLFW error: %s\n", description);
 }
 
 // Support
-inline void _glfw_text_cb(GLFWwindow* gwin, unsigned key) {
+void _glfw_text_cb(GLFWwindow* gwin, unsigned key) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
     if (win->_widget_enabled) {
         ImGui_ImplGlfwGL3_CharCallback(win->_gwin, key);
@@ -10397,7 +13171,7 @@ inline void _glfw_text_cb(GLFWwindow* gwin, unsigned key) {
 }
 
 // Support
-inline void _glfw_key_cb(
+void _glfw_key_cb(
     GLFWwindow* gwin, int key, int scancode, int action, int mods) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
     if (win->_widget_enabled) {
@@ -10406,7 +13180,7 @@ inline void _glfw_key_cb(
 }
 
 // Support
-inline void _glfw_mouse_cb(GLFWwindow* gwin, int button, int action, int mods) {
+void _glfw_mouse_cb(GLFWwindow* gwin, int button, int action, int mods) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
     if (win->_widget_enabled) {
         ImGui_ImplGlfwGL3_MouseButtonCallback(win->_gwin, button, action, mods);
@@ -10415,7 +13189,7 @@ inline void _glfw_mouse_cb(GLFWwindow* gwin, int button, int action, int mods) {
 }
 
 // Support
-inline void _glfw_scroll_cb(GLFWwindow* gwin, double xoffset, double yoffset) {
+void _glfw_scroll_cb(GLFWwindow* gwin, double xoffset, double yoffset) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
     if (win->_widget_enabled) {
         ImGui_ImplGlfwGL3_ScrollCallback(win->_gwin, xoffset, yoffset);
@@ -10423,7 +13197,7 @@ inline void _glfw_scroll_cb(GLFWwindow* gwin, double xoffset, double yoffset) {
 }
 
 // Support
-inline void _glfw_refresh_cb(GLFWwindow* gwin) {
+void _glfw_refresh_cb(GLFWwindow* gwin) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
     if (win->_refresh_cb) win->_refresh_cb(win);
 }
@@ -10777,38 +13551,29 @@ bool draw_color_widget(gl_window* win, const string& lbl, vec4b& val) {
     return false;
 }
 
-// Value widget
-bool draw_value_widget(gl_window* win, const string& lbl, int& val,
-    const vector<pair<string, int>>& labels) {
-    auto cur = -1;
-    for (auto idx = 0; idx < labels.size(); idx++) {
-        if (labels[idx].second == val) cur = idx;
-    }
-    assert(cur >= 0);
-    auto ok = ImGui::Combo(lbl.c_str(), &cur, _enum_widget_labels_int,
-        (void*)&labels, (int)labels.size());
-    val = labels[cur].second;
-    return ok;
-}
-
-// Value widget
-bool draw_value_widget(gl_window* win, const string& lbl, void*& val,
-    const vector<pair<string, void*>>& labels) {
-    auto cur = -1;
-    for (auto idx = 0; idx < labels.size(); idx++) {
-        if (labels[idx].second == val) cur = idx;
-    }
-    assert(cur >= 0);
-    auto ok = ImGui::Combo(lbl.c_str(), &cur, _enum_widget_labels_int,
-        (void*)&labels, (int)labels.size());
-    val = labels[cur].second;
-    return ok;
-}
-
 // Bool widget
 bool draw_value_widget(gl_window* win, const string& lbl, bool& val) {
     return ImGui::Checkbox(lbl.c_str(), &val);
 }
+
+// Combo widget
+bool draw_combo_widget_begin(
+    gl_window* win, const string& lbl, const string& label) {
+    return ImGui::BeginCombo(lbl.c_str(), label.c_str());
+}
+
+// Combo widget
+bool draw_combo_widget_item(
+    gl_window* win, const string& label, int idx, bool selected) {
+    ImGui::PushID((void*)(intptr_t)idx);
+    auto clicked = ImGui::Selectable(label.c_str(), selected);
+    if (selected) ImGui::SetItemDefaultFocus();
+    ImGui::PopID();
+    return clicked;
+}
+
+// Combo widget
+void draw_combo_widget_end(gl_window* win) { ImGui::EndCombo(); }
 
 // Button widget
 bool draw_button_widget(gl_window* win, const string& lbl) {
@@ -10936,24 +13701,22 @@ void draw_tree_widget_color_end(gl_window* win) { ImGui::PopStyleColor(); }
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-namespace __impl_scn_widgets {
-
-inline void draw_tree_widgets(
+void draw_tree_widgets(
     gl_window* win, const string& lbl, camera* cam, void*& selection) {
     draw_tree_widget_leaf(win, lbl + cam->name, selection, cam);
 }
 
-inline void draw_tree_widgets(
+void draw_tree_widgets(
     gl_window* win, const string& lbl, texture* txt, void*& selection) {
     draw_tree_widget_leaf(win, lbl + txt->path, selection, txt);
 }
 
-inline void draw_tree_widgets(
+void draw_tree_widgets(
     gl_window* win, const string& lbl, texture_info* info, void*& selection) {
     draw_tree_widgets(win, lbl, info->txt, selection);
 }
 
-inline void draw_tree_widgets(
+void draw_tree_widgets(
     gl_window* win, const string& lbl, material* mat, void*& selection) {
     if (draw_tree_widget_begin(win, lbl + mat->name, selection, mat)) {
         if (mat->ke_txt.txt)
@@ -10974,55 +13737,77 @@ inline void draw_tree_widgets(
     }
 }
 
-inline void draw_tree_widgets(
-    gl_window* win, const string& lbl, shape* shp, void*& selection) {
-    if (draw_tree_widget_begin(win, lbl + shp->name, selection, shp)) {
-        if (shp->mat) draw_tree_widgets(win, "mat: ", shp->mat, selection);
+void draw_tree_widgets(
+    gl_window* win, const string& lbl, shape_group* sgr, void*& selection) {
+    if (draw_tree_widget_begin(win, lbl + sgr->name, selection, sgr)) {
+        for (auto shp : sgr->shapes) {
+            if (shp->mat) draw_tree_widgets(win, "mat: ", shp->mat, selection);
+        }
         draw_tree_widget_end(win);
     }
 }
 
-inline void draw_tree_widgets(
+void draw_tree_widgets(
     gl_window* win, const string& lbl, instance* ist, void*& selection) {
     if (draw_tree_widget_begin(win, lbl + ist->name, selection, ist)) {
-        if (ist->shp) draw_tree_widgets(win, "shape: ", ist->shp, selection);
+        if (ist->shp) draw_tree_widgets(win, "shp: ", ist->shp, selection);
         draw_tree_widget_end(win);
     }
 }
 
-inline void draw_tree_widgets(
+void draw_tree_widgets(
+    gl_window* win, const string& lbl, environment* env, void*& selection) {
+    if (draw_tree_widget_begin(win, lbl + env->name, selection, env)) {
+        if (env->ke_txt.txt)
+            draw_tree_widgets(win, "txt: ", env->ke_txt.txt, selection);
+        draw_tree_widget_end(win);
+    }
+}
+
+void draw_tree_widgets(
+    gl_window* win, const string& lbl, node* nde, void*& selection) {
+    if (draw_tree_widget_begin(win, lbl + nde->name, selection, nde)) {
+        if (nde->cam) draw_tree_widgets(win, "cam: ", nde->cam, selection);
+        draw_tree_widgets(win, "ist: ", nde->ist, selection);
+        if (nde->env) draw_tree_widgets(win, "env: ", nde->env, selection);
+        if (nde->parent)
+            draw_tree_widgets(win, "parent", nde->parent, selection);
+        for (auto idx = 0; idx < nde->children_.size(); idx++) {
+            draw_tree_widgets(win, "", nde->children_[idx], selection);
+        }
+        draw_tree_widget_end(win);
+    }
+}
+
+void draw_tree_widgets(
+    gl_window* win, const string& lbl, animation_group* agr, void*& selection) {
+    draw_tree_widget_leaf(win, lbl + agr->name, selection, agr);
+}
+
+template <typename T>
+void draw_scene_tree_widgets(gl_window* win, const string& lbl,
+    const vector<T*>& elems, void*& selection) {
+    if (draw_tree_widget_begin(win, lbl)) {
+        for (auto elem : elems) draw_tree_widgets(win, "", elem, selection);
+        draw_tree_widget_end(win);
+    }
+}
+
+void draw_tree_widgets(
     gl_window* win, const string& lbl, scene* scn, void*& selection) {
-    if (draw_tree_widget_begin(win, lbl + "cameras")) {
-        for (auto cam : scn->cameras)
-            draw_tree_widgets(win, "", cam, selection);
-        draw_tree_widget_end(win);
-    }
-
-    if (draw_tree_widget_begin(win, lbl + "shapes")) {
-        for (auto msh : scn->shapes) draw_tree_widgets(win, "", msh, selection);
-        draw_tree_widget_end(win);
-    }
-
-    if (draw_tree_widget_begin(win, lbl + "instances")) {
-        for (auto ist : scn->instances)
-            draw_tree_widgets(win, "", ist, selection);
-        draw_tree_widget_end(win);
-    }
-
-    if (draw_tree_widget_begin(win, lbl + "materials")) {
-        for (auto mat : scn->materials)
-            draw_tree_widgets(win, "", mat, selection);
-        draw_tree_widget_end(win);
-    }
-
-    if (draw_tree_widget_begin(win, lbl + "textures")) {
-        for (auto txt : scn->textures)
-            draw_tree_widgets(win, "", txt, selection);
-        draw_tree_widget_end(win);
-    }
+    draw_scene_tree_widgets(win, lbl + "cameras", scn->cameras, selection);
+    draw_scene_tree_widgets(win, lbl + "textures", scn->textures, selection);
+    draw_scene_tree_widgets(win, lbl + "materials", scn->materials, selection);
+    draw_scene_tree_widgets(win, lbl + "shapes", scn->shapes, selection);
+    draw_scene_tree_widgets(win, lbl + "instances", scn->instances, selection);
+    draw_scene_tree_widgets(
+        win, lbl + "environments", scn->environments, selection);
+    draw_scene_tree_widgets(win, lbl + "nodes", scn->nodes, selection);
+    draw_scene_tree_widgets(
+        win, lbl + "animations", scn->animations, selection);
 }
 
-inline bool draw_elem_widgets(gl_window* win, scene* scn, texture* txt,
+bool draw_elem_widgets(gl_window* win, scene* scn, texture* txt,
     void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
     draw_separator_widget(win);
     draw_label_widget(win, "path", txt->path);
@@ -11036,308 +13821,435 @@ inline bool draw_elem_widgets(gl_window* win, scene* scn, texture* txt,
     return false;
 }
 
-inline bool draw_elem_widgets(gl_window* win, scene* scn, material* mat,
+bool draw_elem_widgets(gl_window* win, scene* scn, material* mat,
     void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    static auto mtype_names = vector<pair<string, material_type>>{
-        {"specular_roughness", material_type::specular_roughness},
-        {"metallic_roughness", material_type::metallic_roughness},
-        {"specular_glossiness", material_type::specular_glossiness},
-    };
-
-    auto txt_names = vector<pair<string, texture*>>{{"<none>", nullptr}};
-    for (auto txt : scn->textures) txt_names.push_back({txt->path, txt});
-
     auto edited = vector<bool>();
     draw_separator_widget(win);
     draw_label_widget(win, "name", mat->name);
-    edited += draw_value_widget(win, "mtype", mat->mtype, mtype_names);
-    auto ke_l = max_element(mat->ke).second;
+    edited.push_back(
+        draw_value_widget(win, "type", mat->type, material_type_names()));
+    auto ke_l = max_element_value(mat->ke);
     auto ke_c = (ke_l) ? mat->ke / ke_l : zero3f;
-    edited += draw_value_widget(win, "ke l", ke_l, 0, 100);
-    edited += draw_color_widget(win, "ke", ke_c);
+    edited.push_back(draw_value_widget(win, "ke l", ke_l, 0, 100));
+    edited.push_back(draw_color_widget(win, "ke", ke_c));
     mat->ke = ke_l * ke_c;
-    edited += draw_color_widget(win, "kd", mat->kd);
-    edited += draw_color_widget(win, "ks", mat->ks);
-    edited += draw_color_widget(win, "kt", mat->kt);
-    edited += draw_value_widget(win, "rs", mat->rs);
+    edited.push_back(draw_color_widget(win, "kd", mat->kd));
+    edited.push_back(draw_color_widget(win, "ks", mat->ks));
+    edited.push_back(draw_color_widget(win, "kt", mat->kt));
+    edited.push_back(draw_value_widget(win, "rs", mat->rs));
 
-    auto txt_widget = [&txt_names](gl_window* win, const string& lbl,
+    auto txt_widget = [scn](gl_window* win, const string& lbl,
                           texture_info& info) {
         auto edited = vector<bool>();
-        edited += draw_value_widget(win, lbl, info.txt, txt_names);
+        edited.push_back(draw_value_widget(win, lbl, info.txt, scn->textures));
         if (info.txt) {
-            edited += draw_value_widget(win, lbl + " wrap_s", info.wrap_s);
-            edited += draw_value_widget(win, lbl + " wrap_t", info.wrap_t);
-            edited += draw_value_widget(win, lbl + " linear", info.linear);
-            edited += draw_value_widget(win, lbl + " mipmap", info.mipmap);
+            edited.push_back(
+                draw_value_widget(win, lbl + " wrap_s", info.wrap_s));
+            edited.push_back(
+                draw_value_widget(win, lbl + " wrap_t", info.wrap_t));
+            edited.push_back(
+                draw_value_widget(win, lbl + " linear", info.linear));
+            edited.push_back(
+                draw_value_widget(win, lbl + " mipmap", info.mipmap));
         }
         return std::any_of(
             edited.begin(), edited.end(), [](auto x) { return x; });
     };
-    edited += txt_widget(win, "ke_txt", mat->ke_txt);
-    edited += txt_widget(win, "kd_txt", mat->kd_txt);
-    edited += txt_widget(win, "ks_txt", mat->ks_txt);
-    edited += txt_widget(win, "kt_txt", mat->kt_txt);
-    edited += txt_widget(win, "norm_txt", mat->norm_txt);
-    edited += txt_widget(win, "bump_txt", mat->bump_txt);
-    edited += txt_widget(win, "disp_txt", mat->disp_txt);
+    edited.push_back(txt_widget(win, "ke_txt", mat->ke_txt));
+    edited.push_back(txt_widget(win, "kd_txt", mat->kd_txt));
+    edited.push_back(txt_widget(win, "ks_txt", mat->ks_txt));
+    edited.push_back(txt_widget(win, "kt_txt", mat->kt_txt));
+    edited.push_back(txt_widget(win, "norm_txt", mat->norm_txt));
+    edited.push_back(txt_widget(win, "bump_txt", mat->bump_txt));
+    edited.push_back(txt_widget(win, "disp_txt", mat->disp_txt));
     return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
 }
 
-inline bool draw_elem_widgets(gl_window* win, scene* scn, shape* shp,
+bool draw_elem_widgets(gl_window* win, scene* scn, shape_group* sgr,
     void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto mat_names = vector<pair<string, material*>>{{"<none>", nullptr}};
-    for (auto mat : scn->materials) mat_names.push_back({mat->name, mat});
-
-    auto draw_vector_widget = [](gl_window* win, const char* lbl, int len) {
-        if (len) draw_label_widget(win, lbl, len);
-    };
-
     auto edited = vector<bool>();
     draw_separator_widget(win);
-    draw_label_widget(win, "name", shp->name);
-    edited += draw_value_widget(win, "material", shp->mat, mat_names);
-    draw_vector_widget(win, "pos", (int)shp->pos.size());
-    draw_vector_widget(win, "norm", (int)shp->norm.size());
-    draw_vector_widget(win, "texcoord", (int)shp->texcoord.size());
-    draw_vector_widget(win, "color", (int)shp->color.size());
-    draw_vector_widget(win, "tangsp", (int)shp->tangsp.size());
-    draw_vector_widget(win, "radius", (int)shp->radius.size());
-    draw_vector_widget(win, "triangles", (int)shp->triangles.size());
-    draw_vector_widget(win, "quads", (int)shp->quads.size());
-    draw_vector_widget(win, "quads_pos", (int)shp->quads_pos.size());
-    draw_vector_widget(win, "quads_norm", (int)shp->quads_norm.size());
-    draw_vector_widget(win, "quads_texcoord", (int)shp->quads_texcoord.size());
-    draw_vector_widget(win, "lines", (int)shp->lines.size());
-    draw_vector_widget(win, "points", (int)shp->points.size());
-    draw_vector_widget(win, "beziers", (int)shp->beziers.size());
+    draw_label_widget(win, "name", sgr->name);
+    auto sid = 0;
+    for (auto shp : sgr->shapes) {
+        auto ids = " " + to_string(sid);
+        draw_label_widget(win, "name" + ids, shp->name);
+        edited.push_back(
+            draw_value_widget(win, "material" + ids, shp->mat, scn->materials));
+        draw_label_widget(win, "pos" + ids, shp->pos, true);
+        draw_label_widget(win, "norm" + ids, shp->norm, true);
+        draw_label_widget(win, "texcoord" + ids, shp->texcoord, true);
+        draw_label_widget(win, "color" + ids, shp->color, true);
+        draw_label_widget(win, "tangsp" + ids, shp->tangsp, true);
+        draw_label_widget(win, "radius" + ids, shp->radius, true);
+        draw_label_widget(win, "triangles" + ids, shp->triangles, true);
+        draw_label_widget(win, "quads" + ids, shp->quads, true);
+        draw_label_widget(win, "quads_pos" + ids, shp->quads_pos, true);
+        draw_label_widget(win, "quads_norm" + ids, shp->quads_norm, true);
+        draw_label_widget(
+            win, "quads_texcoord" + ids, shp->quads_texcoord, true);
+        draw_label_widget(win, "lines" + ids, shp->lines, true);
+        draw_label_widget(win, "points" + ids, shp->points, true);
+        draw_label_widget(win, "beziers" + ids, shp->beziers, true);
+    }
     return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
 }
 
-inline bool draw_elem_widgets(gl_window* win, scene* scn, camera* cam,
+bool draw_elem_widgets(gl_window* win, scene* scn, camera* cam,
     void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
     auto edited = vector<bool>();
     draw_separator_widget(win);
     draw_label_widget(win, "name", cam->name);
-    edited += draw_value_widget(win, "frame", cam->frame, -10, 10);
-    edited += draw_value_widget(win, "yfov", cam->yfov, 0.1, 4);
-    edited += draw_value_widget(win, "aspect", cam->aspect, 0.1, 4);
-    edited += draw_value_widget(win, "focus", cam->focus, 0.01, 10);
-    edited += draw_value_widget(win, "aperture", cam->aperture);
+    edited.push_back(draw_value_widget(win, "frame", cam->frame, -10, 10));
+    edited.push_back(draw_value_widget(win, "yfov", cam->yfov, 0.1, 4));
+    edited.push_back(draw_value_widget(win, "aspect", cam->aspect, 0.1, 4));
+    edited.push_back(draw_value_widget(win, "focus", cam->focus, 0.01, 10));
+    edited.push_back(draw_value_widget(win, "aperture", cam->aperture));
     return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
 }
 
-inline bool draw_elem_widgets(gl_window* win, scene* scn, instance* ist,
+bool draw_elem_widgets(gl_window* win, scene* scn, instance* ist,
     void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto shp_names = vector<pair<string, shape*>>{{"<none>", nullptr}};
-    for (auto shp : scn->shapes) shp_names.push_back({shp->name, shp});
-
     auto edited = vector<bool>();
     draw_separator_widget(win);
     draw_label_widget(win, "name", ist->name);
-    edited += draw_value_widget(win, "frame", ist->frame, -10, 10);
-    edited += draw_value_widget(win, "shape", ist->shp, shp_names);
+    edited.push_back(draw_value_widget(win, "frame", ist->frame, -10, 10));
+    edited.push_back(draw_value_widget(win, "shape", ist->shp, scn->shapes));
     return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
 }
 
-inline bool draw_elem_widgets(gl_window* win, scene* scn, void*& selection,
+bool draw_elem_widgets(gl_window* win, scene* scn, environment* env,
+    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto txt_widget = [scn](gl_window* win, const string& lbl,
+                          texture_info& info) {
+        auto edited = vector<bool>();
+        edited.push_back(draw_value_widget(win, lbl, info.txt, scn->textures));
+        if (info.txt) {
+            edited.push_back(
+                draw_value_widget(win, lbl + " wrap_s", info.wrap_s));
+            edited.push_back(
+                draw_value_widget(win, lbl + " wrap_t", info.wrap_t));
+            edited.push_back(
+                draw_value_widget(win, lbl + " linear", info.linear));
+            edited.push_back(
+                draw_value_widget(win, lbl + " mipmap", info.mipmap));
+        }
+        return std::any_of(
+            edited.begin(), edited.end(), [](auto x) { return x; });
+    };
+
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    draw_label_widget(win, "name", env->name);
+    edited.push_back(draw_value_widget(win, "frame", env->frame, 0, 0));
+    auto ke_l = max_element_value(env->ke);
+    auto ke_c = (ke_l) ? env->ke / ke_l : zero3f;
+    edited.push_back(draw_value_widget(win, "ke l", ke_l, 0, 100));
+    edited.push_back(draw_color_widget(win, "ke", ke_c));
+    env->ke = ke_l * ke_c;
+    edited.push_back(txt_widget(win, "ke_txt", env->ke_txt));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+bool draw_elem_widgets(gl_window* win, scene* scn, node* nde, void*& selection,
     const unordered_map<texture*, gl_texture>& gl_txt) {
-    for (auto cam : scn->cameras) {
-        if (cam == selection)
-            return draw_elem_widgets(win, scn, cam, selection, gl_txt);
-    }
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    draw_label_widget(win, "name", nde->name);
+    edited.push_back(draw_value_widget(win, "parent", nde->parent, scn->nodes));
+    edited.push_back(draw_value_widget(win, "frame", nde->frame, -10, 10));
+    edited.push_back(draw_value_widget(win, "camera", nde->cam, scn->cameras));
+    edited.push_back(
+        draw_value_widget(win, "instance", nde->ist, scn->instances));
+    edited.push_back(
+        draw_value_widget(win, "environment", nde->env, scn->environments));
+    for (auto idx = 0; idx < nde->children_.size(); idx++)
+        edited.push_back(draw_value_widget(
+            win, "child " + to_string(idx), nde->children_[idx], scn->nodes));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
 
-    for (auto shp : scn->shapes) {
-        if (shp == selection)
-            return draw_elem_widgets(win, scn, shp, selection, gl_txt);
+bool draw_elem_widgets(gl_window* win, scene* scn, animation_group* agr,
+    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    draw_label_widget(win, "name", agr->name);
+    for (auto aid = 0; aid < agr->animations.size(); aid++) {
+        auto anm = agr->animations[aid];
+        auto ids = to_string(aid);
+        edited.push_back(draw_value_widget(win, "name " + ids, anm->name));
+        edited.push_back(draw_value_widget(
+            win, "type " + ids, anm->type, keyframe_type_names()));
+        draw_label_widget(win, "times " + ids, anm->times, true);
+        draw_label_widget(win, "translation " + ids, anm->translation, true);
+        draw_label_widget(win, "rotation " + ids, anm->rotation, true);
+        draw_label_widget(win, "scale " + ids, anm->scaling, true);
     }
-
-    for (auto ist : scn->instances) {
-        if (ist == selection)
-            return draw_elem_widgets(win, scn, ist, selection, gl_txt);
+    for (auto tid = 0; tid < agr->targets.size(); tid++) {
+        auto anm = agr->targets[tid].first;
+        auto nde = agr->targets[tid].second;
+        auto ids = to_string(tid);
+        draw_label_widget(win, "target " + ids, anm->name + " -> " + nde->name);
     }
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
 
-    for (auto mat : scn->materials) {
-        if (mat == selection)
-            return draw_elem_widgets(win, scn, mat, selection, gl_txt);
-    }
-
-    for (auto txt : scn->textures) {
-        if (txt == selection)
-            return draw_elem_widgets(win, scn, txt, selection, gl_txt);
-    }
-
+bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
+    test_texture_params* txt, void*& selection,
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    draw_separator_widget(win);
+    draw_label_widget(win, "name", txt->name);
+    draw_value_widget(win, "type", txt->type, test_texture_names());
+    draw_value_widget(win, "resolution", txt->resolution);
+    draw_value_widget(win, "tile size", txt->tile_size);
+    draw_value_widget(win, "noise size", txt->noise_scale);
+    draw_value_widget(win, "sky sun angle", txt->sky_sunangle);
+    draw_value_widget(win, "normal map", txt->bump_to_normal);
+    draw_value_widget(win, "bump scale", txt->bump_scale);
+#if 0
+        if (contains(gl_txt, txt)) {
+            draw_image_widget(win, get_texture_id(gl_txt.at(txt)), {128, 128},
+                              {txt->width(), txt->height()});
+        }
+#endif
     return false;
 }
 
-inline bool draw_scene_widgets(gl_window* win, const string& lbl, scene* scn,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
+bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
+    test_material_params* mat, void*& selection,
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    edited.push_back(draw_value_widget(win, "name", mat->name));
+    edited.push_back(
+        draw_value_widget(win, "type", mat->type, test_material_names()));
+    edited.push_back(draw_value_widget(win, "emission", mat->emission, 0, 100));
+    edited.push_back(draw_color_widget(win, "color", mat->color));
+    edited.push_back(draw_value_widget(win, "roughness", mat->roughness));
+    edited.push_back(draw_value_widget(win, "texture", mat->texture));
+    edited.push_back(draw_value_widget(win, "normal", mat->normal));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
+    test_shape_params* shp, void*& selection,
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    edited.push_back(draw_value_widget(win, "name", shp->name));
+    edited.push_back(
+        draw_value_widget(win, "type", shp->type, test_shape_names()));
+    edited.push_back(draw_value_widget(win, "material", shp->material));
+    edited.push_back(
+        draw_value_widget(win, "tesselation", shp->tesselation, -1, 8));
+    edited.push_back(
+        draw_value_widget(win, "subdivision", shp->subdivision, -1, 8));
+    edited.push_back(draw_value_widget(win, "scale", shp->scale, 0.01f, 10.0f));
+    edited.push_back(draw_value_widget(win, "faceted", shp->faceted));
+    edited.push_back(
+        draw_value_widget(win, "num lines/points", shp->num, -1, 100000));
+    edited.push_back(draw_value_widget(
+        win, "radius lines/points", shp->radius, 0.0001f, 0.01f));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
+    test_camera_params* cam, void*& selection,
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    edited.push_back(draw_value_widget(win, "name", cam->name));
+    edited.push_back(draw_value_widget(win, "from", cam->from, -10, 10));
+    edited.push_back(draw_value_widget(win, "to", cam->to, -10, 10));
+    edited.push_back(draw_value_widget(win, "yfov", cam->yfov, 0.1, 4));
+    edited.push_back(draw_value_widget(win, "aspect", cam->aspect, 0.1, 4));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
+    test_environment_params* env, void*& selection,
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    edited.push_back(draw_value_widget(win, "name", env->name));
+    edited.push_back(
+        draw_value_widget(win, "rotation", env->rotation, -pif, pif));
+    edited.push_back(draw_value_widget(win, "emission", env->emission));
+    edited.push_back(draw_value_widget(win, "txt", env->texture));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
+    test_node_params* nde, void*& selection,
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    edited.push_back(draw_value_widget(win, "name", nde->name));
+    edited.push_back(draw_value_widget(win, "frame", nde->frame));
+    edited.push_back(draw_value_widget(win, "camera", nde->camera));
+    edited.push_back(draw_value_widget(win, "parent", nde->parent));
+    edited.push_back(draw_value_widget(win, "instance", nde->instance));
+    edited.push_back(draw_value_widget(win, "environment", nde->environment));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
+    test_animation_params* anm, void*& selection,
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    edited.push_back(draw_value_widget(win, "name", anm->name));
+    edited.push_back(draw_value_widget(win, "bezier", anm->bezier));
+    edited.push_back(draw_value_widget(win, "speed", anm->speed));
+    edited.push_back(draw_value_widget(win, "scale", anm->scale));
+    for (auto idx = 0; idx < anm->times.size(); idx++)
+        edited.push_back(
+            draw_value_widget(win, "time " + to_string(idx), anm->times[idx]));
+    for (auto idx = 0; idx < anm->translation.size(); idx++)
+        edited.push_back(draw_value_widget(
+            win, "translation " + to_string(idx), anm->translation[idx]));
+    for (auto idx = 0; idx < anm->rotation.size(); idx++)
+        edited.push_back(draw_value_widget(
+            win, "rotation " + to_string(idx), anm->rotation[idx]));
+    for (auto idx = 0; idx < anm->scaling.size(); idx++)
+        edited.push_back(draw_value_widget(
+            win, "scaling " + to_string(idx), anm->scaling[idx]));
+    for (auto idx = 0; idx < anm->nodes.size(); idx++)
+        edited.push_back(
+            draw_value_widget(win, "node " + to_string(idx), anm->nodes[idx]));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
+    test_instance_params* ist, void*& selection,
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto edited = vector<bool>();
+    draw_separator_widget(win);
+    edited.push_back(draw_value_widget(win, "name", ist->name));
+    edited.push_back(draw_value_widget(win, "frame", ist->frame, -10, 10));
+    edited.push_back(draw_value_widget(win, "shape", ist->shape));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+template <typename T, typename T1>
+bool draw_selected_elem_widgets(gl_window* win, scene* scn,
+    test_scene_params* test_scn, const vector<T*>& elems,
+    vector<T1>& test_elems, void*& selection,
+    void (*update_test_elem)(const scene*, T*, const T1&),
+    const unordered_map<texture*, gl_texture>& gl_txt) {
+    auto selected = (T*)nullptr;
+    for (auto elem : elems)
+        if (elem == selection) {
+            selected = elem;
+            break;
+        }
+    if (!selected) return false;
+    auto test_selected = (T1*)nullptr;
+    for (auto& test_elem : test_elems)
+        if (test_elem.name == selected->name) test_selected = &test_elem;
+    auto edited = vector<bool>();
+    if (test_selected) {
+        edited.push_back(
+            draw_elem_widgets(win, test_scn, test_selected, selection, gl_txt));
+        if (edited.back()) update_test_elem(scn, selected, *test_selected);
+    }
+    edited.push_back(draw_elem_widgets(win, scn, selected, selection, gl_txt));
+    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
+}
+
+template <typename T, typename T1>
+bool draw_add_elem_widgets(gl_window* win, scene* scn, const string& lbl,
+    vector<T*>& elems, vector<T1>& test_elems, void*& selection,
+    void (*update_test_elem)(const scene*, T*, const T1&)) {
+    static auto count = 0;
+    if (draw_button_widget(win, "add " + lbl)) {
+        auto name = lbl + "_" + to_string(count++);
+        elems.push_back(new T());
+        elems.back()->name = name;
+        test_elems.push_back(T1());
+        test_elems.back().name = name;
+        selection = elems.back();
+        update_test_elem(scn, elems.back(), test_elems.back());
+        return true;
+    }
+    draw_continue_widget(win);
+    return false;
+}
+
+bool draw_scene_widgets(gl_window* win, const string& lbl, scene* scn,
+    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt,
+    test_scene_params* test_scn) {
+    static auto test_scn_def = test_scene_params();
+
     if (draw_header_widget(win, lbl)) {
         // draw_scroll_widget_begin(win, "model", 240, false);
         draw_tree_widgets(win, "", scn, selection);
         // draw_scroll_widget_end(win);
-        return draw_elem_widgets(win, scn, selection, gl_txt);
+
+        auto edited = vector<bool>();
+
+        if (test_scn) {
+            edited.push_back(
+                draw_add_elem_widgets(win, scn, "cam", scn->cameras,
+                    test_scn->cameras, selection, update_test_camera));
+            edited.push_back(
+                draw_add_elem_widgets(win, scn, "txt", scn->textures,
+                    test_scn->textures, selection, update_test_texture));
+            edited.push_back(
+                draw_add_elem_widgets(win, scn, "mat", scn->materials,
+                    test_scn->materials, selection, update_test_material));
+            edited.push_back(draw_add_elem_widgets(win, scn, "shp", scn->shapes,
+                test_scn->shapes, selection, update_test_shape));
+            if (edited.back()) {
+                scn->instances.push_back(new instance());
+                scn->instances.back()->name = scn->shapes.back()->name;
+                scn->instances.back()->shp = scn->shapes.back();
+                test_scn->instances.push_back(test_instance_params());
+                test_scn->instances.back().name = scn->instances.back()->name;
+                test_scn->instances.back().shape =
+                    scn->instances.back()->shp->name;
+            }
+            edited.push_back(
+                draw_add_elem_widgets(win, scn, "ist", scn->instances,
+                    test_scn->instances, selection, update_test_instance));
+            edited.push_back(draw_add_elem_widgets(win, scn, "env",
+                scn->environments, test_scn->environments, selection,
+                update_test_environment));
+            edited.push_back(
+                draw_add_elem_widgets(win, scn, "anim", scn->animations,
+                    test_scn->animations, selection, update_test_animation));
+        }
+
+        auto test_scn_res = (test_scn) ? test_scn : &test_scn_def;
+        edited.push_back(
+            draw_selected_elem_widgets(win, scn, test_scn, scn->cameras,
+                test_scn_res->cameras, selection, update_test_camera, gl_txt));
+        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
+            scn->textures, test_scn_res->textures, selection,
+            update_test_texture, gl_txt));
+        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
+            scn->materials, test_scn_res->materials, selection,
+            update_test_material, gl_txt));
+        edited.push_back(
+            draw_selected_elem_widgets(win, scn, test_scn, scn->shapes,
+                test_scn_res->shapes, selection, update_test_shape, gl_txt));
+        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
+            scn->instances, test_scn_res->instances, selection,
+            update_test_instance, gl_txt));
+        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
+            scn->environments, test_scn->environments, selection,
+            update_test_environment, gl_txt));
+        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
+            scn->nodes, test_scn->nodes, selection, update_test_node, gl_txt));
+        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
+            scn->animations, test_scn->animations, selection,
+            update_test_animation, gl_txt));
+        return std::any_of(
+            edited.begin(), edited.end(), [](auto x) { return x; });
     } else
         return false;
 }
 
-#if 0
-        inline void draw_edit_widgets(gl_window* win, scene* scn,
-            void*&  selection, const yshade_state* state) {
-            static auto shape_names =
-                vector<pair<string, int>>{{"cube", 0}, {"sphere", 1}};
-            static auto shape_type = 0;
-            static char txt_filename[1024] = "grid.png";
-
-            auto selected_ist = (instance*)nullptr;
-            auto selected_shp = (shape*)nullptr;
-            auto selected_cam = (camera*)nullptr;
-            auto selected_txt = (texture*)nullptr;
-            auto selected_mat = (material*)nullptr;
-
-            if (*selection) {
-                for (auto ptr : scn->instances)
-                    if (ptr == *selection) selected_node = ptr;
-                for (auto ptr : scn->scenes)
-                    if (ptr == *selection) selected_scene = ptr;
-                for (auto ptr : scn->meshes)
-                    if (ptr == *selection) selected_mesh = ptr;
-                for (auto ptr : scn->cameras)
-                    if (ptr == *selection) selected_cam = ptr;
-                for (auto ptr : scn->materials)
-                    if (ptr == *selection) selected_mat = ptr;
-                for (auto ptr : scn->textures)
-                    if (ptr == *selection) selected_txt = ptr;
-            }
-
-            static auto auto_parent = true;
-            draw_value_widget(win, "set parent from selection", &auto_parent);
-
-            if (draw_button_widget(win, "add mesh")) {
-                static auto count = 0;
-                auto mesh = new ygltf::mesh();
-                mesh->name = "<new mesh " + to_string(count++) + ">";
-                auto shp = new ygltf::shape();
-                mesh->shapes.push_back(shp);
-                shp->name = "<new shape " + to_string(count - 1) + ">";
-                switch (shape_type) {
-                    case 0: {
-                        make_uvcube(
-                            1, 1, shp->triangles, shp->pos, shp->norm, shp->texcoord);
-                    } break;
-                    case 1: {
-                        make_uvsphere(
-                            1, 1, shp->triangles, shp->pos, shp->norm, shp->texcoord);
-                    } break;
-                }
-                if (auto_parent && selected_node) selected_node->msh = mesh;
-                gscn->meshes.push_back(mesh);
-                *selection = mesh;
-            }
-            draw_value_widget(win, "shape type", &shape_type, shape_names);
-
-            if (draw_button_widget(win, "add camera")) {
-                static auto count = 0;
-                auto cam = new ygltf::camera();
-                cam->name = "<new camera " + to_string(count++) + ">";
-                if (auto_parent && selected_node) selected_node->cam = cam;
-                gscn->cameras.push_back(cam);
-                *selection = cam;
-            }
-
-            if (draw_button_widget(win, "add node")) {
-                static auto count = 0;
-                auto node = new ygltf::node();
-                node->name = "<new node " + to_string(count++) + ">";
-                if (auto_parent && selected_node)
-                    selected_node->children.push_back(node);
-                gscn->nodes.push_back(node);
-                *selection = node;
-            }
-
-            if (draw_button_widget(win, "add texture")) {
-                static auto count = 0;
-                auto txt = new ygltf::texture();
-                txt->name = "<new texture " + to_string(count++) + ">";
-                txt->path = txt_filename;
-                auto scn = (app_state*)get_user_pointer(win,);
-                auto dirname = yu::path::get_dirname(scn->filename);
-                try {
-                    if (yimg::is_hdr_filename(txt->path)) {
-                        txt->hdr = yimg::load_image4f(dirname + txt->path);
-                    } else {
-                        txt->ldr = yimg::load_image4b(dirname + txt->path);
-                    }
-                } catch (...) { txt->ldr = image4b(1, 1, {255, 255, 255, 255}); }
-                gscn->textures.push_back(txt);
-                *selection = txt;
-            }
-            draw_text_widget(win, "texture", txt_filename, sizeof(txt_filename));
-
-            if (draw_button_widget(win, "delete")) {
-                if (selected_cam) {
-                    for (auto node : gscn->nodes)
-                        if (node->cam == selected_cam) node->cam = nullptr;
-                    remove(gscn->cameras, selected_cam);
-                    delete selected_cam;
-                    *selection = nullptr;
-                }
-                if (selected_mesh) {
-                    for (auto node : gscn->nodes)
-                        if (node->msh == selected_mesh) node->msh = nullptr;
-                    remove(gscn->meshes, selected_mesh);
-                    delete selected_mesh;
-                    *selection = nullptr;
-                }
-                if (selected_mat) {
-                    for (auto mesh : gscn->meshes)
-                        for (auto shp : mesh->shapes)
-                            if (shp->mat == selected_mat) shp->mat = nullptr;
-                    remove(gscn->materials, selected_mat);
-                    delete selected_mat;
-                    *selection = nullptr;
-                }
-                if (selected_txt) {
-                    for (auto mat : gscn->materials) {
-                        if (mat->emission_txt == selected_txt)
-                            mat->emission_txt = nullptr;
-                        if (mat->normal_txt == selected_txt) mat->normal_txt = nullptr;
-                        if (mat->occlusion_txt == selected_txt)
-                            mat->occlusion_txt = nullptr;
-                        if (mat->metallic_roughness) {
-                            if (mat->metallic_roughness->base_txt == selected_txt)
-                                mat->metallic_roughness->base_txt = nullptr;
-                            if (mat->metallic_roughness->metallic_txt == selected_txt)
-                                mat->metallic_roughness->metallic_txt = nullptr;
-                        }
-                        if (mat->specular_glossiness) {
-                            if (mat->specular_glossiness->diffuse_txt == selected_txt)
-                                mat->specular_glossiness->diffuse_txt = nullptr;
-                            if (mat->specular_glossiness->specular_txt == selected_txt)
-                                mat->specular_glossiness->specular_txt = nullptr;
-                        }
-                    }
-                    remove(gscn->textures, selected_txt);
-                    delete selected_txt;
-                    *selection = nullptr;
-                }
-            }
-        }
-#endif
-
-}  // namespace __impl_scn_widgets
-
-bool draw_scene_widgets(gl_window* win, const string& lbl, scene* scn,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    return __impl_scn_widgets::draw_scene_widgets(
-        win, lbl, scn, selection, gl_txt);
-}
-
 }  // namespace ygl
 
-#endif
-
-// HACK to avoid compilation with MSVC2015 without dirtying code
-#ifdef constexpr
-#undef constexpr
 #endif

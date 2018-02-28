@@ -23,6 +23,8 @@ endif(WIN32)
 add_library(projlib STATIC
     src/ext/json.hpp
     src/ext/stb_image.h
+    src/ext/nanosvg.cpp
+    src/ext/stb_image.cpp
     src/ext/stb_image_write.h
     src/ext/stb_image_resize.h
     src/ext/tinyexr.h
@@ -33,4 +35,3 @@ add_library(projlib STATIC
 
 add_executable(parse src/main.cpp)
 target_link_libraries(parse projlib)
-
