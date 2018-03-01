@@ -24,6 +24,66 @@
 #include <unordered_map>
 
 
+// ======================================================================================
+//                                UTILITIES
+// ======================================================================================
+
+//
+// split
+// split a string according to sep character
+//
+std::vector<std::string> split(std::string text, std::string sep = " ") {
+	std::vector<std::string> results;
+	std::stringstream ss;
+
+	for (char c : text) {
+		if (sep.find(c) != std::string::npos) {
+			auto str = ss.str();
+			if (str.size() > 0) {
+				results.push_back(str);
+				ss = std::stringstream();
+			}
+		}
+		else {
+			ss << c;
+		}
+	}
+	auto str = ss.str();
+	if (str.length() > 0)
+		results.push_back(str);
+	return results;
+}
+
+
+//
+// get_path_and_filename
+// Split a string representing an absolute or relative path in two parts,
+// filename and path.
+//
+std::pair<std::string, std::string> get_path_and_filename(std::string file) {
+	// first, replace all '\' with '/', if any
+	std::stringstream ss;
+	for (char ch : file) {
+		if (ch == '\\')
+			ss << '/';
+		else
+			ss << ch;
+	}
+	file = ss.str();
+	// now divide path and filename
+	auto p1 = file.find_last_of('/');
+	std::string path, filename;
+	if (p1 == std::string::npos) {
+		path = ".";
+		filename = file;
+	}
+	else {
+		path = file.substr(0, p1);
+		filename = file.substr(p1 + 1);
+	}
+	return std::make_pair(path, filename);
+}
+
 class InputEndedException : public std::exception {
 
     virtual const char *what() const throw(){
@@ -85,27 +145,30 @@ class Lexeme {
 };
 
 class PBRTLexer{
-	// TODO: implements lines and column counting inside advance
+
     private:
     int line, column;
     int currentPos;
     std::string text;
     bool inputEnded;
     int lastPos;
-    // Private methods
-
+    
+	// Private methods
     void remove_blanks();
     void advance();
+	std::string read_file(std::string filename);
 
     inline char look(int i = 0){
         return this->text[currentPos + i];
-    }
+	}
 
     bool read_indentifier();
     bool read_number();
     bool read_string();
 
     public:
+	std::string filename;
+	std::string path;
 	Lexeme currentLexeme;
     PBRTLexer(std::string text);
     bool next_lexeme();
@@ -113,10 +176,14 @@ class PBRTLexer{
     int get_line(){ return this->line; };
 };
 
-PBRTLexer::PBRTLexer(std::string text){
+
+//
+// constructor
+//
+PBRTLexer::PBRTLexer(std::string filename){
     this->line = 1;
     this->column = 0;
-    this->text = text;
+	this->text = read_file(filename);
     this->lastPos = text.length() - 1;
     this->currentPos = 0;
 
@@ -124,10 +191,34 @@ PBRTLexer::PBRTLexer(std::string text){
         this->inputEnded = true;
     else
         this->inputEnded = false;
+
+	auto path_and_name = get_path_and_filename(filename);
+	this->path = path_and_name.first;
+	this->filename = path_and_name.second;
 }
 
+
 //
-// parse
+// read_file
+// Load a text file as a string.
+//
+std::string PBRTLexer::read_file(std::string filename) {
+	std::fstream inputFile;
+	inputFile.open(filename, std::ios::in);
+	std::stringstream ss;
+	std::string line;
+	while (std::getline(inputFile, line)) {
+		ss << line << "\n";
+	}
+	
+	// set filename and path properties
+	return ss.str();
+}
+
+
+//
+// next_lexeme
+// get the next lexeme in the file.
 //
 bool PBRTLexer::next_lexeme(){
 	this->remove_blanks();
@@ -149,7 +240,7 @@ bool PBRTLexer::next_lexeme(){
 	}
 
 	std::stringstream errStr;
-	errStr << "Lexical error (line " << this->line << ", column " << this->column << ") input not recognized.";
+	errStr << "Lexical error (file: " << this->filename << ", line " << this->line << ", column " << this->column << ") input not recognized.";
 	throw LexicalErrorException(errStr.str());
 }
 
@@ -307,36 +398,6 @@ void PBRTLexer::remove_blanks(){
  * ===========================================================================================
  */
 
-// -------------------------------------------------------------------------------------------
-// UTILS
-// -------------------------------------------------------------------------------------------
-
-//
-// split
-// split a string according to space character.
-//
-std::vector<std::string> split(std::string text) {
-	std::vector<std::string> results;
-	std::stringstream ss;
-
-	for (char c : text) {
-		if (c == ' ') {
-			auto str = ss.str();
-			if (str.size() > 0) {
-				results.push_back(str);
-				ss = std::stringstream();
-			}
-		}
-		else {
-			ss << c;
-		}
-	}
-	auto str = ss.str();
-	if (str.length() > 0)
-		results.push_back(str);
-	return results;
-}
-
 struct PBRTParameter{
     std::string type;
     std::string name;
@@ -370,10 +431,9 @@ class PBRTParser {
     private:
 
 	// PRIVATE ATTRIBUTES
-    PBRTLexer *lexer;
-	// end of the token stream reached?
-	bool inputEnded = false;
-
+	// stack of lexical analyzers
+	std::vector<PBRTLexer *> lexers{};
+	
 	// What follows are some variables that need to be shared among
 	// parsing statements
 	
@@ -402,8 +462,17 @@ class PBRTParser {
 
 	// PRIVATE METHODS
 	void advance();
-	Lexeme& current_token() {return this->lexer->currentLexeme;};
-	
+	Lexeme& current_token() {
+		return this->lexers.at(0)->currentLexeme;
+	};
+
+	std::string& current_path() {
+		return this->lexers.at(0)->path;
+	}
+
+	std::string& current_file() {
+		return this->lexers.at(0)->path;
+	}
 	// parse a single parameter type, name and associated value
 	bool parse_parameter(PBRTParameter &par, std::string type = "");
 
@@ -467,16 +536,17 @@ class PBRTParser {
 
 	inline void throw_syntax_error(std::string msg){
         std::stringstream ss;
-        ss << "Syntax Error (line " << this->lexer->get_line() << ", column " << this->lexer->get_column() << "): " << msg;
+        ss << "Syntax Error (file: " << this->current_file() << ", line " << this->lexers.at(0)->get_line() <<\
+			", column " << this->lexers.at(0)->get_column() << "): " << msg;
         throw SyntaxErrorException(ss.str());
     };
 
     public:
     
-	// PUBLIC METHODS
+	// public methods
 
-	PBRTParser(std::string text){
-        this->lexer = new PBRTLexer(text);
+	PBRTParser(std::string filename){
+		this->lexers.push_back(new PBRTLexer(filename));
 		this->scn = new ygl::scene();
     };
 
@@ -490,11 +560,18 @@ class PBRTParser {
 //
 void PBRTParser::advance() {
 	try {
-		this->lexer->next_lexeme();
+		this->lexers.at(0)->next_lexeme();
 	}
 	catch (InputEndedException ex) {
-		inputEnded = true;
+		this->lexers.erase(this->lexers.begin());
+		if (lexers.size() == 0) {
+			throw InputEndedException();
+		}
+		// after being restored, we still need to flush away the included filename.
+		// See execute_Include() for more info.
+		this->advance();
 	}
+	
 };
 
 //
@@ -515,7 +592,40 @@ void PBRTParser::ignore_current_directive() {
 }
 
 void PBRTParser::execute_Include() {
-	// TODO
+	this->advance();
+	// now read the file to include
+	if (this->current_token().get_type() != LexemeType::STRING)
+		throw_syntax_error("Expected the name of the file to be included.");
+
+	std::string fileToBeIncl = this->current_token().get_value();
+
+	// call advance here is dangerous. It could end the parsing too soon.
+	// better call it in advance() method, directly on the lexter after being
+	// restored.
+
+	if (fileToBeIncl.length() == 0)
+		throw_syntax_error("Empty filename.");
+	//distinguish if it is relative or absolute path
+	std::stringstream ss;
+	for (char ch : fileToBeIncl) {
+		if (ch == '\\')
+			ss << '/';
+		else
+			ss << ch;
+	}
+	fileToBeIncl = ss.str();
+
+	if (fileToBeIncl[0] == '/' || (fileToBeIncl.length() > 3 && fileToBeIncl[1] == ':' && fileToBeIncl[2] == '/')) {
+		// absolute path
+		this->lexers.insert(this->lexers.begin(), new PBRTLexer(fileToBeIncl));
+	}
+	else {
+		// relative path
+		std::stringstream builtPath;
+		builtPath << this->current_path() << "/" << fileToBeIncl;
+		this->lexers.insert(this->lexers.begin(), new PBRTLexer(builtPath.str()));
+	}
+	this->advance();
 }
 
 bool PBRTParser::parse_preworld_directives() {
@@ -1043,7 +1153,6 @@ void PBRTParser::execute_Camera() {
 			delete data;
 		}
 	}
-	std::cout << "Cam frame: " << cam->frame.o << "\n";
 	scn->cameras.push_back(cam);
 }
 
@@ -1089,6 +1198,9 @@ void PBRTParser::execute_Film() {
 
 	if (xres && yres) {
 		this->defaultAspect = ((float)xres) / ((float)yres);
+
+		for (auto cam : scn->cameras)
+			cam->aspect = this->defaultAspect;
 	}
 }
 
