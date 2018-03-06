@@ -605,28 +605,28 @@ struct ParsedMaterialInfo {
 	std::string type;
 	bool b_kd = false;
 	ygl::vec3f kd;
-	ygl::texture_info textureKd{};
+	ygl::texture * textureKd = nullptr;
 	bool b_ks = false;
 	ygl::vec3f ks;
-	ygl::texture_info textureKs{};
+	ygl::texture* textureKs = nullptr;
 	bool b_kr = false;
 	ygl::vec3f kr;
-	ygl::texture_info textureKr{};
+	ygl::texture* textureKr = nullptr;
 	bool b_kt = false;
 	ygl::vec3f kt;
-	ygl::texture_info textureKt{};
+	ygl::texture* textureKt = nullptr;
 	bool b_ke = false;
 	ygl::vec3f ke;
-	ygl::texture_info textureKe{};
+	ygl::texture* textureKe = nullptr;
 	bool b_eta = false;
 	ygl::vec3f eta;
-	ygl::texture_info textureETA{};
+	ygl::texture* textureETA = nullptr;
 	bool b_k = false;
 	ygl::vec3f k;
-	ygl::texture_info textureK{};
+	ygl::texture* textureK = nullptr;
 	bool b_rs = false;
 	float rs;
-	ygl::texture_info textureRs{};
+	ygl::texture* textureRs = nullptr;
 	bool b_amount = false;
 	float amount;
 	bool b_namedMaterial1 = false;
@@ -634,7 +634,7 @@ struct ParsedMaterialInfo {
 	bool b_namedMaterial2 = false;
 	std::string namedMaterial2;
 	bool b_bump = false;
-	ygl::texture_info bump{};
+	ygl::texture* bump = nullptr;
 };
 
 struct GraphicState {
@@ -1253,7 +1253,7 @@ void PBRTParser::execute_Translate() {
 	z = atof(this->current_token().get_value().c_str());
 	
 	const ygl::vec3f transl_vec { x, y, z };
-	auto transl_mat = ygl::translation_mat4(transl_vec);
+	auto transl_mat = ygl::frame_to_mat(ygl::translation_frame(transl_vec));
 	this->gState.CTM = this->gState.CTM * transl_mat;
 	this->advance();
 }
@@ -1277,7 +1277,8 @@ void PBRTParser::execute_Scale(){
 	z = atof(this->current_token().get_value().c_str());
 
 	const ygl::vec3f scale_vec{ x, y, z };
-	auto scale_mat = ygl::scaling_mat4(scale_vec);
+	
+	auto scale_mat = ygl::frame_to_mat(ygl::scaling_frame(scale_vec));
 	this->gState.CTM =  this->gState.CTM * scale_mat;
 	this->advance();
 }
@@ -1306,7 +1307,7 @@ void PBRTParser::execute_Rotate() {
 	z = atof(this->current_token().get_value().c_str());
 
 	const ygl::vec3f rot_vec{ x, y, z };
-	auto rot_mat = ygl::to_mat(ygl::rotation_frame3(rot_vec, angle));
+	auto rot_mat = ygl::frame_to_mat(ygl::rotation_frame(rot_vec, angle));
 	this->gState.CTM = this->gState.CTM * rot_mat;
 	this->advance();
 }
@@ -1365,7 +1366,7 @@ void PBRTParser::execute_LookAt(){
 
 	const ygl::vec3f up{ up_x, up_y, up_z };
 
-	auto mm = ygl::to_mat(ygl::lookat_frame3(eye, look, up));
+	auto mm = ygl::frame_to_mat(ygl::lookat_frame(eye, look, up));
 	this->defaultFocus = ygl::length(eye - look);
 	this->gState.CTM = this->gState.CTM * mm;
 	this->advance();
@@ -1441,7 +1442,7 @@ void PBRTParser::execute_Camera() {
 	cam->name = join_string_int("camera", scn->cameras.size());
 	// TODO: check if this is right
 	// CTM defines world to camera transformation
-	cam->frame = ygl::to_frame(this->gState.CTM);
+	cam->frame = ygl::mat_to_frame(this->gState.CTM);
 
 	// Parse the camera parameters
 	// First parameter is the type
@@ -1589,7 +1590,7 @@ void PBRTParser::parse_cube(ygl::shape *shp) {
 	// DEBUG: this is a debug function
 	while (this->current_token().get_type() != LexemeType::IDENTIFIER)
 		this->advance();
-	tie(shp->quads, shp->pos, shp->norm, shp->texcoord) = ygl::make_uvcube(0);
+	    ygl::make_uvcube(shp->quads, shp->pos, shp->norm, shp->texcoord, 1);
 }
 
 void PBRTParser::parse_curve(ygl::shape *shp) {
@@ -1654,6 +1655,8 @@ void PBRTParser::parse_curve(ygl::shape *shp) {
 			// TODO: normals?
 			shp->radius.push_back(width);
 		}
+		/*
+		TODO: curves
 		shp->beziers.push_back({ 0, 1, 2, 3 });
 		for (int i = 0; i < splitDepth; i++) {
 			std::vector<int> verts;
@@ -1665,7 +1668,7 @@ void PBRTParser::parse_curve(ygl::shape *shp) {
 			shp->texcoord = ygl::subdivide_vert_bezier(shp->texcoord, verts, segments);
 			shp->color = ygl::subdivide_vert_bezier(shp->color, verts, segments);
 			shp->radius = ygl::subdivide_vert_bezier(shp->radius, verts, segments);
-		}
+		}*/
 	}
 	else {
 		throw_syntax_error("Other types of curve than cubic bezier are not supported.");
@@ -1804,7 +1807,7 @@ void PBRTParser::execute_Shape() {
 		inst->shp = sg;
 		// TODO: check the correctness of this
 		// NOTE: current transformation matrix is used to set the object to world transformation for the shape.
-		inst->frame = ygl::to_frame(this->gState.CTM);
+		inst->frame = ygl::mat_to_frame(this->gState.CTM);
 		inst->name = join_string_int("instance", scn->instances.size());
 		scn->instances.push_back(inst);
 	}
@@ -1866,7 +1869,7 @@ void PBRTParser::execute_ObjectInstance() {
 		sg->shapes.push_back(shp);
 	}
 	// TODO: check the correctness of this
-	inst->frame = ygl::to_frame(finalCTM);
+	inst->frame = ygl::mat_to_frame(finalCTM);
 	scn->instances.push_back(inst);
 }
 
@@ -1927,23 +1930,23 @@ void PBRTParser::parse_InfiniteLight() {
 	env->name = join_string_int("env", scn->environments.size());
 	env->ke = scale * L;
 	if (mapname.length() > 0) {
-		// TODO: better manage the textures
-		this->load_texture_from_file(mapname, env->ke_txt);
+		auto completePath = this->current_path() + mapname;
+		auto path_name = get_path_and_filename(completePath);
+		ygl::texture *txt = new ygl::texture;
+		scn->textures.push_back(txt);
+		txt->path = path_name.first;
+		txt->name = path_name.second;
+		if (ygl::endswith(mapname, ".png")) {
+			txt->ldr = ygl::load_image4b(completePath);
+		}
+		else if (ygl::endswith(mapname, ".exr")) {
+			txt->hdr = ygl::load_image4f(completePath);
+		}
+		else {
+			throw_syntax_error("Texture format not recognised.");
+		}
 	}
-
 	scn->environments.push_back(env);
-}
-
-std::string process_filename(std::string filename) {
-	// TODO: implement handling of relative paths, if needed
-	return filename;
-}
-
-void PBRTParser::load_texture_from_file(std::string filename, ygl::texture_info &txtinfo) {	
-	std::string fname = process_filename(filename);
-	ygl::texture *txt = new ygl::texture;
-	//TODO: maybe some bug in yocto
-	txtinfo.txt = txt;
 }
 
 void PBRTParser::parse_PointLight() {
@@ -2000,7 +2003,7 @@ void PBRTParser::parse_PointLight() {
 	ygl::instance *inst = new ygl::instance;
 	inst->shp = sg;
 	// TODO check validity of frame
-	inst->frame = ygl::to_frame(gState.CTM);
+	inst->frame = ygl::mat_to_frame(gState.CTM);
 	inst->name = join_string_int("instance", scn->instances.size());
 	scn->instances.push_back(inst);
 }
@@ -2101,7 +2104,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 			pmi.b_type = true;
 			if (par.type.compare("string")) 
 				throw_syntax_error("Parameter 'type' expects a 'string' type.");
-			auto data = (std::vector<ygl::string> *)par.value;
+			auto data = (std::vector<std::string> *)par.value;
 			pmi.type = data->at(0);
 			delete data;
 		}
@@ -2122,7 +2125,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 				auto it = gState.nameToTexture.find(txtName);
 				if (it == gState.nameToTexture.end())
 					throw_syntax_error("the specified texture for 'Kd' parameter was not found.");
-				pmi.textureKd.txt = it->second;
+				pmi.textureKd = it->second;
 			}
 			else {
 				throw_syntax_error("'Kd' parameter must be a spectrum, rgb or a texture.");
@@ -2145,7 +2148,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 				auto it = gState.nameToTexture.find(txtName);
 				if (it == gState.nameToTexture.end())
 					throw_syntax_error("the specified texture for 'Ks' parameter was not found.");
-				pmi.textureKs.txt = it->second;
+				pmi.textureKs = it->second;
 			}
 			else {
 				throw_syntax_error("'Ks' parameter must be a spectrum, rgb or a texture.");
@@ -2168,7 +2171,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 				auto it = gState.nameToTexture.find(txtName);
 				if (it == gState.nameToTexture.end())
 					throw_syntax_error("the specified texture for 'Kr' parameter was not found.");
-				pmi.textureKr.txt = it->second;
+				pmi.textureKr = it->second;
 			}
 			else {
 				throw_syntax_error("'Kr' parameter must be a spectrum, rgb or a texture.");
@@ -2191,7 +2194,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 				auto it = gState.nameToTexture.find(txtName);
 				if (it == gState.nameToTexture.end())
 					throw_syntax_error("the specified texture for 'Kt' parameter was not found.");
-				pmi.textureKt.txt = it->second;
+				pmi.textureKt = it->second;
 			}
 			else {
 				throw_syntax_error("'Kt' parameter must be a spectrum, rgb or a texture.");
@@ -2213,7 +2216,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 				auto it = gState.nameToTexture.find(txtName);
 				if (it == gState.nameToTexture.end())
 					throw_syntax_error("the specified texture for 'roughness' parameter was not found.");
-				pmi.textureKs.txt = it->second;
+				pmi.textureKs = it->second;
 			}
 			else {
 				throw_syntax_error("'roughness' parameter must be a float or a texture.");
@@ -2234,7 +2237,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 				auto it = gState.nameToTexture.find(txtName);
 				if (it == gState.nameToTexture.end())
 					throw_syntax_error("the specified texture for 'eta' parameter was not found.");
-				pmi.textureETA.txt = it->second;
+				pmi.textureETA = it->second;
 			}
 			else {
 				throw_syntax_error("'eta' parameter must be a spectrum or a texture.");
@@ -2256,7 +2259,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 				auto it = gState.nameToTexture.find(txtName);
 				if (it == gState.nameToTexture.end())
 					throw_syntax_error("the specified texture for 'k' parameter was not found.");
-				pmi.textureK.txt = it->second;
+				pmi.textureK = it->second;
 			}
 			else {
 				throw_syntax_error("'k' parameter must be a spectrum or a texture.");
@@ -2303,7 +2306,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 			if (it == gState.nameToTexture.end())
 				throw_syntax_error("The specified texture for parameter 'bumpmap' was not found.");
 			pmi.bump = {};
-			pmi.bump.txt = it->second;
+			pmi.bump = it->second;
 		}
 		else {
 			std::cerr << "Material property " << par.name << " ignored..\n";
@@ -2462,20 +2465,20 @@ ygl::texture *blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amoun
 		return nullptr;
 	else if (!txt1) {
 		ygl::texture *txt = new ygl::texture();
-		if (txt2->is_hdr()) {
-			txt->hdr = ygl::image4f(txt2->width(), txt2->height());
+		if (ygl::is_hdr_filename(txt2->name)) {
+			txt->hdr = ygl::image4f(txt2->hdr.width(), txt2->hdr.height());
 
-			for (int w = 0; w < txt2->width(); w++) {
-				for (int h = 0; h <  txt2->height(); h++) {
+			for (int w = 0; w < txt2->hdr.width(); w++) {
+				for (int h = 0; h <  txt2->hdr.height(); h++) {
 					txt->hdr.at(w, h) =  txt2->hdr.at(w, h)*(1 - amount);
 				}
 			}
 		}
 		else {
-			txt->ldr = ygl::image4b(txt2->width(), txt2->height());
+			txt->ldr = ygl::image4b(txt2->ldr.width(), txt2->ldr.height());
 
-			for (int w = 0; w <txt2->width(); w++) {
-				for (int h = 0; h < txt2->height(); h++) {
+			for (int w = 0; w <txt2->ldr.width(); w++) {
+				for (int h = 0; h < txt2->ldr.height(); h++) {
 					txt->ldr.at(w, h) = scale_byte_vec(txt2->ldr.at(w, h), (1 - amount));
 				}
 			}
@@ -2484,20 +2487,20 @@ ygl::texture *blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amoun
 	}
 	else if (!txt2) {
 		ygl::texture *txt = new ygl::texture();
-		if (txt1->is_hdr()) {
-			txt->hdr = ygl::image4f(txt1->width(), txt1->height());
+		if (ygl::is_hdr_filename(txt1->name)) {
+			txt->hdr = ygl::image4f(txt1->hdr.width(), txt1->hdr.height());
 
-			for (int w = 0; w < txt1->width(); w++) {
-				for (int h = 0; h < txt1->height(); h++) {
+			for (int w = 0; w < txt1->hdr.width(); w++) {
+				for (int h = 0; h < txt1->hdr.height(); h++) {
 					txt->hdr.at(w, h) = txt1->hdr.at(w, h)*(1 - amount);
 				}
 			}
 		}
 		else {
-			txt->ldr = ygl::image4b(txt1->width(), txt1->height());
+			txt->ldr = ygl::image4b(txt1->ldr.width(), txt1->ldr.height());
 
-			for (int w = 0; w <txt1->width(); w++) {
-				for (int h = 0; h < txt1->height(); h++) {
+			for (int w = 0; w <txt1->ldr.width(); w++) {
+				for (int h = 0; h < txt1->ldr.height(); h++) {
 					txt->ldr.at(w, h) = scale_byte_vec(txt1->ldr.at(w, h),(1 - amount));
 				}
 			}
@@ -2508,32 +2511,34 @@ ygl::texture *blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amoun
 	else {
 		ygl::texture *txt = new ygl::texture();
 
-		int width = txt1->width() > txt2->width() ? txt1->width() : txt2->width();
-		int height = txt1->height() > txt2->height() ? txt1->height() : txt2->height();
+		if (ygl::is_hdr_filename(txt1->name) && ygl::is_hdr_filename(txt2->name)) {
+			int width = txt1->hdr.width() > txt2->hdr.width() ? txt1->hdr.width() : txt2->hdr.width();
+			int height = txt1->hdr.height() > txt2->hdr.height() ? txt1->hdr.height() : txt2->hdr.height();
 
-		if (txt1->is_hdr() && txt2->is_hdr()) {
 			txt->hdr = ygl::image4f(width, height);
 
 			for (int w = 0; w < width; w++) {
 				for (int h = 0; h < height; h++) {
-					int w1 = w % txt1->width();
-					int h1 = h % txt1->height();
-					int w2 = w % txt2->width();
-					int h2 = h % txt2->height();
+					int w1 = w % txt1->hdr.width();
+					int h1 = h % txt1->hdr.height();
+					int w2 = w % txt2->hdr.width();
+					int h2 = h % txt2->hdr.height();
 
 					txt->hdr.at(w, h) = txt1->hdr.at(w1, h1) * amount + txt2->hdr.at(w2, h2)*(1 - amount);
 				}
 			}
 		}
-		else if (txt1->is_ldr() && txt2->is_ldr()) {
+		else if (!ygl::is_hdr_filename(txt1->name) && !ygl::is_hdr_filename(txt2->name)) {
+			int width = txt1->ldr.width() > txt2->ldr.width() ? txt1->ldr.width() : txt2->ldr.width();
+			int height = txt1->ldr.height() > txt2->ldr.height() ? txt1->ldr.height() : txt2->ldr.height();
 			txt->ldr = ygl::image4b(width, height);
 
 			for (int w = 0; w < width; w++) {
 				for (int h = 0; h < height; h++) {
-					int w1 = w % txt1->width();
-					int h1 = h % txt1->height();
-					int w2 = w % txt2->width();
-					int h2 = h % txt2->height();
+					int w1 = w % txt1->ldr.width();
+					int h1 = h % txt1->ldr.height();
+					int w2 = w % txt2->ldr.width();
+					int h2 = h % txt2->ldr.height();
 
 					auto v1 = scale_byte_vec(txt1->ldr.at(w1, h1), amount);
 					auto v2 = scale_byte_vec(txt2->ldr.at(w2, h2), (1 - amount));
@@ -2584,14 +2589,14 @@ void PBRTParser::parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi,
 	mat->kt = (1 - amount)*mat2->kt + amount * mat1->kt;
 	mat->rs = (1 - amount)*mat2->rs + amount * mat1->rs;
 	// merge textures
-	mat->kd_txt.txt = blend_textures(mat1->kd_txt.txt, mat2->kd_txt.txt, amount);
-	mat->kr_txt.txt = blend_textures(mat1->kr_txt.txt, mat2->kr_txt.txt, amount);
-	mat->ks_txt.txt = blend_textures(mat1->ks_txt.txt, mat2->ks_txt.txt, amount);
-	mat->kt_txt.txt = blend_textures(mat1->kt_txt.txt, mat2->kt_txt.txt, amount);
-	mat->rs_txt.txt = blend_textures(mat1->rs_txt.txt, mat2->rs_txt.txt, amount);
-	mat->bump_txt.txt = blend_textures(mat1->bump_txt.txt, mat2->bump_txt.txt, amount);
-	mat->disp_txt.txt = blend_textures(mat1->disp_txt.txt, mat2->disp_txt.txt, amount);
-	mat->norm_txt.txt = blend_textures(mat1->norm_txt.txt, mat2->norm_txt.txt, amount);
+	mat->kd_txt = blend_textures(mat1->kd_txt, mat2->kd_txt, amount);
+	mat->kr_txt = blend_textures(mat1->kr_txt, mat2->kr_txt, amount);
+	mat->ks_txt = blend_textures(mat1->ks_txt, mat2->ks_txt, amount);
+	mat->kt_txt = blend_textures(mat1->kt_txt, mat2->kt_txt, amount);
+	mat->rs_txt = blend_textures(mat1->rs_txt, mat2->rs_txt, amount);
+	mat->bump_txt = blend_textures(mat1->bump_txt, mat2->bump_txt, amount);
+	mat->disp_txt = blend_textures(mat1->disp_txt, mat2->disp_txt, amount);
+	mat->norm_txt = blend_textures(mat1->norm_txt, mat2->norm_txt, amount);
 
 	mat->op = mat1->op * amount + mat2->op *(1 - amount);
 }

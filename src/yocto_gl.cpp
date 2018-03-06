@@ -73,57 +73,6 @@
 //
 //
 
-//
-// # Todo
-//
-// ## Next
-//
-// - update documentation
-// - update BVH documentation
-//
-// - BVH simplify build functions: can we avoid preallocating nodes?
-// - BVH: maybe put axis with internal
-//
-// - tesselation functions using stencils
-//
-// - BUG: hair look in yitrace
-// - simplify trace_point
-//     - double sided in material functions
-//     - opacity in material functions
-// - simplify trace_light
-//     - maybe include shape directly?
-// - remove background from point?
-// - sample background to sum all environments
-// - lines seems wrong
-// - lines epsilon in ray generation
-// - add make_offset_ray functions
-// - envmap sampling
-// - sobol and cmjs
-//
-// ## Simple denoiser
-//
-// - joint bilateral denoiser
-// - non-local means denoiser
-//
-// ## Infrastructure
-//
-// - check rotation and decompoaition of rotations
-//    - see euclideanspace.com
-//
-// ## Trace
-//
-// - sampler simplification
-//     https://lemire.me/blog/2017/09/18/visiting-all-values-in-an-array-exactly-once-in-random-order/
-//     https://lemire.me/blog/2017/09/26/benchmarking-algorithms-to-visit-all-values-in-an-array-in-random-order/
-// - yitrace: check editing
-// - yitrace: consider update
-//
-// ## Shade
-//
-// - start in edit mode
-// - show edit scene
-//
-
 #include "yocto_gl.h"
 
 #if YGL_IMAGEIO
@@ -207,7 +156,7 @@ void camera_turntable(frame3f& frame, float& focus, const vec2f& rotate,
             vec3f{sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi)};
         auto new_center = frame.o - frame.z * focus;
         auto new_o = new_center + new_z * focus;
-        frame = lookat_frame3(new_o, new_center, {0, 1, 0});
+        frame = lookat_frame(new_o, new_center, {0, 1, 0});
         focus = length(new_o - new_center);
     }
 
@@ -229,9 +178,10 @@ void camera_fps(frame3f& frame, const vec3f& transl, const vec2f& rotate) {
     auto z = orthonormalize(frame.z, y);
     auto x = cross(y, z);
 
-    frame.rot() = rotation_mat3(vec3f{1, 0, 0}, rotate.y) * frame.rot() *
-                  rotation_mat3(vec3f{0, 1, 0}, rotate.x);
-    frame.pos() += transl.x * x + transl.y * y + transl.z * z;
+    frame = {frame_rot(rotation_frame(vec3f{1, 0, 0}, rotate.y)) *
+                 frame_rot(frame) *
+                 frame_rot(rotation_frame(vec3f{0, 1, 0}, rotate.x)),
+        frame.o + transl.x * x + transl.y * y + transl.z * z};
 }
 
 }  // namespace ygl
@@ -471,23 +421,37 @@ float perlin_turbulence_noise(const vec3f& p, float lacunarity, float gain,
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-// Compute per-vertex normals/tangents for lines, triangles and quads with
-// positions pos. Weighted indicated whether the normals/tangents are
-// weighted by line length.
-vector<vec3f> compute_normals(const vector<vec2i>& lines,
-    const vector<vec3i>& triangles, const vector<vec4i>& quads,
-    const vector<vec3f>& pos, bool weighted) {
-    auto norm = vector<vec3f>(pos.size(), zero3f);
+// Compute per-vertex tangents for lines.
+void compute_tangents(const std::vector<vec2i>& lines,
+    const std::vector<vec3f>& pos, std::vector<vec3f>& norm, bool weighted) {
+    norm.resize(pos.size());
+    for (auto& n : norm) n = zero3f;
     for (auto& l : lines) {
         auto n = pos[l.y] - pos[l.x];
         if (!weighted) n = normalize(n);
         for (auto vid : l) norm[vid] += n;
     }
+    for (auto& n : norm) n = normalize(n);
+}
+
+// Compute per-vertex normals for triangles.
+void compute_normals(const std::vector<vec3i>& triangles,
+    const std::vector<vec3f>& pos, std::vector<vec3f>& norm, bool weighted) {
+    norm.resize(pos.size());
+    for (auto& n : norm) n = zero3f;
     for (auto& t : triangles) {
         auto n = cross(pos[t.y] - pos[t.x], pos[t.z] - pos[t.x]);
         if (!weighted) n = normalize(n);
         for (auto vid : t) norm[vid] += n;
     }
+    for (auto& n : norm) n = normalize(n);
+}
+
+// Compute per-vertex normals for quads.
+void compute_normals(const std::vector<vec4i>& quads,
+    const std::vector<vec3f>& pos, std::vector<vec3f>& norm, bool weighted) {
+    norm.resize(pos.size());
+    for (auto& n : norm) n = zero3f;
     for (auto& q : quads) {
         auto n = cross(pos[q.y] - pos[q.x], pos[q.w] - pos[q.x]) +
                  cross(pos[q.w] - pos[q.z], pos[q.x] - pos[q.z]);
@@ -495,7 +459,6 @@ vector<vec3f> compute_normals(const vector<vec2i>& lines,
         for (auto vid : q) norm[vid] += n;
     }
     for (auto& n : norm) n = normalize(n);
-    return norm;
 }
 
 // Compute per-vertex tangent frame for triangle meshes.
@@ -503,11 +466,12 @@ vector<vec3f> compute_normals(const vector<vec2i>& lines,
 // The first three components are the tangent with respect to the U texcoord.
 // The fourth component is the sign of the tangent wrt the V texcoord.
 // Tangent frame is useful in normal mapping.
-vector<vec4f> compute_tangent_frames(const vector<vec3i>& triangles,
-    const vector<vec3f>& pos, const vector<vec3f>& norm,
-    const vector<vec2f>& texcoord, bool weighted) {
-    auto tangu = vector<vec3f>(pos.size(), zero3f);
-    auto tangv = vector<vec3f>(pos.size(), zero3f);
+void compute_tangent_frames(const std::vector<vec3i>& triangles,
+    const std::vector<vec3f>& pos, const std::vector<vec3f>& norm,
+    const std::vector<vec2f>& texcoord, std::vector<vec4f>& tangsp,
+    bool weighted) {
+    auto tangu = std::vector<vec3f>(pos.size(), zero3f);
+    auto tangv = std::vector<vec3f>(pos.size(), zero3f);
     for (auto& t : triangles) {
         auto tutv = triangle_tangents_fromuv(pos[t.x], pos[t.y], pos[t.z],
             texcoord[t.x], texcoord[t.y], texcoord[t.z]);
@@ -517,20 +481,20 @@ vector<vec4f> compute_tangent_frames(const vector<vec3i>& triangles,
     }
     for (auto& t : tangu) t = normalize(t);
     for (auto& t : tangv) t = normalize(t);
-    auto tangsp = vector<vec4f>(pos.size(), zero4f);
+    tangsp.resize(pos.size());
+    for (auto& t : tangsp) t = zero4f;
     for (auto i = 0; i < pos.size(); i++) {
         tangu[i] = orthonormalize(tangu[i], norm[i]);
         auto s = (dot(cross(norm[i], tangu[i]), tangv[i]) < 0) ? -1.0f : 1.0f;
         tangsp[i] = {tangu[i].x, tangu[i].y, tangu[i].z, s};
     }
-    return tangsp;
 }
 
 // Apply skinning
-void compute_skinning(const vector<vec3f>& pos, const vector<vec3f>& norm,
-    const vector<vec4f>& weights, const vector<vec4i>& joints,
-    const vector<mat4f>& xforms, vector<vec3f>& skinned_pos,
-    vector<vec3f>& skinned_norm) {
+void compute_skinning(const std::vector<vec3f>& pos,
+    const std::vector<vec3f>& norm, const std::vector<vec4f>& weights,
+    const std::vector<vec4i>& joints, const std::vector<mat4f>& xforms,
+    std::vector<vec3f>& skinned_pos, std::vector<vec3f>& skinned_norm) {
     skinned_pos.resize(pos.size());
     skinned_norm.resize(norm.size());
     for (auto i = 0; i < pos.size(); i++) {
@@ -550,10 +514,10 @@ void compute_skinning(const vector<vec3f>& pos, const vector<vec3f>& norm,
 }
 
 // Apply skinning
-void compute_skinning(const vector<vec3f>& pos, const vector<vec3f>& norm,
-    const vector<vec4f>& weights, const vector<vec4i>& joints,
-    const vector<frame3f>& xforms, vector<vec3f>& skinned_pos,
-    vector<vec3f>& skinned_norm) {
+void compute_skinning(const std::vector<vec3f>& pos,
+    const std::vector<vec3f>& norm, const std::vector<vec4f>& weights,
+    const std::vector<vec4i>& joints, const std::vector<frame3f>& xforms,
+    std::vector<vec3f>& skinned_pos, std::vector<vec3f>& skinned_norm) {
     skinned_pos.resize(pos.size());
     skinned_norm.resize(norm.size());
     for (auto i = 0; i < pos.size(); i++) {
@@ -573,10 +537,10 @@ void compute_skinning(const vector<vec3f>& pos, const vector<vec3f>& norm,
 }
 
 // Apply skinning as specified in Khronos glTF
-void compute_matrix_skinning(const vector<vec3f>& pos,
-    const vector<vec3f>& norm, const vector<vec4f>& weights,
-    const vector<vec4i>& joints, const vector<mat4f>& xforms,
-    vector<vec3f>& skinned_pos, vector<vec3f>& skinned_norm) {
+void compute_matrix_skinning(const std::vector<vec3f>& pos,
+    const std::vector<vec3f>& norm, const std::vector<vec4f>& weights,
+    const std::vector<vec4i>& joints, const std::vector<mat4f>& xforms,
+    std::vector<vec3f>& skinned_pos, std::vector<vec3f>& skinned_norm) {
     skinned_pos.resize(pos.size());
     skinned_norm.resize(norm.size());
     for (auto i = 0; i < pos.size(); i++) {
@@ -590,10 +554,10 @@ void compute_matrix_skinning(const vector<vec3f>& pos,
 }
 
 // Create an array of edges.
-vector<vec2i> get_edges(const vector<vec2i>& lines,
-    const vector<vec3i>& triangles, const vector<vec4i>& quads) {
-    auto edges = vector<vec2i>();
-    auto eset = unordered_set<vec2i>();
+std::vector<vec2i> get_edges(const std::vector<vec2i>& lines,
+    const std::vector<vec3i>& triangles, const std::vector<vec4i>& quads) {
+    auto edges = std::vector<vec2i>();
+    auto eset = std::unordered_set<vec2i>();
     for (auto e : lines) {
         e = {min(e.x, e.y), max(e.x, e.y)};
         if (!eset.insert(e).second) continue;
@@ -622,66 +586,9 @@ vector<vec2i> get_edges(const vector<vec2i>& lines,
     return edges;
 }
 
-// Create an array of boundary edges. Lines are always considered boundaries.
-vector<vec2i> get_boundary_edges(const vector<vec2i>& lines,
-    const vector<vec3i>& triangles, const vector<vec4i>& quads) {
-    auto ecount = unordered_map<vec2i, int>();
-
-    // lines are added manually later
-    for (auto l : lines) { ecount.insert({l, 2}); }
-    for (auto t : triangles) {
-        for (auto e : {vec2i{t.x, t.y}, vec2i{t.y, t.z}, vec2i{t.z, t.x}}) {
-            e = {min(e.x, e.y), max(e.x, e.y)};
-            auto ins = ecount.insert({e, 1});
-            if (!ins.second) ins.first->second += 1;
-        }
-    }
-    for (auto q : quads) {
-        for (auto e : {vec2i{q.x, q.y}, vec2i{q.y, q.z}, vec2i{q.z, q.w},
-                 vec2i{q.w, q.x}}) {
-            if (e.x == e.y) continue;
-            e = {min(e.x, e.y), max(e.x, e.y)};
-            auto ins = ecount.insert({e, 1});
-            if (!ins.second) ins.first->second += 1;
-        }
-    }
-
-    auto boundary = lines;
-    for (auto ec : ecount) {
-        if (ec.second > 1) continue;
-        boundary.push_back(ec.first);
-    }
-
-    return boundary;
-}
-
-// Get a list of all unique vertices.
-vector<int> get_verts(const vector<vec2i>& lines,
-    const vector<vec3i>& triangles, const vector<vec4i>& quads) {
-    auto verts = vector<int>();
-    auto vset = unordered_set<int>();
-    for (auto l : lines)
-        for (auto vid : l)
-            if (vset.insert(vid).second) verts.push_back(vid);
-    for (auto t : triangles)
-        for (auto vid : t)
-            if (vset.insert(vid).second) verts.push_back(vid);
-    for (auto q : quads)
-        for (auto vid : q)
-            if (vset.insert(vid).second) verts.push_back(vid);
-    return verts;
-}
-
-// Create an array of boundary vertices. Lines are always considered
-// boundaries.
-vector<int> get_boundary_verts(const vector<vec2i>& lines,
-    const vector<vec3i>& triangles, const vector<vec4i>& quads) {
-    return get_verts(get_boundary_edges(lines, triangles, quads), {}, {});
-}
-
 // Convert quads to triangles
-vector<vec3i> convert_quads_to_triangles(const vector<vec4i>& quads) {
-    auto triangles = vector<vec3i>();
+std::vector<vec3i> convert_quads_to_triangles(const std::vector<vec4i>& quads) {
+    auto triangles = std::vector<vec3i>();
     triangles.reserve(quads.size() * 2);
     for (auto& q : quads) {
         triangles.push_back({q.x, q.y, q.w});
@@ -692,9 +599,9 @@ vector<vec3i> convert_quads_to_triangles(const vector<vec4i>& quads) {
 
 // Convert quads to triangles with a diamond-like topology.
 // Quads have to be consecutive one row after another.
-vector<vec3i> convert_quads_to_triangles(
-    const vector<vec4i>& quads, int row_length) {
-    auto triangles = vector<vec3i>();
+std::vector<vec3i> convert_quads_to_triangles(
+    const std::vector<vec4i>& quads, int row_length) {
+    auto triangles = std::vector<vec3i>();
     triangles.reserve(quads.size() * 2);
     for (auto& q : quads) {
         triangles.push_back({q.x, q.y, q.w});
@@ -721,8 +628,8 @@ vector<vec3i> convert_quads_to_triangles(
 }
 
 // Convert beziers to lines using 3 lines for each bezier.
-vector<vec2i> convert_bezier_to_lines(const vector<vec4i>& beziers) {
-    auto lines = vector<vec2i>();
+std::vector<vec2i> convert_bezier_to_lines(const std::vector<vec4i>& beziers) {
+    auto lines = std::vector<vec2i>();
     lines.reserve(beziers.size() * 3);
     for (auto& b : beziers) {
         lines.push_back({b.x, b.y});
@@ -734,14 +641,15 @@ vector<vec2i> convert_bezier_to_lines(const vector<vec4i>& beziers) {
 
 // Convert face varying data to single primitives. Returns the quads indices
 // and filled vectors for pos, norm and texcoord.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-convert_face_varying(const vector<vec4i>& quads_pos,
-    const vector<vec4i>& quads_norm, const vector<vec4i>& quads_texcoord,
-    const vector<vec3f>& pos, const vector<vec3f>& norm,
-    const vector<vec2f>& texcoord) {
+std::tuple<std::vector<vec4i>, std::vector<vec3f>, std::vector<vec3f>,
+    std::vector<vec2f>>
+convert_face_varying(const std::vector<vec4i>& quads_pos,
+    const std::vector<vec4i>& quads_norm,
+    const std::vector<vec4i>& quads_texcoord, const std::vector<vec3f>& pos,
+    const std::vector<vec3f>& norm, const std::vector<vec2f>& texcoord) {
     // make faces unique
-    unordered_map<vec3i, int> vert_map;
-    auto quads = vector<vec4i>(quads_pos.size());
+    std::unordered_map<vec3i, int> vert_map;
+    auto quads = std::vector<vec4i>(quads_pos.size());
     for (auto fid = 0; fid < quads_pos.size(); fid++) {
         for (auto c = 0; c < 4; c++) {
             auto v = vec3i{
@@ -758,17 +666,17 @@ convert_face_varying(const vector<vec4i>& quads_pos,
     }
 
     // fill vert data
-    auto qpos = vector<vec3f>();
+    auto qpos = std::vector<vec3f>();
     if (!pos.empty()) {
         qpos.resize(vert_map.size());
         for (auto& kv : vert_map) { qpos[kv.second] = pos[kv.first.x]; }
     }
-    auto qnorm = vector<vec3f>();
+    auto qnorm = std::vector<vec3f>();
     if (!norm.empty()) {
         qnorm.resize(vert_map.size());
         for (auto& kv : vert_map) { qnorm[kv.second] = norm[kv.first.y]; }
     }
-    auto qtexcoord = vector<vec2f>();
+    auto qtexcoord = std::vector<vec2f>();
     if (!texcoord.empty()) {
         qtexcoord.resize(vert_map.size());
         for (auto& kv : vert_map) {
@@ -780,264 +688,9 @@ convert_face_varying(const vector<vec4i>& quads_pos,
     return {quads, qpos, qnorm, qtexcoord};
 }
 
-// wrapper for implementation below
-inline float _subdivide_normalize(float x) { return x; }
-inline vec2f _subdivide_normalize(const vec2f& x) { return normalize(x); }
-inline vec3f _subdivide_normalize(const vec3f& x) { return normalize(x); }
-inline vec4f _subdivide_normalize(const vec4f& x) { return normalize(x); }
-
-// Tesselate lines, triangles and quads by spolitting edges.
-// Returns the tesselated elements and dictionaries for vertex calculations.
-tuple<vector<vec2i>, vector<vec3i>, vector<vec4i>, vector<vec2i>, vector<vec4i>>
-subdivide_elems_linear(const vector<vec2i>& lines,
-    const vector<vec3i>& triangles, const vector<vec4i>& quads, int nverts) {
-    if (!nverts) return {};
-    auto emap = unordered_map<vec2i, int>();
-    auto edges = vector<vec2i>();
-    for (auto e : lines) {
-        if (contains(emap, e)) continue;
-        emap[{e.x, e.y}] = nverts + (int)edges.size();
-        emap[{e.y, e.x}] = nverts + (int)edges.size();
-        edges.push_back(e);
-    }
-    for (auto& t : triangles) {
-        for (auto e : {vec2i{t.x, t.y}, vec2i{t.y, t.z}, vec2i{t.z, t.x}}) {
-            if (contains(emap, e)) continue;
-            emap[{e.x, e.y}] = nverts + (int)edges.size();
-            emap[{e.y, e.x}] = nverts + (int)edges.size();
-            edges.push_back(e);
-        }
-    }
-    for (auto& q : quads) {
-        for (auto e : {vec2i{q.x, q.y}, vec2i{q.y, q.z}, vec2i{q.z, q.w},
-                 vec2i{q.w, q.x}}) {
-            if (e.x == e.y) continue;
-            if (contains(emap, e)) continue;
-            emap[{e.x, e.y}] = nverts + (int)edges.size();
-            emap[{e.y, e.x}] = nverts + (int)edges.size();
-            edges.push_back(e);
-        }
-    }
-
-    auto tlines = vector<vec2i>();
-    tlines.reserve(lines.size() * 2);
-    for (auto& l : lines) {
-        tlines.push_back({l.x, emap.at(l)});
-        tlines.push_back({emap.at(l), l.y});
-    }
-
-    auto ttriangles = vector<vec3i>();
-    ttriangles.reserve(triangles.size() * 4);
-    for (auto& t : triangles) {
-        ttriangles.push_back({t.x, emap.at({t.x, t.y}), emap.at({t.z, t.x})});
-        ttriangles.push_back({t.y, emap.at({t.y, t.z}), emap.at({t.x, t.y})});
-        ttriangles.push_back({t.z, emap.at({t.z, t.x}), emap.at({t.y, t.z})});
-        ttriangles.push_back(
-            {emap.at({t.x, t.y}), emap.at({t.y, t.z}), emap.at({t.z, t.x})});
-    }
-
-    auto tquads = vector<vec4i>();
-    tquads.reserve(quads.size() * 4);
-    for (auto fid = 0; fid < quads.size(); fid++) {
-        auto& f = quads[fid];
-        auto fvert = nverts + (int)edges.size() + fid;
-        if (f.z != f.w) {
-            tquads.push_back(
-                {f.x, emap.at({f.x, f.y}), fvert, emap.at({f.w, f.x})});
-            tquads.push_back(
-                {f.y, emap.at({f.y, f.z}), fvert, emap.at({f.x, f.y})});
-            tquads.push_back(
-                {f.z, emap.at({f.z, f.w}), fvert, emap.at({f.y, f.z})});
-            tquads.push_back(
-                {f.w, emap.at({f.w, f.x}), fvert, emap.at({f.z, f.w})});
-        } else {
-            tquads.push_back(
-                {f.x, emap.at({f.x, f.y}), fvert, emap.at({f.z, f.x})});
-            tquads.push_back(
-                {f.y, emap.at({f.y, f.z}), fvert, emap.at({f.x, f.y})});
-            tquads.push_back(
-                {f.z, emap.at({f.z, f.x}), fvert, emap.at({f.y, f.z})});
-        }
-    }
-    tquads.shrink_to_fit();
-
-    return {tlines, ttriangles, tquads, edges, quads};
-}
-
-// Subdivide vertex properties given the maps
-template <typename T>
-vector<T> subdivide_vert_linear(const vector<T>& vert,
-    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized) {
-    if (vert.empty()) return {};
-
-    auto tvert = vector<T>();
-    tvert.reserve(vert.size() + edges.size() + faces.size());
-
-    append(tvert, vert);
-    for (auto e : edges) tvert.push_back((vert[e.x] + vert[e.y]) / 2);
-    for (auto f : faces) {
-        if (f.z != f.w)
-            tvert.push_back(
-                (vert[f.x] + vert[f.y] + vert[f.z] + vert[f.w]) / 4);
-        else
-            tvert.push_back((vert[f.x] + vert[f.y] + vert[f.z]) / 3);
-    }
-
-    if (normalized) {
-        for (auto& n : tvert) n = _subdivide_normalize(n);
-    }
-
-    return tvert;
-}
-
-// template instantiations
-template vector<float> subdivide_vert_linear(const vector<float>& vert,
-    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized);
-template vector<vec2f> subdivide_vert_linear(const vector<vec2f>& vert,
-    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized);
-template vector<vec3f> subdivide_vert_linear(const vector<vec3f>& vert,
-    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized);
-template vector<vec4f> subdivide_vert_linear(const vector<vec4f>& vert,
-    const vector<vec2i>& edges, const vector<vec4i>& faces, bool normalized);
-
-// Performs the smoothing step of Catmull-Clark. Start with a tesselate quad
-// mesh obtained with subdivide_elems_linear() and subdivide_vert_linear(). To
-// handle open meshes with boundary, get the boundary from make_boundary_edge()
-// and pass it as crease_lines. To fix the boundary entirely, just get the
-// boundary vertices and pass it as creases.
-template <typename T>
-vector<T> subdivide_vert_catmullclark(const vector<vec4i>& quads,
-    const vector<T>& vert, const vector<vec2i>& crease_tlines,
-    const vector<int>& crease_tpoints, bool normalized) {
-    if (quads.empty() || vert.empty()) return vert;
-
-    // define vertex valence ---------------------------
-    auto val = vector<int>(vert.size(), 2);
-    for (auto e : crease_tlines)
-        for (auto vid : e) val[vid] = 1;
-    for (auto vid : crease_tpoints) val[vid] = 0;
-
-    // averaging pass ----------------------------------
-    auto tvert = vector<T>(vert.size(), T());
-    auto count = vector<int>(vert.size(), 0);
-    for (auto p : crease_tpoints) {
-        auto c = vert[p];
-        if (val[p] == 0) tvert[p] += c;
-        if (val[p] == 0) count[p] += 1;
-    }
-    for (auto e : crease_tlines) {
-        auto c = (vert[e.x] + vert[e.y]) / 2.0f;
-        for (auto vid : e) {
-            if (val[vid] == 1) tvert[vid] += c;
-            if (val[vid] == 1) count[vid] += 1;
-        }
-    }
-    for (auto& f : quads) {
-        auto c = (vert[f.x] + vert[f.y] + vert[f.z] + vert[f.w]) / 4.0f;
-        for (auto vid : f) {
-            if (val[vid] == 2) tvert[vid] += c;
-            if (val[vid] == 2) count[vid] += 1;
-        }
-    }
-    for (auto i = 0; i < vert.size(); i++) { tvert[i] /= (float)count[i]; }
-
-    // correction pass ----------------------------------
-    // p = p + (avg_p - p) * (4/avg_count)
-    for (auto i = 0; i < vert.size(); i++) {
-        if (val[i] != 2) continue;
-        tvert[i] = vert[i] + (tvert[i] - vert[i]) * (4.0f / count[i]);
-    }
-
-    if (normalized) {
-        for (auto& v : tvert) v = _subdivide_normalize(v);
-    }
-
-    return tvert;
-}
-
-// explicit instantiations
-template vector<float> subdivide_vert_catmullclark(const vector<vec4i>& quads,
-    const vector<float>& vert, const vector<vec2i>& crease_tlines,
-    const vector<int>& crease_tpoints, bool normalized);
-template vector<vec2f> subdivide_vert_catmullclark(const vector<vec4i>& quads,
-    const vector<vec2f>& vert, const vector<vec2i>& crease_tlines,
-    const vector<int>& crease_tpoints, bool normalized);
-template vector<vec3f> subdivide_vert_catmullclark(const vector<vec4i>& quads,
-    const vector<vec3f>& vert, const vector<vec2i>& crease_tlines,
-    const vector<int>& crease_tpoints, bool normalized);
-template vector<vec4f> subdivide_vert_catmullclark(const vector<vec4i>& quads,
-    const vector<vec4f>& vert, const vector<vec2i>& crease_tlines,
-    const vector<int>& crease_tpoints, bool normalized);
-
-// Subdivide bezier recursive by splitting each segment into two in the middle.
-// Returns the tesselated elements and dictionaries for vertex calculations.
-tuple<vector<vec4i>, vector<int>, vector<vec4i>> subdivide_bezier_recursive(
-    const vector<vec4i>& beziers, int nverts) {
-    if (!nverts) return {};
-    auto vmap = unordered_map<int, int>();
-    auto verts = vector<int>();
-    for (auto& b : beziers) {
-        if (!contains(vmap, b.x)) {
-            vmap[b.x] = verts.size();
-            verts.push_back(b.x);
-        }
-        if (!contains(vmap, b.w)) {
-            vmap[b.w] = verts.size();
-            verts.push_back(b.w);
-        }
-    }
-    auto tbeziers = vector<vec4i>();
-    tbeziers.reserve(beziers.size() * 2);
-    for (auto bid = 0; bid < beziers.size(); bid++) {
-        auto& b = beziers[bid];
-        auto bo = (int)verts.size() + bid * 5;
-        tbeziers.push_back({vmap.at(b.x), bo + 0, bo + 1, bo + 2});
-        tbeziers.push_back({bo + 2, bo + 3, bo + 4, vmap.at(b.w)});
-    }
-    return {tbeziers, verts, beziers};
-}
-
-// Subdivide vertex properties given the maps
-template <typename T>
-vector<T> subdivide_vert_bezier(const vector<T>& vert, const vector<int>& verts,
-    const vector<vec4i>& segments, bool normalized) {
-    if (vert.empty()) return {};
-
-    auto tvert = vector<T>();
-    tvert.reserve(verts.size() + segments.size() * 5);
-
-    for (auto v : verts) tvert.push_back(vert[v]);
-    for (auto s : segments) {
-        tvert.push_back(vert[s.x] * (1.f / 2) + vert[s.y] * (1.f / 2));
-        tvert.push_back(vert[s.x] * (1.f / 4) + vert[s.y] * (1.f / 2) +
-                        vert[s.z] * (1.f / 4));
-        tvert.push_back(vert[s.x] * (1.f / 8) + vert[s.y] * (3.f / 8) +
-                        vert[s.z] * (3.f / 8) + vert[s.w] * (1.f / 8));
-        tvert.push_back(vert[s.y] * (1.f / 4) + vert[s.z] * (1.f / 2) +
-                        vert[s.w] * (1.f / 4));
-        tvert.push_back(vert[s.z] * (1.f / 2) + vert[s.w] * (1.f / 2));
-    }
-
-    if (normalized) {
-        for (auto& n : tvert) n = _subdivide_normalize(n);
-    }
-
-    return tvert;
-}
-
-// template instantiations
-template vector<float> subdivide_vert_bezier(const vector<float>& vert,
-    const vector<int>& verts, const vector<vec4i>& segments, bool normalized);
-template vector<vec2f> subdivide_vert_bezier(const vector<vec2f>& vert,
-    const vector<int>& verts, const vector<vec4i>& segments, bool normalized);
-template vector<vec3f> subdivide_vert_bezier(const vector<vec3f>& vert,
-    const vector<int>& verts, const vector<vec4i>& segments, bool normalized);
-template vector<vec4f> subdivide_vert_bezier(const vector<vec4f>& vert,
-    const vector<int>& verts, const vector<vec4i>& segments, bool normalized);
-
 // Generate a rectangular grid of usteps x vsteps uv values for parametric
 // surface generation.
-tuple<vector<vec4i>, vector<vec2f>> make_uvquads(
+void make_quads_uv(std::vector<vec4i>& quads, std::vector<vec2f>& uv,
     int usteps, int vsteps, bool uwrap, bool vwrap, bool vpole0, bool vpole1) {
     auto uvert = (uwrap) ? usteps : usteps + 1;
     auto vvert = (vwrap) ? vsteps : vsteps + 1;
@@ -1047,14 +700,14 @@ tuple<vector<vec4i>, vector<vec2f>> make_uvquads(
         return j * uvert + i;
     };
 
-    auto uv = vector<vec2f>(uvert * vvert);
+    uv = std::vector<vec2f>(uvert * vvert);
     for (auto j = 0; j < vvert; j++) {
         for (auto i = 0; i < uvert; i++) {
             uv[vid(i, j)] = {i / (float)usteps, j / (float)vsteps};
         }
     }
 
-    auto quads = vector<vec4i>(usteps * vsteps);
+    quads = std::vector<vec4i>(usteps * vsteps);
     for (auto j = 0; j < vsteps; j++) {
         for (auto i = 0; i < usteps; i++) {
             quads[j * usteps + i] = {
@@ -1063,8 +716,8 @@ tuple<vector<vec4i>, vector<vec2f>> make_uvquads(
     }
 
     if (vpole0) {
-        if (vwrap) throw runtime_error("cannot have a pole with wrapping");
-        uv = vector<vec2f>(uv.begin() + uvert, uv.end());
+        if (vwrap) throw std::runtime_error("cannot have a pole with wrapping");
+        uv = std::vector<vec2f>(uv.begin() + uvert, uv.end());
         uv.insert(uv.begin(), {0, 0});
         for (auto& q : quads) {
             for (auto& vid : q) { vid = (vid < usteps) ? 0 : vid - uvert + 1; }
@@ -1073,121 +726,473 @@ tuple<vector<vec4i>, vector<vec2f>> make_uvquads(
     }
 
     if (vpole1) {
-        if (vwrap) throw runtime_error("cannot have a pole with wrapping");
+        if (vwrap) throw std::runtime_error("cannot have a pole with wrapping");
         auto pid = (int)uv.size() - uvert;
-        uv = vector<vec2f>(uv.begin(), uv.end() - uvert);
+        uv = std::vector<vec2f>(uv.begin(), uv.end() - uvert);
         uv.insert(uv.end(), {0, 1});
         for (auto& q : quads) {
             for (auto& vid : q) { vid = (vid < pid) ? vid : pid; }
         }
     }
-
-    return {quads, uv};
 }
 
 // Generate parametric num lines of usteps segments.
-tuple<vector<vec2i>, vector<vec2f>> make_uvlines(int num, int usteps) {
+void make_lines_uv(
+    std::vector<vec2i>& lines, std::vector<vec2f>& uv, int num, int usteps) {
     auto vid = [usteps](int i, int j) { return j * (usteps + 1) + i; };
-    auto uv = vector<vec2f>((usteps + 1) * num);
+    uv = std::vector<vec2f>((usteps + 1) * num);
     for (auto j = 0; j < num; j++) {
         for (auto i = 0; i <= usteps; i++) {
             uv[vid(i, j)] = {i / (float)usteps, j / (float)num};
         }
     }
 
-    auto lines = vector<vec2i>(usteps * num);
+    lines = std::vector<vec2i>(usteps * num);
     for (int j = 0; j < num; j++) {
         for (int i = 0; i < usteps; i++) {
             lines[j * usteps + i] = {vid(i, j), vid(i + 1, j)};
         }
     }
-
-    return {lines, uv};
 }
 
 // Generate a parametric point set. Mostly here for completeness.
-tuple<vector<int>, vector<vec2f>> make_uvpoints(int num) {
-    auto uv = vector<vec2f>(num);
+void make_points_uv(std::vector<int>& points, std::vector<vec2f>& uv, int num) {
+    uv = std::vector<vec2f>(num);
     for (auto i = 0; i < num; i++) { uv[i] = {i / (float)num, 0}; }
 
-    auto points = vector<int>(num);
+    points = std::vector<int>(num);
     for (auto i = 0; i < num; i++) points[i] = i;
-
-    return {points, uv};
 }
 
-// Merge elements between shapes. The elements are merged by increasing the
-// array size of the second array by the number of vertices of the first.
-// Vertex data can then be concatenated successfully.
-tuple<vector<vec2i>, vector<vec3i>, vector<vec4i>> merge_elems(int nverts,
-    const vector<vec2i>& lines1, const vector<vec3i>& triangles1,
-    const vector<vec4i>& quads1, const vector<vec2i>& lines2,
-    const vector<vec3i>& triangles2, const vector<vec4i>& quads2) {
-    auto lines = join(lines1, lines2);
-    auto triangles = join(triangles1, triangles2);
-    auto quads = join(quads1, quads2);
-    for (auto i = lines1.size(); i < lines.size(); i++)
-        lines[i] += {nverts, nverts};
-    for (auto i = triangles1.size(); i < triangles.size(); i++)
-        triangles[i] += {nverts, nverts, nverts};
-    for (auto i = quads1.size(); i < quads.size(); i++)
-        quads[i] += {nverts, nverts, nverts, nverts};
-    return {lines, triangles, quads};
+// Subdivide lines.
+template <typename T>
+void subdivide_lines(
+    std::vector<vec2i>& lines, std::vector<T>& vert, bool update_lines) {
+    if (lines.empty() || vert.empty()) return;
+
+    auto tvert = vert;
+    auto tlines = std::vector<vec2i>();
+    for (auto& l : lines) {
+        tlines.push_back({l.x, (int)tvert.size()});
+        tlines.push_back({(int)tvert.size(), l.y});
+        tvert.push_back((vert[l.x] + vert[l.y]) / 2);
+    }
+
+    std::swap(vert, tvert);
+    if (update_lines) std::swap(lines, tlines);
 }
 
-// Unshare shape data by duplicating all vertex data for each element,
-// giving a faceted look. Note that faceted tangents are not computed.
-tuple<vector<vec2i>, vector<vec3i>, vector<vec4i>, vector<int>> facet_elems(
-    const vector<vec2i>& lines, const vector<vec3i>& triangles,
-    const vector<vec4i>& quads) {
-    auto verts = vector<int>();
-    auto nlines = vector<vec2i>();
-    for (auto l : lines) {
-        nlines.push_back({(int)verts.size(), (int)verts.size() + 1});
-        for (auto v : l) verts.push_back(v);
+// Subdivide triangle.
+template <typename T>
+void subdivide_triangles(std::vector<vec3i>& triangles, std::vector<T>& vert,
+    bool update_triangles) {
+    if (triangles.empty() || vert.empty()) return;
+
+    auto tvert = vert;
+    auto ttriangles = std::vector<vec3i>();
+    auto emap = std::unordered_map<vec2i, int>();
+    for (auto& t : triangles) {
+        for (auto e : {vec2i{t.x, t.y}, vec2i{t.y, t.z}, vec2i{t.z, t.x}}) {
+            if (contains(emap, e)) continue;
+            emap[{e.x, e.y}] = (int)tvert.size();
+            emap[{e.y, e.x}] = (int)tvert.size();
+            tvert.push_back((vert[e.x] + vert[e.y]) / 2);
+        }
+        ttriangles.push_back({t.x, emap.at({t.x, t.y}), emap.at({t.z, t.x})});
+        ttriangles.push_back({t.y, emap.at({t.y, t.z}), emap.at({t.x, t.y})});
+        ttriangles.push_back({t.z, emap.at({t.z, t.x}), emap.at({t.y, t.z})});
+        ttriangles.push_back(
+            {emap.at({t.x, t.y}), emap.at({t.y, t.z}), emap.at({t.z, t.x})});
     }
 
-    auto ntriangles = vector<vec3i>();
-    for (auto t : triangles) {
-        ntriangles.push_back(
-            {(int)verts.size(), (int)verts.size() + 1, (int)verts.size() + 2});
-        for (auto v : t) verts.push_back(v);
-    }
+    std::swap(vert, tvert);
+    if (update_triangles) std::swap(triangles, ttriangles);
+}
 
-    auto nquads = vector<vec4i>();
-    for (auto q : quads) {
+// Subdivide quads.
+template <typename T>
+void subdivide_quads(
+    std::vector<vec4i>& quads, std::vector<T>& vert, bool update_quads) {
+    if (quads.empty() || vert.empty()) return;
+
+    auto tvert = vert;
+    auto tquads = std::vector<vec4i>();
+    auto emap = std::unordered_map<vec2i, int>();
+    for (auto& q : quads) {
+        for (auto e : {vec2i{q.x, q.y}, vec2i{q.y, q.z}, vec2i{q.z, q.w},
+                 vec2i{q.w, q.x}}) {
+            if (e.x == e.y) continue;
+            if (contains(emap, e)) continue;
+            emap[{e.x, e.y}] = (int)tvert.size();
+            emap[{e.y, e.x}] = (int)tvert.size();
+            tvert.push_back((vert[e.x] + vert[e.y]) / 2);
+        }
         if (q.z != q.w) {
-            nquads.push_back({(int)verts.size(), (int)verts.size() + 1,
-                (int)verts.size() + 2, (int)verts.size() + 3});
-            for (auto v : q) verts.push_back(v);
+            tquads.push_back({q.x, emap.at({q.x, q.y}), (int)tvert.size(),
+                emap.at({q.w, q.x})});
+            tquads.push_back({q.y, emap.at({q.y, q.z}), (int)tvert.size(),
+                emap.at({q.x, q.y})});
+            tquads.push_back({q.z, emap.at({q.z, q.w}), (int)tvert.size(),
+                emap.at({q.y, q.z})});
+            tquads.push_back({q.w, emap.at({q.w, q.x}), (int)tvert.size(),
+                emap.at({q.z, q.w})});
+            tvert.push_back(
+                (vert[q.x] + vert[q.y] + vert[q.z] + vert[q.w]) / 4);
         } else {
-            nquads.push_back({(int)verts.size(), (int)verts.size() + 1,
-                (int)verts.size() + 2, (int)verts.size() + 2});
-            for (auto v : q.xyz()) verts.push_back(v);
+            tquads.push_back({q.x, emap.at({q.x, q.y}), (int)tvert.size(),
+                emap.at({q.z, q.x})});
+            tquads.push_back({q.y, emap.at({q.y, q.z}), (int)tvert.size(),
+                emap.at({q.x, q.y})});
+            tquads.push_back({q.z, emap.at({q.z, q.x}), (int)tvert.size(),
+                emap.at({q.y, q.z})});
+            tvert.push_back((vert[q.x] + vert[q.y] + vert[q.y]) / 3);
         }
     }
 
-    return {nlines, ntriangles, nquads, verts};
+    std::swap(vert, tvert);
+    if (update_quads) std::swap(quads, tquads);
+}
+
+// Subdivide beziers.
+template <typename T>
+void subdivide_beziers(
+    std::vector<vec4i>& beziers, std::vector<T>& vert, bool update_beziers) {
+    if (beziers.empty() || vert.empty()) return;
+
+    auto vmap = std::unordered_map<int, int>();
+    auto tvert = std::vector<T>();
+    auto tbeziers = std::vector<vec4i>();
+    for (auto& b : beziers) {
+        if (!contains(vmap, b.x)) {
+            vmap[b.x] = (int)tvert.size();
+            tvert.push_back(vert[b.x]);
+        }
+        if (!contains(vmap, b.w)) {
+            vmap[b.w] = (int)tvert.size();
+            tvert.push_back(vert[b.w]);
+        }
+        auto bo = (int)tvert.size();
+        tbeziers.push_back({vmap.at(b.x), bo + 0, bo + 1, bo + 2});
+        tbeziers.push_back({bo + 2, bo + 3, bo + 4, vmap.at(b.w)});
+        tvert.push_back(vert[b.x] / 2 + vert[b.y] / 2);
+        tvert.push_back(vert[b.x] / 4 + vert[b.y] / 2 + vert[b.z] / 4);
+        tvert.push_back(vert[b.x] / 8 + 3 * vert[b.y] / 8 + 3 * vert[b.z] / 8 +
+                        vert[b.w] / 8);
+        tvert.push_back(vert[b.y] / 4 + vert[b.z] / 2 + vert[b.w] / 4);
+        tvert.push_back(vert[b.z] / 2 + vert[b.w] / 2);
+    }
+
+    std::swap(vert, tvert);
+    if (update_beziers) std::swap(beziers, tbeziers);
+}
+
+// Subdivide catmullclark.
+template <typename T>
+void subdivide_catmullclark(
+    std::vector<vec4i>& quads, std::vector<T>& vert, bool update_quads) {
+    if (quads.empty() || vert.empty()) return;
+
+    auto tvert = vert;
+    auto tquads = std::vector<vec4i>();
+    auto emap = std::unordered_map<vec2i, int>();
+    for (auto& q : quads) {
+        for (auto e : {vec2i{q.x, q.y}, vec2i{q.y, q.z}, vec2i{q.z, q.w},
+                 vec2i{q.w, q.x}}) {
+            if (e.x == e.y) continue;
+            if (contains(emap, e)) continue;
+            emap[{e.x, e.y}] = (int)tvert.size();
+            emap[{e.y, e.x}] = (int)tvert.size();
+            tvert.push_back((vert[e.x] + vert[e.y]) / 2);
+        }
+        if (q.z != q.w) {
+            tquads.push_back({q.x, emap.at({q.x, q.y}), (int)tvert.size(),
+                emap.at({q.w, q.x})});
+            tquads.push_back({q.y, emap.at({q.y, q.z}), (int)tvert.size(),
+                emap.at({q.x, q.y})});
+            tquads.push_back({q.z, emap.at({q.z, q.w}), (int)tvert.size(),
+                emap.at({q.y, q.z})});
+            tquads.push_back({q.w, emap.at({q.w, q.x}), (int)tvert.size(),
+                emap.at({q.z, q.w})});
+            tvert.push_back(
+                (vert[q.x] + vert[q.y] + vert[q.z] + vert[q.w]) / 4);
+        } else {
+            tquads.push_back({q.x, emap.at({q.x, q.y}), (int)tvert.size(),
+                emap.at({q.z, q.x})});
+            tquads.push_back({q.y, emap.at({q.y, q.z}), (int)tvert.size(),
+                emap.at({q.x, q.y})});
+            tquads.push_back({q.z, emap.at({q.z, q.x}), (int)tvert.size(),
+                emap.at({q.y, q.z})});
+            tvert.push_back((vert[q.x] + vert[q.y] + vert[q.y]) / 3);
+        }
+    }
+
+    auto tboundary = std::vector<vec2i>();
+    for (auto e_kv : emap) {
+        auto e = e_kv.first;
+        auto v = e_kv.second;
+        if (contains(emap, {e.y, e.x})) continue;
+        tboundary.push_back({e.x, v});
+        tboundary.push_back({v, e.y});
+    }
+
+    // setup
+    auto tcrease_edges = tboundary;
+    auto tcrease_verts = std::vector<int>();
+
+    // define vertex valence ---------------------------
+    auto tvert_val = std::vector<int>(tvert.size(), 2);
+    for (auto e : tcrease_edges)
+        for (auto vid : e) tvert_val[vid] = 1;
+    for (auto vid : tcrease_verts) tvert_val[vid] = 0;
+
+    // averaging pass ----------------------------------
+    auto avert = std::vector<T>(tvert.size(), T());
+    auto acount = std::vector<int>(tvert.size(), 0);
+    for (auto p : tcrease_verts) {
+        if (tvert_val[p] != 0) continue;
+        avert[p] += tvert[p];
+        acount[p] += 1;
+    }
+    for (auto e : tcrease_edges) {
+        auto c = (tvert[e.x] + tvert[e.y]) / 2.0f;
+        for (auto vid : e) {
+            if (tvert_val[vid] != 1) continue;
+            avert[vid] += c;
+            acount[vid] += 1;
+        }
+    }
+    for (auto& q : tquads) {
+        auto c = (tvert[q.x] + tvert[q.y] + tvert[q.z] + tvert[q.w]) / 4.0f;
+        for (auto vid : q) {
+            if (tvert_val[vid] != 2) continue;
+            avert[vid] += c;
+            acount[vid] += 1;
+        }
+    }
+    for (auto i = 0; i < tvert.size(); i++) avert[i] /= (float)acount[i];
+
+    // correction pass ----------------------------------
+    // p = p + (avg_p - p) * (4/avg_count)
+    for (auto i = 0; i < tvert.size(); i++) {
+        if (tvert_val[i] != 2) continue;
+        avert[i] = tvert[i] + (avert[i] - tvert[i]) * (4.0f / acount[i]);
+    }
+    tvert = avert;
+
+    std::swap(vert, tvert);
+    if (update_quads) std::swap(quads, tquads);
+}
+
+// Subdivide lines by splitting each line in half.
+void subdivide_lines(std::vector<vec2i>& lines, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<vec4f>& color, std::vector<float>& radius) {
+    if (lines.empty()) return;
+    subdivide_lines(lines, norm, false);
+    for (auto& n : norm) n = normalize(n);
+    subdivide_lines(lines, texcoord, false);
+    subdivide_lines(lines, color, false);
+    subdivide_lines(lines, radius, false);
+    subdivide_lines(lines, pos);
+}
+
+// Subdivide triangles.
+void subdivide_triangles(std::vector<vec3i>& triangles, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<vec4f>& color, std::vector<float>& radius) {
+    if (triangles.empty()) return;
+    subdivide_triangles(triangles, norm, false);
+    for (auto& n : norm) n = normalize(n);
+    subdivide_triangles(triangles, texcoord, false);
+    subdivide_triangles(triangles, color, false);
+    subdivide_triangles(triangles, radius, false);
+    subdivide_triangles(triangles, pos);
+}
+
+// Subdivide quads.
+void subdivide_quads(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<vec4f>& color, std::vector<float>& radius) {
+    if (quads.empty()) return;
+    subdivide_quads(quads, norm, false);
+    for (auto& n : norm) n = normalize(n);
+    subdivide_quads(quads, texcoord, false);
+    subdivide_quads(quads, color, false);
+    subdivide_quads(quads, radius, false);
+    subdivide_quads(quads, pos);
+}
+
+// Subdivide beziers.
+void subdivide_beziers(std::vector<vec4i>& beziers, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<vec4f>& color, std::vector<float>& radius) {
+    if (beziers.empty()) return;
+    subdivide_beziers(beziers, norm, false);
+    for (auto& n : norm) n = normalize(n);
+    subdivide_beziers(beziers, texcoord, false);
+    subdivide_beziers(beziers, color, false);
+    subdivide_beziers(beziers, radius, false);
+    subdivide_beziers(beziers, pos);
+}
+
+// Subdivide quads.
+void subdivide_catmullclark(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<vec4f>& color, std::vector<float>& radius) {
+    if (quads.empty()) return;
+    subdivide_catmullclark(quads, norm, false);
+    for (auto& n : norm) n = normalize(n);
+    subdivide_catmullclark(quads, texcoord, false);
+    subdivide_catmullclark(quads, color, false);
+    subdivide_catmullclark(quads, radius, false);
+    subdivide_catmullclark(quads, pos);
+}
+
+// Merge lines between shapes.
+inline void merge_lines(
+    std::vector<vec2i>& lines, const std::vector<vec2i>& lines1) {
+    auto nverts = 0;
+    for (auto& l : lines) nverts = max(nverts, max_element(l));
+    for (auto& l : lines1) lines.push_back({l.x + nverts, l.y + nverts});
+}
+// Merge triangles between shapes. The elements are merged by increasing the
+// array size of the second array by the number of vertices of the first.
+// Vertex data can then be concatenated successfully.
+void merge_triangles(
+    std::vector<vec3i>& triangles, const std::vector<vec3i>& triangles1) {
+    auto nverts = 0;
+    for (auto& t : triangles) nverts = max(nverts, max_element(t));
+    for (auto& t : triangles1)
+        triangles.push_back({t.x + nverts, t.y + nverts, t.z + nverts});
+}
+// Merge quads between shapes. The elements are merged by increasing the
+// array size of the second array by the number of vertices of the first.
+// Vertex data can then be concatenated successfully.
+void merge_quads(std::vector<vec4i>& quads, const std::vector<vec4i>& quads1) {
+    auto nverts = 0;
+    for (auto& q : quads) nverts = max(nverts, max_element(q));
+    for (auto& q : quads1)
+        quads.push_back(
+            {q.x + nverts, q.y + nverts, q.z + nverts, q.w + nverts});
+}
+
+// Duplicate vertex data for each line index, giving a faceted look.
+template <typename T>
+void facet_lines(
+    std::vector<vec2i>& lines, std::vector<T>& vert, bool update_lines) {
+    if (vert.empty()) return;
+    auto tvert = vert;
+    tvert.resize(lines.size() * 2);
+    for (auto i = 0; i < lines.size(); i++) {
+        tvert[2 * i + 0] = vert[lines[i].x];
+        tvert[2 * i + 1] = vert[lines[i].y];
+    }
+    std::swap(vert, tvert);
+
+    if (update_lines) {
+        auto tlines = std::vector<vec2i>(lines.size());
+        for (auto i = 0; i < lines.size(); i++)
+            tlines[i] = {i * 2 + 0, i * 2 + 1};
+        std::swap(lines, tlines);
+    }
+}
+
+// Duplicate vertex data for each line index, giving a faceted look.
+template <typename T>
+void facet_triangles(std::vector<vec3i>& triangles, std::vector<T>& vert,
+    bool update_triangles) {
+    if (vert.empty()) return;
+    auto tvert = vert;
+    tvert.resize(triangles.size() * 3);
+    for (auto i = 0; i < triangles.size(); i++) {
+        tvert[3 * i + 0] = vert[triangles[i].x];
+        tvert[3 * i + 1] = vert[triangles[i].y];
+        tvert[3 * i + 2] = vert[triangles[i].z];
+    }
+    std::swap(vert, tvert);
+
+    if (update_triangles) {
+        auto ttriangles = std::vector<vec3i>(triangles.size());
+        for (auto i = 0; i < triangles.size(); i++)
+            ttriangles[i] = {i * 3 + 0, i * 3 + 1, i * 3 + 2};
+        std::swap(triangles, ttriangles);
+    }
+}
+// Duplicate vertex data for each quad index, giving a faceted look.
+template <typename T>
+void facet_quads(
+    std::vector<vec4i>& quads, std::vector<T>& vert, bool update_quads) {
+    if (vert.empty()) return;
+    auto tvert = vert;
+    tvert.resize(quads.size() * 4);
+    for (auto i = 0; i < quads.size(); i++) {
+        tvert[4 * i + 0] = vert[quads[i].x];
+        tvert[4 * i + 1] = vert[quads[i].y];
+        tvert[4 * i + 2] = vert[quads[i].z];
+        tvert[4 * i + 3] = vert[quads[i].z];
+    }
+    std::swap(vert, tvert);
+
+    if (update_quads) {
+        auto tquads = std::vector<vec4i>(quads.size());
+        for (auto i = 0; i < quads.size(); i++)
+            tquads[i] = {i * 4 + 0, i * 4 + 1, i * 4 + 2, i * 4 + 3};
+        std::swap(quads, tquads);
+    }
+}
+
+// Unshare line data.
+void facet_lines(std::vector<vec2i>& lines, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<vec4f>& color, std::vector<float>& radius) {
+    facet_lines(lines, norm, false);
+    facet_lines(lines, texcoord, false);
+    facet_lines(lines, color, false);
+    facet_lines(lines, radius, false);
+    facet_lines(lines, pos);
+}
+
+// Unshare triangle data.
+void facet_triangles(std::vector<vec3i>& triangles, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<vec4f>& color, std::vector<float>& radius) {
+    facet_triangles(triangles, norm, false);
+    facet_triangles(triangles, texcoord, false);
+    facet_triangles(triangles, color, false);
+    facet_triangles(triangles, radius, false);
+    facet_triangles(triangles, pos);
+}
+
+// Unshare quad data.
+void facet_quads(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<vec4f>& color, std::vector<float>& radius) {
+    facet_quads(quads, norm, false);
+    facet_quads(quads, texcoord, false);
+    facet_quads(quads, color, false);
+    facet_quads(quads, radius, false);
+    facet_quads(quads, pos);
 }
 
 // Unshare vertices for faceting
 template <typename T>
-vector<T> facet_vert(const vector<T>& vert, const vector<int>& vmap) {
+std::vector<T> facet_vert(
+    const std::vector<T>& vert, const std::vector<int>& vmap) {
     if (vert.empty()) return vert;
-    auto tvert = vector<T>(vmap.size());
+    auto tvert = std::vector<T>(vmap.size());
     for (auto vid = 0; vid < vmap.size(); vid++) tvert[vid] = vert[vmap[vid]];
     return tvert;
 }
 
 // instantations
-template vector<float> facet_vert<float>(
-    const vector<float>& vert, const vector<int>& vmap);
-template vector<vec2f> facet_vert<vec2f>(
-    const vector<vec2f>& vert, const vector<int>& vmap);
-template vector<vec3f> facet_vert<vec3f>(
-    const vector<vec3f>& vert, const vector<int>& vmap);
-template vector<vec4f> facet_vert<vec4f>(
-    const vector<vec4f>& vert, const vector<int>& vmap);
+template std::vector<float> facet_vert<float>(
+    const std::vector<float>& vert, const std::vector<int>& vmap);
+template std::vector<vec2f> facet_vert<vec2f>(
+    const std::vector<vec2f>& vert, const std::vector<int>& vmap);
+template std::vector<vec3f> facet_vert<vec3f>(
+    const std::vector<vec3f>& vert, const std::vector<int>& vmap);
+template std::vector<vec4f> facet_vert<vec4f>(
+    const std::vector<vec4f>& vert, const std::vector<int>& vmap);
 
 }  // namespace ygl
 
@@ -1196,46 +1201,27 @@ template vector<vec4f> facet_vert<vec4f>(
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-// Pick a point
-int sample_points(int npoints, float re) {
-    return clamp(0, npoints - 1, (int)(re * npoints));
-}
-
 // Compute a distribution for sampling points uniformly
-vector<float> sample_points_cdf(int npoints) {
-    auto cdf = vector<float>(npoints);
+std::vector<float> sample_points_cdf(int npoints) {
+    auto cdf = std::vector<float>(npoints);
     for (auto i = 0; i < npoints; i++) cdf[i] = i + 1;
     return cdf;
 }
 
-// Pick a point
-int sample_points(const vector<float>& cdf, float re) {
-    re = clamp(re * cdf.back(), 0.0f, cdf.back() - 0.00001f);
-    return (int)(std::upper_bound(cdf.begin(), cdf.end(), re) - cdf.begin());
-}
-
 // Compute a distribution for sampling lines uniformly
-vector<float> sample_lines_cdf(
-    const vector<vec2i>& lines, const vector<vec3f>& pos) {
-    auto cdf = vector<float>(lines.size());
+std::vector<float> sample_lines_cdf(
+    const std::vector<vec2i>& lines, const std::vector<vec3f>& pos) {
+    auto cdf = std::vector<float>(lines.size());
     for (auto i = 0; i < lines.size(); i++)
         cdf[i] = length(pos[lines[i].x] - pos[lines[i].y]);
     for (auto i = 1; i < lines.size(); i++) cdf[i] += cdf[i - 1];
     return cdf;
 }
 
-// Pick a point on lines
-pair<int, vec2f> sample_lines(const vector<float>& cdf, float re, float ruv) {
-    re = clamp(re * cdf.back(), 0.0f, cdf.back() - 0.00001f);
-    auto eid =
-        (int)(std::upper_bound(cdf.begin(), cdf.end(), re) - cdf.begin());
-    return {eid, {1 - ruv, ruv}};
-}
-
 // Compute a distribution for sampling triangle meshes uniformly
-vector<float> sample_triangles_cdf(
-    const vector<vec3i>& triangles, const vector<vec3f>& pos) {
-    auto cdf = vector<float>(triangles.size());
+std::vector<float> sample_triangles_cdf(
+    const std::vector<vec3i>& triangles, const std::vector<vec3f>& pos) {
+    auto cdf = std::vector<float>(triangles.size());
     for (auto i = 0; i < triangles.size(); i++)
         cdf[i] = triangle_area(
             pos[triangles[i].x], pos[triangles[i].y], pos[triangles[i].z]);
@@ -1243,20 +1229,10 @@ vector<float> sample_triangles_cdf(
     return cdf;
 }
 
-// Pick a point on a triangle mesh
-pair<int, vec3f> sample_triangles(
-    const vector<float>& cdf, float re, const vec2f& ruv) {
-    re = clamp(re * cdf.back(), 0.0f, cdf.back() - 0.00001f);
-    auto eid =
-        (int)(std::upper_bound(cdf.begin(), cdf.end(), re) - cdf.begin());
-    return {
-        eid, {sqrt(ruv.x) * (1 - ruv.y), 1 - sqrt(ruv.x), ruv.y * sqrt(ruv.x)}};
-}
-
 // Compute a distribution for sampling quad meshes uniformly
-vector<float> sample_quads_cdf(
-    const vector<vec4i>& quads, const vector<vec3f>& pos) {
-    auto cdf = vector<float>(quads.size());
+std::vector<float> sample_quads_cdf(
+    const std::vector<vec4i>& quads, const std::vector<vec3f>& pos) {
+    auto cdf = std::vector<float>(quads.size());
     for (auto i = 0; i < quads.size(); i++)
         cdf[i] = quad_area(
             pos[quads[i].x], pos[quads[i].y], pos[quads[i].z], pos[quads[i].w]);
@@ -1264,48 +1240,32 @@ vector<float> sample_quads_cdf(
     return cdf;
 }
 
-// Pick a point on a quad mesh
-pair<int, vec4f> sample_quads(
-    const vector<float>& cdf, float re, const vec2f& ruv) {
-    if (ruv.x < 0.5f) {
-        auto eid = 0;
-        auto euv = zero3f;
-        std::tie(eid, euv) = sample_triangles(cdf, re, {ruv.x * 2, ruv.y});
-        return {eid, {euv.x, euv.y, 0, euv.z}};
-    } else {
-        auto eid = 0;
-        auto euv = zero3f;
-        std::tie(eid, euv) =
-            sample_triangles(cdf, re, {(ruv.x - 0.5f) * 2, ruv.y});
-        return {eid, {0, euv.z, euv.x, euv.y}};
-    }
-}
-
 // Samples a set of points over a triangle mesh uniformly. The rng function
 // takes the point index and returns vec3f numbers uniform directibuted in
 // [0,1]^3. unorm and texcoord are optional.
-tuple<vector<vec3f>, vector<vec3f>, vector<vec2f>> sample_triangles_points(
-    const vector<vec3i>& triangles, const vector<vec3f>& pos,
-    const vector<vec3f>& norm, const vector<vec2f>& texcoord, int npoints,
-    uint64_t seed) {
-    auto sampled_pos = vector<vec3f>(npoints);
-    auto sampled_norm = vector<vec3f>(norm.empty() ? 0 : npoints);
-    auto sampled_texcoord = vector<vec2f>(texcoord.empty() ? 0 : npoints);
+std::tuple<std::vector<vec3f>, std::vector<vec3f>, std::vector<vec2f>>
+sample_triangles_points(const std::vector<vec3i>& triangles,
+    const std::vector<vec3f>& pos, const std::vector<vec3f>& norm,
+    const std::vector<vec2f>& texcoord, int npoints, uint64_t seed) {
+    auto sampled_pos = std::vector<vec3f>(npoints);
+    auto sampled_norm = std::vector<vec3f>(norm.empty() ? 0 : npoints);
+    auto sampled_texcoord = std::vector<vec2f>(texcoord.empty() ? 0 : npoints);
     auto cdf = sample_triangles_cdf(triangles, pos);
     auto rng = init_rng(seed);
     for (auto i = 0; i < npoints; i++) {
         auto eid = 0;
-        auto euv = zero3f;
+        auto euv = zero2f;
         std::tie(eid, euv) = sample_triangles(
             cdf, next_rand1f(rng), {next_rand1f(rng), next_rand1f(rng)});
         auto t = triangles[eid];
-        sampled_pos[i] = pos[t.x] * euv.x + pos[t.y] * euv.y + pos[t.z] * euv.z;
+        sampled_pos[i] =
+            interpolate_triangle(pos[t.x], pos[t.y], pos[t.z], euv);
         if (!sampled_norm.empty())
             sampled_norm[i] = normalize(
-                norm[t.x] * euv.x + norm[t.y] * euv.y + norm[t.z] * euv.z);
+                interpolate_triangle(norm[t.x], norm[t.y], norm[t.z], euv));
         if (!sampled_texcoord.empty())
-            sampled_texcoord[i] = texcoord[t.x] * euv.x +
-                                  texcoord[t.y] * euv.y + texcoord[t.z] * euv.z;
+            sampled_texcoord[i] = interpolate_triangle(
+                texcoord[t.x], texcoord[t.y], texcoord[t.z], euv);
     }
 
     return {sampled_pos, sampled_norm, sampled_texcoord};
@@ -1319,37 +1279,39 @@ tuple<vector<vec3f>, vector<vec3f>, vector<vec2f>> sample_triangles_points(
 namespace ygl {
 
 // check hdr extensions
-bool is_hdr_filename(const string& filename) {
+bool is_hdr_filename(const std::string& filename) {
     auto ext = path_extension(filename);
     return ext == ".hdr" || ext == ".exr";
 }
 
 // Loads an ldr image.
-image4b load_image4b(const string& filename) {
+image4b load_image4b(const std::string& filename) {
     auto w = 0, h = 0, c = 0;
-    auto pixels = unique_ptr<byte>(stbi_load(filename.c_str(), &w, &h, &c, 4));
+    auto pixels =
+        std::unique_ptr<byte>(stbi_load(filename.c_str(), &w, &h, &c, 4));
     if (!pixels) return {};
     return make_image(w, h, (vec4b*)pixels.get());
 }
 
 // Loads an hdr image.
-image4f load_image4f(const string& filename) {
+image4f load_image4f(const std::string& filename) {
     auto ext = path_extension(filename);
     auto w = 0, h = 0, c = 0;
-    auto pixels = unique_ptr<float>(nullptr);
+    auto pixels = std::unique_ptr<float>(nullptr);
     if (ext == ".exr") {
         auto pixels_ = (float*)nullptr;
         if (!LoadEXR(&pixels_, &w, &h, filename.c_str(), nullptr))
-            pixels = unique_ptr<float>(pixels_);
+            pixels = std::unique_ptr<float>(pixels_);
     } else {
-        pixels = unique_ptr<float>(stbi_loadf(filename.c_str(), &w, &h, &c, 4));
+        pixels =
+            std::unique_ptr<float>(stbi_loadf(filename.c_str(), &w, &h, &c, 4));
     }
     if (!pixels) return {};
     return make_image(w, h, (vec4f*)pixels.get());
 }
 
 // Saves an ldr image.
-bool save_image4b(const string& filename, const image4b& img) {
+bool save_image4b(const std::string& filename, const image4b& img) {
     if (path_extension(filename) == ".png") {
         return stbi_write_png(filename.c_str(), img.width(), img.height(), 4,
             (byte*)data(img), img.width() * 4);
@@ -1362,7 +1324,7 @@ bool save_image4b(const string& filename, const image4b& img) {
 }
 
 // Saves an hdr image.
-bool save_image4f(const string& filename, const image4f& img) {
+bool save_image4f(const std::string& filename, const image4f& img) {
     if (path_extension(filename) == ".hdr") {
         return stbi_write_hdr(
             filename.c_str(), img.width(), img.height(), 4, (float*)data(img));
@@ -1375,49 +1337,49 @@ bool save_image4f(const string& filename, const image4f& img) {
 }
 
 // Loads an image
-vector<float> load_imagef(
-    const string& filename, int& width, int& height, int& ncomp) {
+std::vector<float> load_imagef(
+    const std::string& filename, int& width, int& height, int& ncomp) {
     auto pixels = stbi_loadf(filename.c_str(), &width, &height, &ncomp, 0);
     if (!pixels) return {};
-    auto ret = vector<float>(pixels, pixels + width * height * ncomp);
+    auto ret = std::vector<float>(pixels, pixels + width * height * ncomp);
     free(pixels);
     return ret;
 }
 
 // Loads an image
-vector<byte> load_image(
-    const string& filename, int& width, int& height, int& ncomp) {
+std::vector<byte> load_image(
+    const std::string& filename, int& width, int& height, int& ncomp) {
     auto pixels = stbi_load(filename.c_str(), &width, &height, &ncomp, 0);
     if (!pixels) return {};
-    auto ret = vector<byte>(pixels, pixels + width * height * ncomp);
+    auto ret = std::vector<byte>(pixels, pixels + width * height * ncomp);
     free(pixels);
     return ret;
 }
 
 // Loads an image from memory.
-vector<float> load_imagef_from_memory(const string& filename, const byte* data,
-    int length, int& width, int& height, int& ncomp) {
+std::vector<float> load_imagef_from_memory(const std::string& filename,
+    const byte* data, int length, int& width, int& height, int& ncomp) {
     auto pixels =
         stbi_loadf_from_memory(data, length, &width, &height, &ncomp, 0);
     if (!pixels) return {};
-    auto ret = vector<float>(pixels, pixels + width * height * ncomp);
+    auto ret = std::vector<float>(pixels, pixels + width * height * ncomp);
     free(pixels);
     return ret;
 }
 
 // Loads an image from memory.
-vector<byte> load_image_from_memory(const string& filename, const byte* data,
-    int length, int& width, int& height, int& ncomp) {
+std::vector<byte> load_image_from_memory(const std::string& filename,
+    const byte* data, int length, int& width, int& height, int& ncomp) {
     auto pixels =
         stbi_load_from_memory(data, length, &width, &height, &ncomp, 0);
     if (!pixels) return {};
-    auto ret = vector<byte>(pixels, pixels + width * height * ncomp);
+    auto ret = std::vector<byte>(pixels, pixels + width * height * ncomp);
     free(pixels);
     return ret;
 }
 
 // Saves an image
-bool save_imagef(const string& filename, int width, int height, int ncomp,
+bool save_imagef(const std::string& filename, int width, int height, int ncomp,
     const float* hdr) {
     if (path_extension(filename) == ".hdr") {
         return stbi_write_hdr(filename.c_str(), width, height, ncomp, hdr);
@@ -1427,8 +1389,8 @@ bool save_imagef(const string& filename, int width, int height, int ncomp,
 }
 
 // Saves an image
-bool save_image(
-    const string& filename, int width, int height, int ncomp, const byte* ldr) {
+bool save_image(const std::string& filename, int width, int height, int ncomp,
+    const byte* ldr) {
     if (path_extension(filename) == ".png") {
         return stbi_write_png(
             filename.c_str(), width, height, ncomp, ldr, width * ncomp);
@@ -1440,7 +1402,7 @@ bool save_image(
 }
 
 // Save an HDR or LDR image with tonemapping based on filename
-bool save_image(const string& filename, const image4f& hdr, float exposure,
+bool save_image(const std::string& filename, const image4f& hdr, float exposure,
     float gamma, bool filmic) {
     if (is_hdr_filename(filename)) {
         return save_image4f(filename, hdr);
@@ -1453,7 +1415,7 @@ bool save_image(const string& filename, const image4f& hdr, float exposure,
 // Resize image.
 void resize_image(const image4f& img, image4f& res_img, resize_filter filter,
     resize_edge edge, bool premultiplied_alpha) {
-    static const auto filter_map = map<resize_filter, stbir_filter>{
+    static const auto filter_map = std::map<resize_filter, stbir_filter>{
         {resize_filter::def, STBIR_FILTER_DEFAULT},
         {resize_filter::box, STBIR_FILTER_BOX},
         {resize_filter::triangle, STBIR_FILTER_TRIANGLE},
@@ -1462,7 +1424,7 @@ void resize_image(const image4f& img, image4f& res_img, resize_filter filter,
         {resize_filter::mitchell, STBIR_FILTER_MITCHELL}};
 
     static const auto edge_map =
-        map<resize_edge, stbir_edge>{{resize_edge::def, STBIR_EDGE_CLAMP},
+        std::map<resize_edge, stbir_edge>{{resize_edge::def, STBIR_EDGE_CLAMP},
             {resize_edge::clamp, STBIR_EDGE_CLAMP},
             {resize_edge::reflect, STBIR_EDGE_REFLECT},
             {resize_edge::wrap, STBIR_EDGE_WRAP},
@@ -1480,7 +1442,7 @@ void resize_image(const image4f& img, image4f& res_img, resize_filter filter,
 // Resize image.
 void resize_image(const image4b& img, image4b& res_img, resize_filter filter,
     resize_edge edge, bool premultiplied_alpha) {
-    static const auto filter_map = map<resize_filter, stbir_filter>{
+    static const auto filter_map = std::map<resize_filter, stbir_filter>{
         {resize_filter::def, STBIR_FILTER_DEFAULT},
         {resize_filter::box, STBIR_FILTER_BOX},
         {resize_filter::triangle, STBIR_FILTER_TRIANGLE},
@@ -1489,7 +1451,7 @@ void resize_image(const image4b& img, image4b& res_img, resize_filter filter,
         {resize_filter::mitchell, STBIR_FILTER_MITCHELL}};
 
     static const auto edge_map =
-        map<resize_edge, stbir_edge>{{resize_edge::def, STBIR_EDGE_CLAMP},
+        std::map<resize_edge, stbir_edge>{{resize_edge::def, STBIR_EDGE_CLAMP},
             {resize_edge::clamp, STBIR_EDGE_CLAMP},
             {resize_edge::reflect, STBIR_EDGE_REFLECT},
             {resize_edge::wrap, STBIR_EDGE_WRAP},
@@ -1542,16 +1504,15 @@ image4b tonemap_image(
     auto scale = pow(2.0f, exposure);
     for (auto j = 0; j < hdr.height(); j++) {
         for (auto i = 0; i < hdr.width(); i++) {
-            auto h = hdr[{i, j}];
-            h.xyz() *= scale;
+            auto h = hdr.at(i, j) * vec4f{scale, scale, scale, 1};
             if (filmic) {
-                h.xyz() = {tonemap_filmic(h.x), tonemap_filmic(h.y),
-                    tonemap_filmic(h.z)};
+                h = {tonemap_filmic(h.x), tonemap_filmic(h.y),
+                    tonemap_filmic(h.z), h.w};
             } else {
-                h.xyz() = {pow(h.x, 1 / gamma), pow(h.y, 1 / gamma),
-                    pow(h.z, 1 / gamma)};
+                h = {pow(h.x, 1 / gamma), pow(h.y, 1 / gamma),
+                    pow(h.z, 1 / gamma), h.w};
             }
-            ldr[{i, j}] = float_to_byte(h);
+            ldr.at(i, j) = float_to_byte(h);
         }
     }
     return ldr;
@@ -1946,7 +1907,8 @@ image4f make_sunsky_image(
             auto w =
                 vec3f(cos(phi) * sin(theta), cos(theta), sin(phi) * sin(theta));
             auto gamma = acos(clamp(dot(w, wSun), -1.0f, 1.0f));
-            img[{i, j}] = {sky(theta, gamma) + sun(theta, gamma), 1};
+            auto col = sky(theta, gamma) + sun(theta, gamma);
+            img.at(i, j) = {col.x, col.y, col.z, 1};
         }
     }
 
@@ -1962,7 +1924,7 @@ image4b make_noise_image(int resx, int resy, float scale, bool wrap) {
             auto p = vec3f{i / (float)resx, j / (float)resy, 0.5f} * scale;
             auto g = perlin_noise(p, wrap3i);
             g = clamp(0.5f + 0.5f * g, 0.0f, 1.0f);
-            img[{i, j}] = float_to_byte({g, g, g, 1});
+            img.at(i, j) = float_to_byte({g, g, g, 1});
         }
     }
     return img;
@@ -1978,7 +1940,7 @@ image4b make_fbm_image(int resx, int resy, float scale, float lacunarity,
             auto p = vec3f{i / (float)resx, j / (float)resy, 0.5f} * scale;
             auto g = perlin_fbm_noise(p, lacunarity, gain, octaves, wrap3i);
             g = clamp(0.5f + 0.5f * g, 0.0f, 1.0f);
-            img[{i, j}] = float_to_byte({g, g, g, 1});
+            img.at(i, j) = float_to_byte({g, g, g, 1});
         }
     }
     return img;
@@ -1995,7 +1957,7 @@ image4b make_ridge_image(int resx, int resy, float scale, float lacunarity,
             auto g = perlin_ridge_noise(
                 p, lacunarity, gain, offset, octaves, wrap3i);
             g = clamp(g, 0.0f, 1.0f);
-            img[{i, j}] = float_to_byte({g, g, g, 1});
+            img.at(i, j) = float_to_byte({g, g, g, 1});
         }
     }
     return img;
@@ -2012,7 +1974,7 @@ image4b make_turbulence_image(int resx, int resy, float scale, float lacunarity,
             auto g =
                 perlin_turbulence_noise(p, lacunarity, gain, octaves, wrap3i);
             g = clamp(g, 0.0f, 1.0f);
-            img[{i, j}] = float_to_byte({g, g, g, 1});
+            img.at(i, j) = float_to_byte({g, g, g, 1});
         }
     }
     return img;
@@ -2081,19 +2043,20 @@ bool intersect_line(const ray3f& ray, const vec3f& v0, const vec3f& v1,
     auto p01 = p0 - p1;
 
     // check with the line radius at the same point
+    auto d2 = dot(p01, p01);
     auto r = r0 * (1 - s) + r1 * s;
-    if (dot(p01, p01) > r * r) return false;
+    if (d2 > r * r) return false;
 
     // intersection occurred: set params and exit
     ray_t = t;
-    euv = {1 - s, s};
+    euv = {s, sqrt(d2) / r};
 
     return true;
 }
 
 // Intersect a ray with a triangle
 bool intersect_triangle(const ray3f& ray, const vec3f& v0, const vec3f& v1,
-    const vec3f& v2, float& ray_t, vec3f& euv) {
+    const vec3f& v2, float& ray_t, vec2f& euv) {
     // compute triangle edges
     auto edge1 = v1 - v0;
     auto edge2 = v2 - v0;
@@ -2123,23 +2086,22 @@ bool intersect_triangle(const ray3f& ray, const vec3f& v0, const vec3f& v1,
 
     // intersection occurred: set params and exit
     ray_t = t;
-    euv = {1 - u - v, u, v};
+    euv = {u, v};
 
     return true;
 }
 
 // Intersect a ray with a quad.
 bool intersect_quad(const ray3f& ray, const vec3f& v0, const vec3f& v1,
-    const vec3f& v2, const vec3f& v3, float& ray_t, vec4f& euv) {
+    const vec3f& v2, const vec3f& v3, float& ray_t, vec2f& euv) {
     auto hit = false;
     auto tray = ray;
-    if (intersect_triangle(tray, v0, v1, v3, ray_t, (vec3f&)euv)) {
-        euv = {euv.x, euv.y, 0, euv.z};
+    if (intersect_triangle(tray, v0, v1, v3, ray_t, euv)) {
         tray.tmax = ray_t;
         hit = true;
     }
-    if (intersect_triangle(tray, v2, v3, v1, ray_t, (vec3f&)euv)) {
-        euv = {0, 1 - euv.y, euv.y + euv.z - 1, 1 - euv.z};
+    if (intersect_triangle(tray, v2, v3, v1, ray_t, euv)) {
+        euv = {1 - euv.x, 1 - euv.y};
         tray.tmax = ray_t;
         hit = true;
     }
@@ -2152,7 +2114,8 @@ bool intersect_tetrahedron(const ray3f& ray_, const vec3f& v0, const vec3f& v1,
     // check intersction for each face
     auto hit = false;
     auto ray = ray_;
-    auto tuv = zero3f;
+    auto tuv = zero2f;
+    // TODO: fix uvs
     if (intersect_triangle(ray, v0, v1, v2, ray_t, tuv)) {
         hit = true;
         ray.tmax = ray_t;
@@ -2245,36 +2208,36 @@ bool overlap_point(
 }
 
 // TODO: documentation
-vec2f closestuv_line(const vec3f& pos, const vec3f& v0, const vec3f& v1) {
+float closestuv_line(const vec3f& pos, const vec3f& v0, const vec3f& v1) {
     auto ab = v1 - v0;
     auto d = dot(ab, ab);
     // Project c onto ab, computing parameterized position d(t) = a + t*(b –
     // a)
     auto u = dot(pos - v0, ab) / d;
     u = clamp(u, (float)0, (float)1);
-    return {1 - u, u};
+    return u;
 }
 
 // TODO: documentation
 bool overlap_line(const vec3f& pos, float dist_max, const vec3f& v0,
     const vec3f& v1, float r0, float r1, float& dist, vec2f& euv) {
-    auto uv = closestuv_line(pos, v0, v1);
+    auto u = closestuv_line(pos, v0, v1);
     // Compute projected position from the clamped t d = a + t * ab;
-    auto p = lerp(v0, v1, uv.y);
-    auto r = lerp(r0, r1, uv.y);
+    auto p = lerp(v0, v1, u);
+    auto r = lerp(r0, r1, u);
     auto d2 = dot(pos - p, pos - p);
     // check distance
     if (d2 > (dist_max + r) * (dist_max + r)) return false;
     // done
     dist = sqrt(d2);
-    euv = uv;
+    euv = {u, 0};
     return true;
 }
 
 // TODO: documentation
 // this is a complicated test -> I probably prefer to use a sequence of test
 // (triangle body, and 3 edges)
-vec3f closestuv_triangle(
+vec2f closestuv_triangle(
     const vec3f& pos, const vec3f& v0, const vec3f& v1, const vec3f& v2) {
     auto ab = v1 - v0;
     auto ac = v2 - v0;
@@ -2284,46 +2247,44 @@ vec3f closestuv_triangle(
     auto d2 = dot(ac, ap);
 
     // corner and edge cases
-    if (d1 <= 0 && d2 <= 0) return {1, 0, 0};
+    if (d1 <= 0 && d2 <= 0) return {0, 0};
 
     auto bp = pos - v1;
     auto d3 = dot(ab, bp);
     auto d4 = dot(ac, bp);
-    if (d3 >= 0 && d4 <= d3) return {0, 1, 0};
+    if (d3 >= 0 && d4 <= d3) return {1, 0};
 
     auto vc = d1 * d4 - d3 * d2;
-    if ((vc <= 0) && (d1 >= 0) && (d3 <= 0))
-        return {1 - d1 / (d1 - d3), d1 / (d1 - d3), 0};
+    if ((vc <= 0) && (d1 >= 0) && (d3 <= 0)) return {d1 / (d1 - d3), 0};
 
     auto cp = pos - v2;
     auto d5 = dot(ab, cp);
     auto d6 = dot(ac, cp);
-    if (d6 >= 0 && d5 <= d6) return {0, 0, 1};
+    if (d6 >= 0 && d5 <= d6) return {0, 1};
 
     auto vb = d5 * d2 - d1 * d6;
-    if ((vb <= 0) && (d2 >= 0) && (d6 <= 0))
-        return {1 - d2 / (d2 - d6), 0, d2 / (d2 - d6)};
+    if ((vb <= 0) && (d2 >= 0) && (d6 <= 0)) return {0, d2 / (d2 - d6)};
 
     auto va = d3 * d6 - d5 * d4;
     if ((va <= 0) && (d4 - d3 >= 0) && (d5 - d6 >= 0)) {
         auto w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return {0, 1 - w, w};
+        return {1 - w, w};
     }
 
     // face case
     auto denom = 1 / (va + vb + vc);
-    auto v = vb * denom;
-    auto w = vc * denom;
-    return {1 - v - w, v, w};
+    auto u = vb * denom;
+    auto v = vc * denom;
+    return {u, v};
 }
 
 // TODO: documentation
 bool overlap_triangle(const vec3f& pos, float dist_max, const vec3f& v0,
     const vec3f& v1, const vec3f& v2, float r0, float r1, float r2, float& dist,
-    vec3f& euv) {
+    vec2f& euv) {
     auto uv = closestuv_triangle(pos, v0, v1, v2);
-    auto p = v0 * uv.x + v1 * uv.y + v2 * uv.z;
-    auto r = r0 * uv.x + r1 * uv.y + r2 * uv.z;
+    auto p = interpolate_triangle(v0, v1, v2, uv);
+    auto r = interpolate_triangle(r0, r1, r2, uv);
     auto dd = dot(p - pos, p - pos);
     if (dd > (dist_max + r) * (dist_max + r)) return false;
     dist = sqrt(dd);
@@ -2334,18 +2295,15 @@ bool overlap_triangle(const vec3f& pos, float dist_max, const vec3f& v0,
 // TODO: documentation
 bool overlap_quad(const vec3f& pos, float dist_max, const vec3f& v0,
     const vec3f& v1, const vec3f& v2, const vec3f& v3, float r0, float r1,
-    float r2, float r3, float& dist, vec4f& euv) {
+    float r2, float r3, float& dist, vec2f& euv) {
     auto hit = false;
-    if (overlap_triangle(
-            pos, dist_max, v0, v1, v3, r0, r1, r3, dist, (vec3f&)euv)) {
-        euv = {euv.x, euv.y, 0, euv.z};
+    if (overlap_triangle(pos, dist_max, v0, v1, v3, r0, r1, r3, dist, euv)) {
         dist_max = dist;
         hit = true;
     }
-    if (overlap_triangle(
-            pos, dist_max, v2, v3, v1, r2, r3, r1, dist, (vec3f&)euv)) {
+    if (overlap_triangle(pos, dist_max, v2, v3, v1, r2, r3, r1, dist, euv)) {
         // dist_max = dist;
-        euv = {0, 1 - euv.y, euv.y + euv.z - 1, 1 - euv.z};
+        euv = {1 - euv.x, 1 - euv.y};
         hit = true;
     }
     return hit;
@@ -2354,6 +2312,7 @@ bool overlap_quad(const vec3f& pos, float dist_max, const vec3f& v0,
 // TODO: documentation
 bool overlap_tetrahedron(const vec3f& pos, const vec3f& v0, const vec3f& v1,
     const vec3f& v2, const vec3f& v3, vec4f& euv) {
+    // TODO: fix uv
     auto vol = dot(v3 - v0, cross(v3 - v1, v3 - v0));
     if (vol == 0) return false;
     auto u = dot(v3 - v0, cross(v3 - v1, v3 - v0)) / vol;
@@ -2370,6 +2329,7 @@ bool overlap_tetrahedron(const vec3f& pos, const vec3f& v0, const vec3f& v1,
 bool overlap_tetrahedron(const vec3f& pos, float dist_max, const vec3f& v0,
     const vec3f& v1, const vec3f& v2, const vec3f& v3, float r0, float r1,
     float r2, float r3, float& dist, vec4f& euv) {
+    // TODO: FIX UVs
     // check interior
     if (overlap_tetrahedron(pos, v0, v1, v2, v3, euv)) {
         dist = 0;
@@ -2378,7 +2338,7 @@ bool overlap_tetrahedron(const vec3f& pos, float dist_max, const vec3f& v0,
 
     // check faces
     auto hit = false;
-    auto tuv = zero3f;
+    auto tuv = zero2f;
     if (overlap_triangle(pos, dist_max, v0, v1, v2, r0, r1, r2, dist, tuv)) {
         hit = true;
         dist_max = dist;
@@ -2444,9 +2404,9 @@ const int bvh_minprims = 4;
 // or initializing it as a leaf. When splitting, the heuristic heuristic is
 // used and nodes added sequentially in the preallocated nodes array and
 // the number of nodes nnodes is updated.
-void make_bvh_node(vector<bvh_node>& nodes, int nodeid,
-    vector<int>& sorted_prims, int start, int end, const vector<bbox3f>& bboxes,
-    bvh_node_type type, bool equal_size) {
+void make_bvh_node(std::vector<bvh_node>& nodes, int nodeid,
+    std::vector<int>& sorted_prims, int start, int end,
+    const std::vector<bbox3f>& bboxes, bvh_node_type type, bool equal_size) {
     // compute node bounds
     auto& node = nodes.at(nodeid);
     node.bbox = invalid_bbox3f;
@@ -2522,14 +2482,14 @@ void make_bvh_node(vector<bvh_node>& nodes, int nodeid,
 }
 
 // Build a BVH node list and sorted primitive array
-tuple<vector<bvh_node>, vector<int>> make_bvh_nodes(
-    const vector<bbox3f>& bboxes, bvh_node_type type, bool equal_size) {
+std::tuple<std::vector<bvh_node>, std::vector<int>> make_bvh_nodes(
+    const std::vector<bbox3f>& bboxes, bvh_node_type type, bool equal_size) {
     // create an array of primitives to sort
-    auto sorted_prim = vector<int>(bboxes.size());
+    auto sorted_prim = std::vector<int>(bboxes.size());
     for (auto i = 0; i < bboxes.size(); i++) sorted_prim[i] = i;
 
     // allocate nodes (over-allocate now then shrink)
-    auto nodes = vector<bvh_node>();
+    auto nodes = std::vector<bvh_node>();
     nodes.reserve(sorted_prim.size() * 2);
 
     // start recursive splitting
@@ -2547,7 +2507,7 @@ tuple<vector<bvh_node>, vector<int>> make_bvh_nodes(
 // Build a BVH from the data already set
 void make_bvh_nodes(bvh_tree* bvh, bool equal_size) {
     // get the number of primitives and the primitive type
-    auto bboxes = vector<bbox3f>();
+    auto bboxes = std::vector<bbox3f>();
     if (!bvh->points.empty()) {
         for (auto& p : bvh->points) {
             bboxes.push_back(point_bbox(bvh->pos[p], bvh->radius[p]));
@@ -2584,7 +2544,7 @@ void make_bvh_nodes(bvh_tree* bvh, bool equal_size) {
     }
 
     // make node bvh
-    tie(bvh->nodes, bvh->sorted_prim) =
+    std::tie(bvh->nodes, bvh->sorted_prim) =
         make_bvh_nodes(bboxes, bvh->type, equal_size);
 
     // sort primitives
@@ -2603,10 +2563,10 @@ void make_bvh_nodes(bvh_tree* bvh, bool equal_size) {
 }
 
 // Build a BVH from a set of primitives.
-bvh_tree* make_bvh(const vector<int>& points, const vector<vec2i>& lines,
-    const vector<vec3i>& triangles, const vector<vec4i>& quads,
-    const vector<vec3f>& pos, const vector<float>& radius, float def_radius,
-    bool equal_size) {
+bvh_tree* make_bvh(const std::vector<int>& points,
+    const std::vector<vec2i>& lines, const std::vector<vec3i>& triangles,
+    const std::vector<vec4i>& quads, const std::vector<vec3f>& pos,
+    const std::vector<float>& radius, float def_radius, bool equal_size) {
     // allocate the bvh
     auto bvh = new bvh_tree();
 
@@ -2617,7 +2577,7 @@ bvh_tree* make_bvh(const vector<int>& points, const vector<vec2i>& lines,
     bvh->quads = quads;
     bvh->pos = pos;
     bvh->radius =
-        (radius.empty()) ? vector<float>(pos.size(), def_radius) : radius;
+        (radius.empty()) ? std::vector<float>(pos.size(), def_radius) : radius;
 
     // make bvh nodes
     make_bvh_nodes(bvh, equal_size);
@@ -2627,8 +2587,9 @@ bvh_tree* make_bvh(const vector<int>& points, const vector<vec2i>& lines,
 }
 
 // Build a BVH from a set of shape instances.
-bvh_tree* make_bvh(const vector<bvh_instance>& instances,
-    const vector<bvh_tree*>& shape_bvhs, bool own_shape_bvhs, bool equal_size) {
+bvh_tree* make_bvh(const std::vector<bvh_instance>& instances,
+    const std::vector<bvh_tree*>& shape_bvhs, bool own_shape_bvhs,
+    bool equal_size) {
     // allocate the bvh
     auto bvh = new bvh_tree();
 
@@ -2699,17 +2660,17 @@ void refit_bvh(bvh_tree* bvh, int nodeid) {
 }
 
 // Recursively recomputes the node bounds for a shape bvh
-void refit_bvh(bvh_tree* bvh, const vector<vec3f>& pos,
-    const vector<float>& radius, float def_radius) {
+void refit_bvh(bvh_tree* bvh, const std::vector<vec3f>& pos,
+    const std::vector<float>& radius, float def_radius) {
     bvh->pos = pos;
     bvh->radius =
-        (radius.empty()) ? vector<float>(pos.size(), def_radius) : radius;
+        (radius.empty()) ? std::vector<float>(pos.size(), def_radius) : radius;
     refit_bvh(bvh, 0);
 }
 
 // Recursively recomputes the node bounds for a scene bvh
-void refit_bvh(bvh_tree* bvh, const vector<frame3f>& frames,
-    const vector<frame3f>& frames_inv) {
+void refit_bvh(bvh_tree* bvh, const std::vector<frame3f>& frames,
+    const std::vector<frame3f>& frames_inv) {
     for (auto i = 0; i < frames.size(); i++) {
         bvh->instances[i].frame = frames[bvh->sorted_prim[i]];
         bvh->instances[i].frame_inv = frames_inv[bvh->sorted_prim[i]];
@@ -2718,8 +2679,8 @@ void refit_bvh(bvh_tree* bvh, const vector<frame3f>& frames,
 }
 
 // Intersect ray with a bvh.
-bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
-    float& ray_t, int& iid, int& sid, int& eid, vec4f& ew) {
+bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool find_any,
+    float& ray_t, int& iid, int& sid, int& eid, vec2f& euv) {
     // node stack
     int node_stack[128];
     auto node_cur = 0;
@@ -2735,7 +2696,7 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
     auto ray_dinv = vec3f{1, 1, 1} / ray.d;
     auto ray_dsign = vec3i{(ray_dinv.x < 0) ? 1 : 0, (ray_dinv.y < 0) ? 1 : 0,
         (ray_dinv.z < 0) ? 1 : 0};
-    auto ray_reverse = array<bool, 4>{
+    auto ray_reverse = std::array<bool, 4>{
         {(bool)ray_dsign.x, (bool)ray_dsign.y, (bool)ray_dsign.z, false}};
 
     // walking stack
@@ -2769,7 +2730,7 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
                         hit = true;
                         ray.tmax = ray_t;
                         eid = bvh->sorted_prim[i];
-                        ew = {1, 0, 0, 0};
+                        euv = {1, 0};
                     }
                 }
             } break;
@@ -2777,12 +2738,10 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
                 for (auto i = node.start; i < node.start + node.count; i++) {
                     auto& l = bvh->lines[i];
                     if (intersect_line(ray, bvh->pos[l.x], bvh->pos[l.y],
-                            bvh->radius[l.x], bvh->radius[l.y], ray_t,
-                            (vec2f&)ew)) {
+                            bvh->radius[l.x], bvh->radius[l.y], ray_t, euv)) {
                         hit = true;
                         ray.tmax = ray_t;
                         eid = bvh->sorted_prim[i];
-                        ew = {ew.x, ew.y, 0, 0};
                     }
                 }
             } break;
@@ -2790,11 +2749,10 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
                 for (auto i = node.start; i < node.start + node.count; i++) {
                     auto& t = bvh->triangles[i];
                     if (intersect_triangle(ray, bvh->pos[t.x], bvh->pos[t.y],
-                            bvh->pos[t.z], ray_t, (vec3f&)ew)) {
+                            bvh->pos[t.z], ray_t, euv)) {
                         hit = true;
                         ray.tmax = ray_t;
                         eid = bvh->sorted_prim[i];
-                        ew = {ew.x, ew.y, ew.z, 0};
                     }
                 }
             } break;
@@ -2802,11 +2760,10 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
                 for (auto i = node.start; i < node.start + node.count; i++) {
                     auto& q = bvh->quads[i];
                     if (intersect_quad(ray, bvh->pos[q.x], bvh->pos[q.y],
-                            bvh->pos[q.z], bvh->pos[q.w], ray_t, ew)) {
+                            bvh->pos[q.z], bvh->pos[q.w], ray_t, euv)) {
                         hit = true;
                         ray.tmax = ray_t;
                         eid = bvh->sorted_prim[i];
-                        ew = {ew.x, ew.y, ew.z, ew.w};
                     }
                 }
             } break;
@@ -2818,7 +2775,7 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
                         hit = true;
                         ray.tmax = ray_t;
                         eid = idx;
-                        ew = {1, 0, 0, 0};
+                        euv = {1, 0};
                     }
                 }
             } break;
@@ -2826,8 +2783,8 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
                 for (auto i = node.start; i < node.start + node.count; i++) {
                     auto& ist = bvh->instances[i];
                     if (intersect_bvh(ist.bvh,
-                            transform_ray(ist.frame_inv, ray), early_exit,
-                            ray_t, iid, sid, eid, ew)) {
+                            transform_ray(ist.frame_inv, ray), find_any, ray_t,
+                            iid, sid, eid, euv)) {
                         hit = true;
                         ray.tmax = ray_t;
                         iid = ist.iid;
@@ -2838,7 +2795,7 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
         }
 
         // check for early exit
-        if (early_exit && hit) return true;
+        if (find_any && hit) return true;
     }
 
     return hit;
@@ -2846,7 +2803,7 @@ bool intersect_bvh(const bvh_tree* bvh, const ray3f& ray_, bool early_exit,
 
 // Finds the closest element with a bvh.
 bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
-    bool early_exit, float& dist, int& iid, int& sid, int& eid, vec4f& ew) {
+    bool find_any, float& dist, int& iid, int& sid, int& eid, vec2f& euv) {
     // node stack
     int node_stack[64];
     auto node_cur = 0;
@@ -2879,7 +2836,7 @@ bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
                         hit = true;
                         max_dist = dist;
                         eid = bvh->sorted_prim[i];
-                        ew = {1, 0, 0, 0};
+                        euv = {1, 0};
                     }
                 }
             } break;
@@ -2888,11 +2845,10 @@ bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
                     auto& l = bvh->lines[i];
                     if (overlap_line(pos, max_dist, bvh->pos[l.x],
                             bvh->pos[l.y], bvh->radius[l.x], bvh->radius[l.y],
-                            dist, (vec2f&)ew)) {
+                            dist, euv)) {
                         hit = true;
                         max_dist = dist;
                         eid = bvh->sorted_prim[i];
-                        ew = {ew.x, ew.y, 0, 0};
                     }
                 }
             } break;
@@ -2901,12 +2857,10 @@ bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
                     auto& t = bvh->triangles[i];
                     if (overlap_triangle(pos, max_dist, bvh->pos[t.x],
                             bvh->pos[t.y], bvh->pos[t.z], bvh->radius[t.x],
-                            bvh->radius[t.y], bvh->radius[t.z], dist,
-                            (vec3f&)ew)) {
+                            bvh->radius[t.y], bvh->radius[t.z], dist, euv)) {
                         hit = true;
                         max_dist = dist;
                         eid = bvh->sorted_prim[i];
-                        ew = {ew.x, ew.y, ew.z, 0};
                     }
                 }
             } break;
@@ -2916,11 +2870,10 @@ bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
                     if (overlap_quad(pos, max_dist, bvh->pos[q.x],
                             bvh->pos[q.y], bvh->pos[q.z], bvh->pos[q.w],
                             bvh->radius[q.x], bvh->radius[q.y],
-                            bvh->radius[q.z], bvh->radius[q.w], dist, ew)) {
+                            bvh->radius[q.z], bvh->radius[q.w], dist, euv)) {
                         hit = true;
                         max_dist = dist;
                         eid = bvh->sorted_prim[i];
-                        ew = {ew.x, ew.y, ew.z, ew.w};
                     }
                 }
             } break;
@@ -2932,7 +2885,7 @@ bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
                         hit = true;
                         max_dist = dist;
                         eid = idx;
-                        ew = {1, 0, 0, 0};
+                        euv = {1, 0};
                     }
                 }
             } break;
@@ -2941,7 +2894,7 @@ bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
                     auto& ist = bvh->instances[i];
                     if (overlap_bvh(ist.bvh,
                             transform_point(ist.frame_inv, pos), max_dist,
-                            early_exit, dist, iid, sid, eid, ew)) {
+                            find_any, dist, iid, sid, eid, euv)) {
                         hit = true;
                         max_dist = dist;
                         iid = ist.iid;
@@ -2950,6 +2903,9 @@ bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
                 }
             } break;
         }
+
+        // check for early exit
+        if (find_any && hit) return true;
     }
 
     return hit;
@@ -2957,9 +2913,9 @@ bool overlap_bvh(const bvh_tree* bvh, const vec3f& pos, float max_dist,
 
 // Intersect ray with a bvh (convenience wrapper).
 intersection_point intersect_bvh(
-    const bvh_tree* bvh, const ray3f& ray, bool early_exit) {
+    const bvh_tree* bvh, const ray3f& ray, bool find_any) {
     auto isec = intersection_point();
-    if (!intersect_bvh(bvh, ray, early_exit, isec.dist, isec.iid, isec.sid,
+    if (!intersect_bvh(bvh, ray, find_any, isec.dist, isec.iid, isec.sid,
             isec.eid, isec.euv))
         return {};
     return isec;
@@ -2967,9 +2923,9 @@ intersection_point intersect_bvh(
 
 // Finds the closest element with a bvh (convenience wrapper).
 intersection_point overlap_bvh(
-    const bvh_tree* bvh, const vec3f& pos, float max_dist, bool early_exit) {
+    const bvh_tree* bvh, const vec3f& pos, float max_dist, bool find_any) {
     auto isec = intersection_point();
-    if (!overlap_bvh(bvh, pos, max_dist, early_exit, isec.dist, isec.iid,
+    if (!overlap_bvh(bvh, pos, max_dist, find_any, isec.dist, isec.iid,
             isec.sid, isec.eid, isec.euv))
         return {};
     return isec;
@@ -2979,7 +2935,7 @@ intersection_point overlap_bvh(
     // Finds the overlap between BVH leaf nodes.
     template <typename OverlapElem>
     void overlap_bvh_elems(const bvh_tree* bvh1, const bvh_tree* bvh2,
-                           bool skip_duplicates, bool skip_self, vector<vec2i>& overlaps,
+                           bool skip_duplicates, bool skip_self, std::vector<vec2i>& overlaps,
                            const OverlapElem& overlap_elems) {
         // node stack
         vec2i node_stack[128];
@@ -3047,6 +3003,25 @@ intersection_point overlap_bvh(
 namespace ygl {
 
 // cleanup
+material::~material() {
+    if (ke_txt_info) delete ke_txt_info;
+    if (kd_txt_info) delete kd_txt_info;
+    if (ks_txt_info) delete ks_txt_info;
+    if (kr_txt_info) delete kr_txt_info;
+    if (kt_txt_info) delete kt_txt_info;
+    if (rs_txt_info) delete rs_txt_info;
+    if (bump_txt_info) delete bump_txt_info;
+    if (disp_txt_info) delete disp_txt_info;
+    if (norm_txt_info) delete norm_txt_info;
+    if (occ_txt_info) delete occ_txt_info;
+}
+
+// cleanup
+environment::environment() {
+    if (ke_txt_info) delete ke_txt_info;
+}
+
+// cleanup
 shape_group::~shape_group() {
     for (auto v : shapes) delete v;
 }
@@ -3070,83 +3045,79 @@ scene::~scene() {
 
 // Shape value interpolated using barycentric coordinates
 template <typename T>
-T eval_barycentric(const shape* shp, const vector<T>& vals, int eid,
-    const vec4f& euv, const T& def) {
+T eval_elem(const shape* shp, const std::vector<T>& vals, int eid,
+    const vec2f& euv, const T& def) {
     if (vals.empty()) return def;
     if (!shp->triangles.empty()) {
-        return eval_barycentric_triangle(
-            vals, shp->triangles[eid], vec3f{euv.x, euv.y, euv.z});
+        return interpolate_triangle(vals, shp->triangles[eid], euv);
     } else if (!shp->lines.empty()) {
-        return eval_barycentric_line(
-            vals, shp->lines[eid], vec2f{euv.x, euv.y});
+        return interpolate_line(vals, shp->lines[eid], euv.x);
     } else if (!shp->points.empty()) {
-        return eval_barycentric_point(vals, shp->points[eid], euv.x);
+        return interpolate_point(vals, shp->points[eid]);
     } else if (!shp->quads.empty()) {
-        return eval_barycentric_quad(vals, shp->quads[eid], euv);
+        return interpolate_quad(vals, shp->quads[eid], euv);
     } else {
         return vals[eid];  // points
     }
 }
 
 // Shape position interpolated using barycentric coordinates
-vec3f eval_pos(const shape* shp, int eid, const vec4f& euv) {
-    return eval_barycentric(shp, shp->pos, eid, euv, {0, 0, 0});
+vec3f eval_pos(const shape* shp, int eid, const vec2f& euv) {
+    return eval_elem(shp, shp->pos, eid, euv, {0, 0, 0});
 }
 // Shape normal interpolated using barycentric coordinates
-vec3f eval_norm(const shape* shp, int eid, const vec4f& euv) {
-    return normalize(eval_barycentric(shp, shp->norm, eid, euv, {0, 0, 1}));
+vec3f eval_norm(const shape* shp, int eid, const vec2f& euv) {
+    return normalize(eval_elem(shp, shp->norm, eid, euv, {0, 0, 1}));
 }
 // Shape texcoord interpolated using barycentric coordinates
-vec2f eval_texcoord(const shape* shp, int eid, const vec4f& euv) {
-    return eval_barycentric(shp, shp->texcoord, eid, euv, {0, 0});
+vec2f eval_texcoord(const shape* shp, int eid, const vec2f& euv) {
+    return eval_elem(shp, shp->texcoord, eid, euv, {0, 0});
 }
 // Shape color interpolated using barycentric coordinates
-vec4f eval_color(const shape* shp, int eid, const vec4f& euv) {
-    return eval_barycentric(shp, shp->color, eid, euv, {1, 1, 1, 1});
+vec4f eval_color(const shape* shp, int eid, const vec2f& euv) {
+    return eval_elem(shp, shp->color, eid, euv, {1, 1, 1, 1});
 }
 // Shape radius interpolated using barycentric coordinates
-float eval_radius(const shape* shp, int eid, const vec4f& euv) {
-    return eval_barycentric(shp, shp->radius, eid, euv, 0.0f);
+float eval_radius(const shape* shp, int eid, const vec2f& euv) {
+    return eval_elem(shp, shp->radius, eid, euv, 0.0f);
 }
 // Shape tangent space interpolated using barycentric coordinates
-vec4f eval_tangsp(const shape* shp, int eid, const vec4f& euv) {
-    return eval_barycentric(shp, shp->tangsp, eid, euv, {0, 0, 0, 1});
+vec4f eval_tangsp(const shape* shp, int eid, const vec2f& euv) {
+    return eval_elem(shp, shp->tangsp, eid, euv, {0, 0, 0, 1});
 }
 
 // Instance position interpolated using barycentric coordinates
-vec3f eval_pos(const instance* ist, int sid, int eid, const vec4f& euv) {
+vec3f eval_pos(const instance* ist, int sid, int eid, const vec2f& euv) {
     auto shp = ist->shp->shapes.at(sid);
     return transform_point(
-        ist->frame, eval_barycentric(shp, shp->pos, eid, euv, {0, 0, 0}));
+        ist->frame, eval_elem(shp, shp->pos, eid, euv, {0, 0, 0}));
 }
 // Instance normal interpolated using barycentric coordinates
-vec3f eval_norm(const instance* ist, int sid, int eid, const vec4f& euv) {
+vec3f eval_norm(const instance* ist, int sid, int eid, const vec2f& euv) {
     auto shp = ist->shp->shapes.at(sid);
-    return transform_direction(ist->frame,
-        normalize(eval_barycentric(shp, shp->norm, eid, euv, {0, 0, 1})));
+    return transform_direction(
+        ist->frame, normalize(eval_elem(shp, shp->norm, eid, euv, {0, 0, 1})));
 }
 
 // Evaluate a texture
-vec4f eval_texture(const texture_info& info, const vec2f& texcoord, bool srgb,
-    const vec4f& def) {
-    if (!info.txt) return def;
-
-    // get texture
-    auto txt = info.txt;
-    assert(txt->hdr || txt->ldr);
+vec4f eval_texture(const texture* txt, const texture_info& info,
+    const vec2f& texcoord, bool srgb, const vec4f& def) {
+    if (!txt) return def;
+    assert(!txt->hdr.empty() || !txt->ldr.empty());
 
     auto lookup = [&def, &txt, &srgb](int i, int j) {
-        if (txt->ldr)
-            return (srgb) ? srgb_to_linear(txt->ldr[{i, j}]) :
-                            byte_to_float(txt->ldr[{i, j}]);
-        else if (txt->hdr)
-            return txt->hdr[{i, j}];
+        if (!txt->ldr.empty())
+            return (srgb) ? srgb_to_linear(txt->ldr.at(i, j)) :
+                            byte_to_float(txt->ldr.at(i, j));
+        else if (!txt->hdr.empty())
+            return txt->hdr.at(i, j);
         else
             return def;
     };
 
     // get image width/height
-    auto w = txt->width(), h = txt->height();
+    auto w = (!txt->ldr.empty()) ? txt->ldr.width() : txt->hdr.width(),
+         h = (!txt->ldr.empty()) ? txt->ldr.height() : txt->hdr.height();
 
     // get coordinates normalized for tiling
     auto s = 0.0f, t = 0.0f;
@@ -3188,85 +3159,72 @@ ray3f eval_camera_ray(const camera* cam, const vec2f& uv, const vec2f& luv) {
         transform_direction(cam->frame, normalize(q - o)));
 }
 
+// Generates a ray from a camera for pixel coordinates `ij`, the resolution
+// `res`, the sub-pixel coordinates `puv` and the lens coordinates `luv` and the
+// image resolution `res`.
+ray3f eval_camera_ray(const camera* cam, const vec2i& ij, int res,
+    const vec2f& puv, const vec2f& luv) {
+    auto uv =
+        vec2f{(ij.x + puv.x) / (cam->aspect * res), (1 - ij.y - puv.y) / res};
+    return eval_camera_ray(cam, uv, luv);
+}
+
 // Subdivides shape elements.
 void subdivide_shape_once(shape* shp, bool subdiv) {
-    if (!shp->lines.empty() || !shp->triangles.empty() || !shp->quads.empty()) {
-        vector<vec2i> edges;
-        vector<vec4i> faces;
-        tie(shp->lines, shp->triangles, shp->quads, edges, faces) =
-            subdivide_elems_linear(
-                shp->lines, shp->triangles, shp->quads, (int)shp->pos.size());
-        shp->pos = subdivide_vert_linear(shp->pos, edges, faces);
-        shp->norm = subdivide_vert_linear(shp->norm, edges, faces);
-        shp->texcoord = subdivide_vert_linear(shp->texcoord, edges, faces);
-        shp->color = subdivide_vert_linear(shp->color, edges, faces);
-        shp->radius = subdivide_vert_linear(shp->radius, edges, faces);
-        if (subdiv && !shp->quads.empty()) {
-            auto boundary = get_boundary_edges({}, {}, shp->quads);
-            shp->pos =
-                subdivide_vert_catmullclark(shp->quads, shp->pos, boundary, {});
-            shp->norm = subdivide_vert_catmullclark(
-                shp->quads, shp->norm, boundary, {});
-            shp->texcoord = subdivide_vert_catmullclark(
-                shp->quads, shp->texcoord, boundary, {});
-            shp->color = subdivide_vert_catmullclark(
-                shp->quads, shp->color, boundary, {});
-            shp->radius = subdivide_vert_catmullclark(
-                shp->quads, shp->radius, boundary, {});
-            shp->norm = compute_normals({}, {}, shp->quads, shp->pos);
-        }
-    } else if (!shp->quads_pos.empty()) {
-        vector<vec2i> _lines;
-        vector<vec3i> _triangles;
-        vector<vec2i> edges;
-        vector<vec4i> faces;
-        tie(_lines, _triangles, shp->quads_pos, edges, faces) =
-            subdivide_elems_linear({}, {}, shp->quads_pos, shp->pos.size());
-        shp->pos = subdivide_vert_linear(shp->pos, edges, faces);
-        tie(_lines, _triangles, shp->quads_norm, edges, faces) =
-            subdivide_elems_linear({}, {}, shp->quads_norm, shp->norm.size());
-        shp->norm = subdivide_vert_linear(shp->norm, edges, faces);
-        tie(_lines, _triangles, shp->quads_texcoord, edges, faces) =
-            subdivide_elems_linear(
-                {}, {}, shp->quads_texcoord, shp->texcoord.size());
-        shp->texcoord = subdivide_vert_linear(shp->texcoord, edges, faces);
-        if (subdiv) {
-            shp->pos = subdivide_vert_catmullclark(shp->quads_pos, shp->pos,
-                get_boundary_edges({}, {}, shp->quads_pos), {});
-            shp->norm = subdivide_vert_catmullclark(shp->quads_norm, shp->norm,
-                get_boundary_edges({}, {}, shp->quads_norm), {});
-            shp->texcoord =
-                subdivide_vert_catmullclark(shp->quads_texcoord, shp->texcoord,
-                    {}, get_boundary_verts({}, {}, shp->quads_texcoord));
-        }
+    if (!shp->lines.empty()) {
+        subdivide_lines(shp->lines, shp->pos, shp->norm, shp->texcoord,
+            shp->color, shp->radius);
+    } else if (!shp->triangles.empty()) {
+        subdivide_triangles(shp->triangles, shp->pos, shp->norm, shp->texcoord,
+            shp->color, shp->radius);
+    } else if (!shp->quads.empty() && !subdiv) {
+        subdivide_quads(shp->quads, shp->pos, shp->norm, shp->texcoord,
+            shp->color, shp->radius);
+    } else if (!shp->quads.empty() && subdiv) {
+        subdivide_catmullclark(shp->quads, shp->pos, shp->norm, shp->texcoord,
+            shp->color, shp->radius);
+    } else if (!shp->quads_pos.empty() && !subdiv) {
+        subdivide_quads(shp->quads_pos, shp->pos);
+        subdivide_quads(shp->quads_norm, shp->norm);
+        subdivide_quads(shp->quads_texcoord, shp->texcoord);
+    } else if (!shp->quads_pos.empty() && subdiv) {
+        subdivide_catmullclark(shp->quads_pos, shp->pos);
+        subdivide_catmullclark(shp->quads_norm, shp->norm);
+        subdivide_catmullclark(shp->quads_texcoord, shp->texcoord);
     } else if (!shp->beziers.empty()) {
-        vector<int> verts;
-        vector<vec4i> segments;
-        tie(shp->beziers, verts, segments) =
-            subdivide_bezier_recursive(shp->beziers, (int)shp->pos.size());
-        shp->pos = subdivide_vert_bezier(shp->pos, verts, segments);
-        shp->norm = subdivide_vert_bezier(shp->norm, verts, segments);
-        shp->texcoord = subdivide_vert_bezier(shp->texcoord, verts, segments);
-        shp->color = subdivide_vert_bezier(shp->color, verts, segments);
-        shp->radius = subdivide_vert_bezier(shp->radius, verts, segments);
+        subdivide_beziers(shp->beziers, shp->pos, shp->norm, shp->texcoord,
+            shp->color, shp->radius);
+    }
+}
+
+// Compute shape normals. Supports only non-facevarying shapes.
+void compute_normals(shape* shp) {
+    if (!shp->points.empty()) {
+        shp->norm.assign(shp->pos.size(), {0, 0, 1});
+    } else if (!shp->lines.empty()) {
+        compute_tangents(shp->lines, shp->pos, shp->norm);
+    } else if (!shp->triangles.empty()) {
+        compute_normals(shp->triangles, shp->pos, shp->norm);
+    } else if (!shp->quads.empty()) {
+        compute_normals(shp->quads, shp->pos, shp->norm);
     }
 }
 
 // Facet a shape. Supports only non-facevarying shapes
 void facet_shape(shape* shp, bool recompute_normals) {
-    if (!shp->lines.empty() || !shp->triangles.empty() || !shp->quads.empty()) {
-        vector<int> verts;
-        tie(shp->lines, shp->triangles, shp->quads, verts) =
-            facet_elems(shp->lines, shp->triangles, shp->quads);
-        shp->pos = facet_vert(shp->pos, verts);
-        shp->norm = facet_vert(shp->norm, verts);
-        shp->texcoord = facet_vert(shp->texcoord, verts);
-        shp->color = facet_vert(shp->color, verts);
-        shp->radius = facet_vert(shp->radius, verts);
-        if (recompute_normals) {
-            shp->norm = compute_normals(
-                shp->lines, shp->triangles, shp->quads, shp->pos);
-        }
+    if (!shp->lines.empty()) {
+        facet_lines(shp->lines, shp->pos, shp->norm, shp->texcoord, shp->color,
+            shp->radius);
+        if (recompute_normals) compute_normals(shp);
+    } else if (!shp->triangles.empty()) {
+        facet_triangles(shp->triangles, shp->pos, shp->norm, shp->texcoord,
+            shp->color, shp->radius);
+        if (recompute_normals) compute_normals(shp);
+    } else if (!shp->quads.empty()) {
+        std::vector<int> verts;
+        facet_quads(shp->quads, shp->pos, shp->norm, shp->texcoord, shp->color,
+            shp->radius);
+        if (recompute_normals) compute_normals(shp);
     }
 }
 
@@ -3274,9 +3232,9 @@ void facet_shape(shape* shp, bool recompute_normals) {
 void tesselate_shape(shape* shp, bool subdivide,
     bool facevarying_to_sharedvertex, bool quads_to_triangles,
     bool bezier_to_lines) {
-    if (subdivide && shp->subdivision_level) {
-        for (auto l = 0; l < shp->subdivision_level; l++) {
-            subdivide_shape_once(shp, shp->subdivision_catmullclark);
+    if (subdivide && shp->subdivision) {
+        for (auto l = 0; l < shp->subdivision; l++) {
+            subdivide_shape_once(shp, shp->catmullclark);
         }
     }
     if (facevarying_to_sharedvertex && !shp->quads_pos.empty()) {
@@ -3311,7 +3269,7 @@ void tesselate_shapes(scene* scn, bool subdivide,
 
 // Update animation transforms
 void update_transforms(animation_group* agr, float time) {
-    auto interpolate = [](keyframe_type type, const vector<float>& times,
+    auto interpolate = [](keyframe_type type, const std::vector<float>& times,
                            const auto& vals, float time) {
         switch (type) {
             case keyframe_type::step:
@@ -3321,7 +3279,7 @@ void update_transforms(animation_group* agr, float time) {
             case keyframe_type::catmull_rom: return vals.at(0);
             case keyframe_type::bezier:
                 return eval_keyframed_bezier(times, vals, time);
-            default: throw runtime_error("should not have been here");
+            default: throw std::runtime_error("should not have been here");
         }
         return vals.at(0);
     };
@@ -3348,8 +3306,8 @@ void update_transforms(animation_group* agr, float time) {
 
 // Update node transforms
 void update_transforms(node* nde, const frame3f& parent = identity_frame3f) {
-    auto frame = parent * nde->frame * translation_frame3(nde->translation) *
-                 rotation_frame3(nde->rotation) * scaling_frame3(nde->scaling);
+    auto frame = parent * nde->frame * translation_frame(nde->translation) *
+                 rotation_frame(nde->rotation) * scaling_frame(nde->scaling);
     if (nde->ist) nde->ist->frame = frame;
     if (nde->cam) nde->cam->frame = frame;
     if (nde->env) nde->env->frame = frame;
@@ -3388,15 +3346,13 @@ void add_elements(scene* scn, const add_elements_options& opts) {
                 shp->norm.resize(shp->pos.size(), {0, 0, 1});
                 if (!shp->lines.empty() || !shp->triangles.empty() ||
                     !shp->quads.empty()) {
-                    shp->norm = compute_normals(
-                        shp->lines, shp->triangles, shp->quads, shp->pos);
+                    compute_normals(shp);
                 }
                 if (!shp->quads_pos.empty()) {
                     if (!shp->quads_norm.empty())
-                        throw runtime_error("bad normals");
+                        throw std::runtime_error("bad normals");
                     shp->quads_norm = shp->quads_pos;
-                    shp->norm =
-                        compute_normals({}, {}, shp->quads_pos, shp->pos);
+                    compute_normals(shp->quads_pos, shp->pos, shp->norm);
                 }
             }
         }
@@ -3408,15 +3364,14 @@ void add_elements(scene* scn, const add_elements_options& opts) {
                 if (!shp->tangsp.empty()) continue;
                 if (shp->texcoord.empty()) continue;
                 if (!shp->mat) continue;
-                if (!(shp->mat->norm_txt.txt || shp->mat->bump_txt.txt))
-                    continue;
+                if (!(shp->mat->norm_txt || shp->mat->bump_txt)) continue;
                 if (!shp->triangles.empty()) {
-                    shp->tangsp = compute_tangent_frames(
-                        shp->triangles, shp->pos, shp->norm, shp->texcoord);
+                    compute_tangent_frames(shp->triangles, shp->pos, shp->norm,
+                        shp->texcoord, shp->tangsp);
                 } else if (!shp->quads.empty()) {
                     auto triangles = convert_quads_to_triangles(shp->quads);
-                    shp->tangsp = compute_tangent_frames(
-                        triangles, shp->pos, shp->norm, shp->texcoord);
+                    compute_tangent_frames(triangles, shp->pos, shp->norm,
+                        shp->texcoord, shp->tangsp);
                 }
             }
         }
@@ -3424,7 +3379,7 @@ void add_elements(scene* scn, const add_elements_options& opts) {
 
     if (opts.texture_data) {
         for (auto txt : scn->textures) {
-            if (!txt->hdr && !txt->ldr) {
+            if (txt->hdr.empty() && txt->ldr.empty()) {
                 printf("unable to load texture %s\n", txt->path.c_str());
                 txt->ldr = image4b(1, 1, {255, 255, 255, 255});
             }
@@ -3501,7 +3456,8 @@ void add_elements(scene* scn, const add_elements_options& opts) {
     }
 }
 
-// Make a view camera either copying a given one or building a default one.
+// Make a view camera either copying a given one or building a
+// default one.
 camera* make_view_camera(const scene* scn, int camera_id) {
     if (scn->cameras.empty()) {
         auto bbox = compute_bounds(scn);
@@ -3510,12 +3466,12 @@ camera* make_view_camera(const scene* scn, int camera_id) {
         auto bbox_msize = max(bbox_size[0], max(bbox_size[1], bbox_size[2]));
         // set up camera
         auto cam = new camera();
-        cam->name = "default_camera";
+        cam->name = "<view>";
         auto camera_dir = vec3f{1, 0.4f, 1};
         auto from = camera_dir * bbox_msize + bbox_center;
         auto to = bbox_center;
         auto up = vec3f{0, 1, 0};
-        cam->frame = lookat_frame3(from, to, up);
+        cam->frame = lookat_frame(from, to, up);
         cam->ortho = false;
         cam->aspect = 16.0f / 9.0f;
         cam->yfov = 2 * atanf(0.5f);
@@ -3524,7 +3480,9 @@ camera* make_view_camera(const scene* scn, int camera_id) {
         return cam;
     } else {
         camera_id = clamp(camera_id, 0, (int)scn->cameras.size());
-        return new camera(*scn->cameras[camera_id]);
+        auto cam = new camera(*scn->cameras[camera_id]);
+        cam->name = "<view>";
+        return cam;
     }
 }
 
@@ -3550,7 +3508,8 @@ void merge_into(scene* merge_into, scene* merge_from) {
     merge_from->environments.clear();
 }
 
-// Computes a shape bounding box (quick computation that ignores radius)
+// Computes a shape bounding box (quick computation that ignores
+// radius)
 bbox3f compute_bounds(const shape* shp) {
     auto bbox = invalid_bbox3f;
     for (auto p : shp->pos) bbox += vec3f(p);
@@ -3559,7 +3518,7 @@ bbox3f compute_bounds(const shape* shp) {
 
 // Updates the scene and scene's instances bounding boxes
 bbox3f compute_bounds(const scene* scn) {
-    auto shape_bboxes = unordered_map<shape_group*, bbox3f>();
+    auto shape_bboxes = std::unordered_map<shape_group*, bbox3f>();
     for (auto sgr : scn->shapes) {
         shape_bboxes[sgr] = invalid_bbox3f;
         for (auto shp : sgr->shapes) shape_bboxes[sgr] += compute_bounds(shp);
@@ -3612,8 +3571,8 @@ bvh_tree* make_bvh(const shape* shp, float def_radius, bool equalsize) {
 // Build a scene BVH
 bvh_tree* make_bvh(const scene* scn, float def_radius, bool equalsize) {
     // do shapes
-    auto shape_bvhs = vector<bvh_tree*>();
-    auto smap = unordered_map<shape*, bvh_tree*>();
+    auto shape_bvhs = std::vector<bvh_tree*>();
+    auto smap = std::unordered_map<shape*, bvh_tree*>();
     for (auto sgr : scn->shapes) {
         for (auto shp : sgr->shapes) {
             shape_bvhs.push_back(make_bvh(shp, def_radius, equalsize));
@@ -3622,7 +3581,7 @@ bvh_tree* make_bvh(const scene* scn, float def_radius, bool equalsize) {
     }
 
     // tree bvh
-    auto bists = vector<bvh_instance>();
+    auto bists = std::vector<bvh_instance>();
     for (auto iid = 0; iid < scn->instances.size(); iid++) {
         auto ist = scn->instances[iid];
         for (auto sid = 0; sid < ist->shp->shapes.size(); sid++) {
@@ -3656,8 +3615,8 @@ void refit_bvh(
             }
         }
     }
-    auto ist_frames = vector<frame3f>();
-    auto ist_frames_inv = vector<frame3f>();
+    auto ist_frames = std::vector<frame3f>();
+    auto ist_frames_inv = std::vector<frame3f>();
     for (auto ist : scn->instances) {
         ist_frames.push_back(ist->frame);
         ist_frames_inv.push_back(inverse(ist->frame));
@@ -3713,7 +3672,7 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
     // clear scene
     auto scn = new scene();
 
-    struct obj_obj_vertex_hash {
+    struct obj_vertex_hash {
         std::hash<int> Th;
         size_t operator()(const obj_vertex& vv) const {
             auto v = (const int*)&vv;
@@ -3727,90 +3686,62 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
     };
 
     // convert textures
-    auto tmap = unordered_map<string, texture*>{{"", nullptr}};
+    auto tmap = std::unordered_map<std::string, texture*>{{"", nullptr}};
     for (auto otxt : obj->textures) {
         auto txt = new texture();
         txt->name = otxt->path;
         txt->path = otxt->path;
         if (!otxt->datab.empty()) {
-            txt->ldr = image4b(otxt->width, otxt->height);
-            for (auto j = 0; j < otxt->height; j++) {
-                for (auto i = 0; i < otxt->width; i++) {
-                    auto v = otxt->datab.data() +
-                             (otxt->width * j + i) * otxt->ncomp;
-                    switch (otxt->ncomp) {
-                        case 1:
-                            txt->ldr.at(i, j) = {v[0], v[0], v[0], 255};
-                            break;
-                        case 2: txt->ldr.at(i, j) = {v[0], v[1], 0, 255}; break;
-                        case 3:
-                            txt->ldr.at(i, j) = {v[0], v[1], v[2], 255};
-                            break;
-                        case 4:
-                            txt->ldr.at(i, j) = {v[0], v[1], v[2], v[3]};
-                            break;
-                        default: assert(false); break;
-                    }
-                }
-            }
+            txt->ldr = make_image(otxt->width, otxt->height, otxt->ncomp,
+                otxt->datab.data(), vec4b{0, 0, 0, 255});
         } else if (!otxt->dataf.empty()) {
-            txt->hdr = image4f(otxt->width, otxt->height);
-            for (auto j = 0; j < otxt->height; j++) {
-                for (auto i = 0; i < otxt->width; i++) {
-                    auto v = otxt->dataf.data() +
-                             (otxt->width * j + i) * otxt->ncomp;
-                    switch (otxt->ncomp) {
-                        case 1:
-                            txt->hdr.at(i, j) = {v[0], v[0], v[0], 1};
-                            break;
-                        case 2: txt->hdr.at(i, j) = {v[0], v[1], 0, 1}; break;
-                        case 3:
-                            txt->hdr.at(i, j) = {v[0], v[1], v[2], 1};
-                            break;
-                        case 4:
-                            txt->hdr.at(i, j) = {v[0], v[1], v[2], v[3]};
-                            break;
-                        default: assert(false); break;
-                    }
-                }
-            }
+            txt->hdr = make_image(otxt->width, otxt->height, otxt->ncomp,
+                otxt->dataf.data(), vec4f{0, 0, 0, 1});
         }
         scn->textures.push_back(txt);
         tmap[txt->path] = txt;
     }
 
-    auto add_texture = [&tmap](const obj_texture_info& oinfo) {
-        auto info = texture_info();
-        if (oinfo.path == "") return info;
-        info.txt = tmap.at(oinfo.path);
-        info.wrap_s = !oinfo.clamp;
-        info.wrap_t = !oinfo.clamp;
-        info.scale = oinfo.scale;
+    auto make_texture_info = [&tmap](const obj_texture_info& oinfo) {
+        if (oinfo.path == "") return (texture_info*)nullptr;
+        auto info = new texture_info();
+        info->wrap_s = !oinfo.clamp;
+        info->wrap_t = !oinfo.clamp;
+        info->scale = oinfo.scale;
         return info;
     };
 
     // convert materials and build textures
-    auto mmap = unordered_map<string, material*>{{"", nullptr}};
+    auto mmap = std::unordered_map<std::string, material*>{{"", nullptr}};
     for (auto omat : obj->materials) {
         auto mat = new material();
         mat->name = omat->name;
         mat->type = material_type::specular_roughness;
-        mat->ke = {omat->ke.x, omat->ke.y, omat->ke.z};
-        mat->kd = {omat->kd.x, omat->kd.y, omat->kd.z};
-        mat->ks = {omat->ks.x, omat->ks.y, omat->ks.z};
-        mat->kr = {omat->kr.x, omat->kr.y, omat->kr.z};
-        mat->kt = {omat->kt.x, omat->kt.y, omat->kt.z};
+        mat->ke = omat->ke;
+        mat->kd = omat->kd;
+        mat->ks = omat->ks;
+        mat->kr = omat->kr;
+        mat->kt = omat->kt;
         mat->rs = (omat->ns >= 1e6f) ? 0 : pow(2 / (omat->ns + 2), 1 / 4.0f);
         mat->op = omat->op;
-        mat->ke_txt = add_texture(omat->ke_txt);
-        mat->kd_txt = add_texture(omat->kd_txt);
-        mat->ks_txt = add_texture(omat->ks_txt);
-        mat->kr_txt = add_texture(omat->kr_txt);
-        mat->kt_txt = add_texture(omat->kt_txt);
-        mat->rs_txt = add_texture(omat->ns_txt);
-        mat->norm_txt = add_texture(omat->norm_txt);
-        mat->bump_txt = add_texture(omat->bump_txt);
-        mat->disp_txt = add_texture(omat->disp_txt);
+        mat->ke_txt = tmap.at(omat->ke_txt.path);
+        mat->kd_txt = tmap.at(omat->kd_txt.path);
+        mat->ks_txt = tmap.at(omat->ks_txt.path);
+        mat->kr_txt = tmap.at(omat->kr_txt.path);
+        mat->kt_txt = tmap.at(omat->kt_txt.path);
+        mat->rs_txt = tmap.at(omat->ns_txt.path);
+        mat->norm_txt = tmap.at(omat->norm_txt.path);
+        mat->bump_txt = tmap.at(omat->bump_txt.path);
+        mat->disp_txt = tmap.at(omat->disp_txt.path);
+        mat->ke_txt_info = make_texture_info(omat->ke_txt);
+        mat->kd_txt_info = make_texture_info(omat->kd_txt);
+        mat->ks_txt_info = make_texture_info(omat->ks_txt);
+        mat->kr_txt_info = make_texture_info(omat->kr_txt);
+        mat->kt_txt_info = make_texture_info(omat->kt_txt);
+        mat->rs_txt_info = make_texture_info(omat->ns_txt);
+        mat->norm_txt_info = make_texture_info(omat->norm_txt);
+        mat->bump_txt_info = make_texture_info(omat->bump_txt);
+        mat->disp_txt_info = make_texture_info(omat->disp_txt);
         switch (omat->illum) {
             case 0:  // Color on and Ambient off
             case 1:  // Color on and Ambient on
@@ -3844,61 +3775,68 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
     }
 
     // convert meshes
-    auto omap = unordered_map<string, shape_group*>{{"", nullptr}};
+    auto omap = std::unordered_map<std::string, shape_group*>{{"", nullptr}};
     for (auto omsh : obj->objects) {
         auto sgr = new shape_group();
         sgr->name = omsh->name;
-        for (auto& oshp : omsh->groups) {
-            if (oshp.verts.empty()) continue;
-            if (oshp.elems.empty()) continue;
+        for (auto oshp : omsh->groups) {
+            if (oshp->verts.empty()) continue;
+            if (oshp->elems.empty()) continue;
 
             auto shp = new shape();
-            shp->name = oshp.groupname;
-            shp->mat = mmap[oshp.matname];
-            shp->subdivision_level = oshp.subdivision_level;
-            shp->subdivision_catmullclark = oshp.subdivision_catmullclark;
-
-            // check to see if this shuold be face-varying or flat quads
-            auto as_facevarying = false, as_quads = false;
-            if (opts.preserve_quads || opts.preserve_facevarying) {
-                auto m = 10000, M = -1;
-                for (auto& elem : oshp.elems) {
-                    if (elem.type != obj_element_type::face) {
-                        m = 2;
-                        break;
-                    } else {
-                        m = min(m, (int)elem.size);
-                        M = max(M, (int)elem.size);
-                    }
-                }
-                if (m >= 3 && M == 4) as_quads = opts.preserve_quads;
-                if (m >= 3 && M <= 4)
-                    as_facevarying = opts.preserve_facevarying;
+            shp->name = oshp->groupname;
+            shp->mat = mmap[oshp->matname];
+            if (oshp->props.find("subdivision") != oshp->props.end()) {
+                shp->subdivision =
+                    atoi(oshp->props.at("subdivision").at(0).c_str());
+            }
+            if (oshp->props.find("catmullclark") != oshp->props.end()) {
+                shp->catmullclark =
+                    (bool)atoi(oshp->props.at("catmullclark").at(1).c_str());
             }
 
-            // in case of facevarying, check if there is really a need for it
-            if (as_facevarying) {
-                auto need_facevarying = false;
-                for (auto& elem : oshp.elems) {
-                    for (auto i = elem.start; i < elem.start + elem.size; i++) {
-                        auto& v = oshp.verts[i];
-                        if (v.norm >= 0 && v.pos != v.norm)
-                            need_facevarying = true;
-                        if (v.texcoord >= 0 && v.pos != v.texcoord)
-                            need_facevarying = true;
-                        if (v.color >= 0) as_facevarying = false;
-                        if (v.radius >= 0) as_facevarying = false;
+            // check to see if this shuold be face-varying or flat
+            // quads
+            auto as_facevarying = false, as_quads = false;
+            if (opts.preserve_quads || opts.preserve_facevarying) {
+                auto face_max = 0;
+                for (auto& elem : oshp->elems) {
+                    if (elem.type != obj_element_type::face) {
+                        face_max = 0;
+                        break;
+                    } else {
+                        face_max = max(face_max, (int)elem.size);
                     }
-                    if (!as_facevarying) break;
                 }
-                as_facevarying = need_facevarying;
+                as_quads = opts.preserve_quads && face_max > 3;
+                as_facevarying = opts.preserve_facevarying && face_max > 2;
+                // in case of facevarying, check if there is really
+                // need for it
+                if (as_facevarying) {
+                    auto need_facevarying = false;
+                    for (auto& elem : oshp->elems) {
+                        for (auto i = elem.start; i < elem.start + elem.size;
+                             i++) {
+                            auto& v = oshp->verts[i];
+                            if ((v.norm >= 0 && v.pos != v.norm) ||
+                                (v.texcoord >= 0 && v.pos != v.texcoord) ||
+                                (v.norm >= 0 && v.texcoord >= 0 &&
+                                    v.norm != v.texcoord))
+                                need_facevarying = true;
+                            if (v.color >= 0 || v.radius >= 0)
+                                as_facevarying = false;
+                        }
+                        if (!as_facevarying) break;
+                    }
+                    as_facevarying = need_facevarying;
+                }
             }
 
             if (!as_facevarying) {
                 // insert all vertices
-                unordered_map<obj_vertex, int, obj_obj_vertex_hash> vert_map;
-                vector<int> vert_ids;
-                for (auto& vert : oshp.verts) {
+                std::unordered_map<obj_vertex, int, obj_vertex_hash> vert_map;
+                std::vector<int> vert_ids;
+                for (auto& vert : oshp->verts) {
                     if (vert_map.find(vert) == vert_map.end()) {
                         auto s = (int)vert_map.size();
                         vert_map[vert] = s;
@@ -3907,7 +3845,7 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                 }
 
                 // convert elements
-                for (auto& elem : oshp.elems) {
+                for (auto& elem : oshp->elems) {
                     switch (elem.type) {
                         case obj_element_type::point: {
                             for (auto i = elem.start;
@@ -3923,17 +3861,18 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                             }
                         } break;
                         case obj_element_type::face: {
-                            if (as_quads) {
+                            if (as_quads && elem.size == 4) {
                                 shp->quads.push_back({vert_ids[elem.start + 0],
                                     vert_ids[elem.start + 1],
                                     vert_ids[elem.start + 2],
-                                    vert_ids[elem.start +
-                                             ((elem.size == 3) ? 2 : 3)]});
-                            } else if (elem.size == 3) {
-                                shp->triangles.push_back(
-                                    {vert_ids[elem.start + 0],
-                                        vert_ids[elem.start + 1],
-                                        vert_ids[elem.start + 2]});
+                                    vert_ids[elem.start + 3]});
+                            } else if (as_quads && elem.size != 4) {
+                                for (auto i = elem.start + 2;
+                                     i < elem.start + elem.size; i++) {
+                                    shp->quads.push_back(
+                                        {vert_ids[elem.start], vert_ids[i - 1],
+                                            vert_ids[i], vert_ids[i]});
+                                }
                             } else {
                                 for (auto i = elem.start + 2;
                                      i < elem.start + elem.size; i++) {
@@ -3945,7 +3884,7 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                         } break;
                         case obj_element_type::bezier: {
                             if ((elem.size - 1) % 3)
-                                throw runtime_error("bad obj bezier");
+                                throw std::runtime_error("bad obj bezier");
                             for (auto i = elem.start + 1;
                                  i < elem.start + elem.size; i += 3) {
                                 shp->beziers.push_back(
@@ -3958,39 +3897,32 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                 }
 
                 // copy vertex data
-                auto v = oshp.verts[0];
+                auto v = oshp->verts[0];
                 if (v.pos >= 0) shp->pos.resize(vert_map.size());
                 if (v.texcoord >= 0) shp->texcoord.resize(vert_map.size());
                 if (v.norm >= 0) shp->norm.resize(vert_map.size());
                 if (v.color >= 0) shp->color.resize(vert_map.size());
                 if (v.radius >= 0) shp->radius.resize(vert_map.size());
                 for (auto& kv : vert_map) {
-                    if (v.pos >= 0 && kv.first.pos >= 0) {
-                        auto v = obj->pos[kv.first.pos];
-                        shp->pos[kv.second] = {v.x, v.y, v.z};
-                    }
-                    if (v.texcoord >= 0 && kv.first.texcoord >= 0) {
-                        auto v = obj->texcoord[kv.first.texcoord];
-                        shp->texcoord[kv.second] = {v.x, v.y};
-                    }
-                    if (v.norm >= 0 && kv.first.norm >= 0) {
-                        auto v = obj->norm[kv.first.norm];
-                        shp->norm[kv.second] = {v.x, v.y, v.z};
-                    }
-                    if (v.color >= 0 && kv.first.color >= 0) {
-                        auto v = obj->color[kv.first.color];
-                        shp->color[kv.second] = {v.x, v.y, v.z, v.w};
-                    }
-                    if (v.radius >= 0 && kv.first.radius >= 0) {
-                        shp->radius[kv.second] = obj->radius[kv.first.radius];
-                    }
+                    auto idx = kv.second;
+                    auto vert = kv.first;
+                    if (v.pos >= 0 && vert.pos >= 0)
+                        shp->pos[idx] = obj->pos[vert.pos];
+                    if (v.texcoord >= 0 && vert.texcoord >= 0)
+                        shp->texcoord[idx] = obj->texcoord[vert.texcoord];
+                    if (v.norm >= 0 && vert.norm >= 0)
+                        shp->norm[idx] = obj->norm[vert.norm];
+                    if (v.color >= 0 && vert.color >= 0)
+                        shp->color[idx] = obj->color[vert.color];
+                    if (v.radius >= 0 && vert.radius >= 0)
+                        shp->radius[idx] = obj->radius[vert.radius];
                 }
 
                 // fix smoothing
-                if (!oshp.smoothing && opts.obj_facet_non_smooth) {
+                if (!oshp->smoothing && opts.obj_facet_non_smooth) {
                     auto faceted = new shape();
                     faceted->name = shp->name;
-                    auto pidx = vector<int>();
+                    auto pidx = std::vector<int>();
                     for (auto point : shp->points) {
                         faceted->points.push_back((int)pidx.size());
                         pidx.push_back(point);
@@ -4025,9 +3957,9 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                 }
             } else {
                 // insert all vertices
-                unordered_map<int, int> pos_map, norm_map, texcoord_map;
-                vector<int> pos_ids, norm_ids, texcoord_ids;
-                for (auto& vert : oshp.verts) {
+                std::unordered_map<int, int> pos_map, norm_map, texcoord_map;
+                std::vector<int> pos_ids, norm_ids, texcoord_ids;
+                for (auto& vert : oshp->verts) {
                     if (vert.pos >= 0) {
                         if (pos_map.find(vert.pos) == pos_map.end()) {
                             auto s = (int)pos_map.size();
@@ -4036,7 +3968,7 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                         pos_ids.push_back(pos_map.at(vert.pos));
                     } else {
                         if (!pos_ids.empty())
-                            throw runtime_error("malformed obj");
+                            throw std::runtime_error("malformed obj");
                     }
                     if (vert.norm >= 0) {
                         if (norm_map.find(vert.norm) == norm_map.end()) {
@@ -4046,7 +3978,7 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                         norm_ids.push_back(norm_map.at(vert.norm));
                     } else {
                         if (!norm_ids.empty())
-                            throw runtime_error("malformed obj");
+                            throw std::runtime_error("malformed obj");
                     }
                     if (vert.texcoord >= 0) {
                         if (texcoord_map.find(vert.texcoord) ==
@@ -4057,33 +3989,56 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                         texcoord_ids.push_back(texcoord_map.at(vert.texcoord));
                     } else {
                         if (!texcoord_ids.empty())
-                            throw runtime_error("malformed obj");
+                            throw std::runtime_error("malformed obj");
                     }
                 }
 
                 // convert elements
-                for (auto& elem : oshp.elems) {
-                    if (elem.type != obj_element_type::face)
-                        throw runtime_error("malformed obj");
-                    if (elem.size < 3 || elem.size > 4)
-                        throw runtime_error("malformed obj");
-                    if (!pos_ids.empty()) {
-                        shp->quads_pos.push_back({pos_ids[elem.start + 0],
-                            pos_ids[elem.start + 1], pos_ids[elem.start + 2],
-                            pos_ids[elem.start + ((elem.size == 3) ? 2 : 3)]});
-                    }
-                    if (!texcoord_ids.empty()) {
-                        shp->quads_texcoord.push_back(
-                            {texcoord_ids[elem.start + 0],
-                                texcoord_ids[elem.start + 1],
-                                texcoord_ids[elem.start + 2],
-                                texcoord_ids[elem.start +
-                                             ((elem.size == 3) ? 2 : 3)]});
-                    }
-                    if (!norm_ids.empty()) {
-                        shp->quads_norm.push_back({norm_ids[elem.start + 0],
-                            norm_ids[elem.start + 1], norm_ids[elem.start + 2],
-                            norm_ids[elem.start + ((elem.size == 3) ? 2 : 3)]});
+                for (auto elem : oshp->elems) {
+                    if (elem.size == 4) {
+                        if (!pos_ids.empty()) {
+                            shp->quads_pos.push_back({pos_ids[elem.start + 0],
+                                pos_ids[elem.start + 1],
+                                pos_ids[elem.start + 2],
+                                pos_ids[elem.start + 3]});
+                        }
+                        if (!texcoord_ids.empty()) {
+                            shp->quads_texcoord.push_back(
+                                {texcoord_ids[elem.start + 0],
+                                    texcoord_ids[elem.start + 1],
+                                    texcoord_ids[elem.start + 2],
+                                    texcoord_ids[elem.start + 3]});
+                        }
+                        if (!norm_ids.empty()) {
+                            shp->quads_norm.push_back({norm_ids[elem.start + 0],
+                                norm_ids[elem.start + 1],
+                                norm_ids[elem.start + 2],
+                                norm_ids[elem.start + 3]});
+                        }
+                    } else {
+                        if (!pos_ids.empty()) {
+                            for (auto i = elem.start + 2;
+                                 i < elem.start + elem.size; i++) {
+                                shp->quads_pos.push_back({pos_ids[elem.start],
+                                    pos_ids[i - 1], pos_ids[i], pos_ids[i]});
+                            }
+                        }
+                        if (!texcoord_ids.empty()) {
+                            for (auto i = elem.start + 2;
+                                 i < elem.start + elem.size; i++) {
+                                shp->quads_texcoord.push_back(
+                                    {texcoord_ids[elem.start],
+                                        texcoord_ids[i - 1], texcoord_ids[i],
+                                        texcoord_ids[i]});
+                            }
+                        }
+                        if (!norm_ids.empty()) {
+                            for (auto i = elem.start + 2;
+                                 i < elem.start + elem.size; i++) {
+                                shp->quads_norm.push_back({norm_ids[elem.start],
+                                    norm_ids[i - 1], norm_ids[i], norm_ids[i]});
+                            }
+                        }
                     }
                 }
 
@@ -4102,7 +4057,7 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
                 }
 
                 // fix smoothing
-                if (!oshp.smoothing && opts.obj_facet_non_smooth) {}
+                if (!oshp->smoothing && opts.obj_facet_non_smooth) {}
             }
             sgr->shapes.push_back(shp);
         }
@@ -4111,7 +4066,7 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
     }
 
     // convert cameras
-    auto cmap = unordered_map<string, camera*>{{"", nullptr}};
+    auto cmap = std::unordered_map<std::string, camera*>{{"", nullptr}};
     for (auto ocam : obj->cameras) {
         auto cam = new camera();
         cam->name = ocam->name;
@@ -4126,8 +4081,8 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
     }
 
     // convert envs
-    unordered_set<material*> env_mat;
-    auto emap = unordered_map<string, environment*>{{"", nullptr}};
+    std::unordered_set<material*> env_mat;
+    auto emap = std::unordered_map<std::string, environment*>{{"", nullptr}};
     for (auto oenv : obj->environments) {
         auto env = new environment();
         env->name = oenv->name;
@@ -4204,10 +4159,11 @@ scene* obj_to_scene(const obj_scene* obj, const load_options& opts) {
 }
 
 // Load an obj scene
-scene* load_obj_scene(const string& filename, const load_options& opts) {
-    auto oscn = unique_ptr<obj_scene>(load_obj(filename, opts.load_textures,
-        opts.skip_missing, opts.obj_flip_texcoord, opts.obj_flip_tr));
-    auto scn = unique_ptr<scene>(obj_to_scene(oscn.get(), opts));
+scene* load_obj_scene(const std::string& filename, const load_options& opts) {
+    auto oscn =
+        std::unique_ptr<obj_scene>(load_obj(filename, opts.load_textures,
+            opts.skip_missing, opts.obj_flip_texcoord, opts.obj_flip_tr));
+    auto scn = std::unique_ptr<scene>(obj_to_scene(oscn.get(), opts));
     return scn.release();
 }
 
@@ -4215,12 +4171,14 @@ scene* load_obj_scene(const string& filename, const load_options& opts) {
 obj_scene* scene_to_obj(const scene* scn) {
     auto obj = new obj_scene();
 
-    auto add_texture = [](const texture_info& info, bool bump = false) {
+    auto make_texture_info = [](const texture* txt, const texture_info* info,
+                                 bool bump = false) {
         auto oinfo = obj_texture_info();
-        if (!info.txt) return oinfo;
-        oinfo.path = info.txt->path;
-        oinfo.clamp = !info.wrap_s && !info.wrap_t;
-        if (bump) oinfo.scale = info.scale;
+        if (!txt) return oinfo;
+        oinfo.path = txt->path;
+        if (!info) return oinfo;
+        oinfo.clamp = !info->wrap_s && !info->wrap_t;
+        if (bump) oinfo.scale = info->scale;
         return oinfo;
     };
 
@@ -4228,7 +4186,7 @@ obj_scene* scene_to_obj(const scene* scn) {
     for (auto txt : scn->textures) {
         auto otxt = new obj_texture();
         otxt->path = txt->path;
-        if (txt->hdr) {
+        if (!txt->hdr.empty()) {
             otxt->width = txt->hdr.width();
             otxt->height = txt->hdr.height();
             otxt->ncomp = 4;
@@ -4236,7 +4194,7 @@ obj_scene* scene_to_obj(const scene* scn) {
                 (float*)data(txt->hdr) +
                     txt->hdr.width() * txt->hdr.height() * 4);
         }
-        if (txt->ldr) {
+        if (!txt->ldr.empty()) {
             otxt->width = txt->ldr.width();
             otxt->height = txt->ldr.height();
             otxt->ncomp = 4;
@@ -4252,7 +4210,7 @@ obj_scene* scene_to_obj(const scene* scn) {
         auto omat = new obj_material();
         omat->name = mat->name;
         omat->ke = {mat->ke.x, mat->ke.y, mat->ke.z};
-        omat->ke_txt = add_texture(mat->ke_txt);
+        omat->ke_txt = make_texture_info(mat->ke_txt, mat->ke_txt_info);
         switch (mat->type) {
             case material_type::specular_roughness: {
                 omat->kd = {mat->kd.x, mat->kd.y, mat->kd.z};
@@ -4261,10 +4219,10 @@ obj_scene* scene_to_obj(const scene* scn) {
                 omat->kt = {mat->kt.x, mat->kt.y, mat->kt.z};
                 omat->ns = (mat->rs) ? 2 / pow(mat->rs, 4.0f) - 2 : 1e6;
                 omat->op = mat->op;
-                omat->kd_txt = add_texture(mat->kd_txt);
-                omat->ks_txt = add_texture(mat->ks_txt);
-                omat->kr_txt = add_texture(mat->kr_txt);
-                omat->kt_txt = add_texture(mat->kt_txt);
+                omat->kd_txt = make_texture_info(mat->kd_txt, mat->kd_txt_info);
+                omat->ks_txt = make_texture_info(mat->ks_txt, mat->ks_txt_info);
+                omat->kr_txt = make_texture_info(mat->kr_txt, mat->kr_txt_info);
+                omat->kt_txt = make_texture_info(mat->kt_txt, mat->kt_txt_info);
             } break;
             case material_type::metallic_roughness: {
                 if (mat->rs == 1 && mat->ks.x == 0) {
@@ -4281,9 +4239,11 @@ obj_scene* scene_to_obj(const scene* scn) {
                 }
                 omat->op = mat->op;
                 if (mat->ks.x < 0.5f) {
-                    omat->kd_txt = add_texture(mat->kd_txt);
+                    omat->kd_txt =
+                        make_texture_info(mat->kd_txt, mat->kd_txt_info);
                 } else {
-                    omat->ks_txt = add_texture(mat->ks_txt);
+                    omat->ks_txt =
+                        make_texture_info(mat->ks_txt, mat->ks_txt_info);
                 }
             } break;
             case material_type::specular_glossiness: {
@@ -4291,13 +4251,16 @@ obj_scene* scene_to_obj(const scene* scn) {
                 omat->ks = {mat->ks.x, mat->ks.y, mat->ks.z};
                 omat->ns = (mat->rs) ? 2 / pow(1 - mat->rs, 4.0f) - 2 : 1e6;
                 omat->op = mat->op;
-                omat->kd_txt = add_texture(mat->kd_txt);
-                omat->ks_txt = add_texture(mat->ks_txt);
+                omat->kd_txt = make_texture_info(mat->kd_txt, mat->kd_txt_info);
+                omat->ks_txt = make_texture_info(mat->ks_txt, mat->ks_txt_info);
             } break;
         }
-        omat->bump_txt = add_texture(mat->bump_txt, true);
-        omat->disp_txt = add_texture(mat->disp_txt, true);
-        omat->norm_txt = add_texture(mat->norm_txt, true);
+        omat->bump_txt =
+            make_texture_info(mat->bump_txt, mat->bump_txt_info, true);
+        omat->disp_txt =
+            make_texture_info(mat->disp_txt, mat->disp_txt_info, true);
+        omat->norm_txt =
+            make_texture_info(mat->norm_txt, mat->norm_txt_info, true);
         if (mat->op < 1 || mat->kt != zero3f) {
             omat->illum = 4;
         } else {
@@ -4320,12 +4283,13 @@ obj_scene* scene_to_obj(const scene* scn) {
             for (auto& v : shp->color)
                 obj->color.push_back({v.x, v.y, v.z, v.w});
             for (auto& v : shp->radius) obj->radius.push_back(v);
-            oobj->groups.push_back({});
-            auto group = &oobj->groups.back();
+            auto group = new obj_group();
             group->groupname = shp->name;
             group->matname = (shp->mat) ? shp->mat->name : "";
-            group->subdivision_level = shp->subdivision_level;
-            group->subdivision_catmullclark = shp->subdivision_catmullclark;
+            if (shp->subdivision)
+                group->props["subdivision"].push_back(
+                    std::to_string(shp->subdivision));
+            if (shp->catmullclark) group->props["catmullclark"].push_back("1");
             for (auto point : shp->points) {
                 group->elems.push_back({(uint32_t)group->verts.size(),
                     obj_element_type::point, 1});
@@ -4371,7 +4335,7 @@ obj_scene* scene_to_obj(const scene* scn) {
                     {(uint32_t)group->verts.size(), obj_element_type::face,
                         (uint16_t)((quad.z == quad.w) ? 3 : 4)});
                 if (group->elems.back().size == 3) {
-                    for (auto vid : quad.xyz()) {
+                    for (auto vid : {quad.x, quad.y, quad.z}) {
                         auto vert = obj_vertex{-1, -1, -1, -1, -1};
                         if (!shp->pos.empty()) vert.pos = offset.pos + vid;
                         if (!shp->texcoord.empty())
@@ -4430,6 +4394,7 @@ obj_scene* scene_to_obj(const scene* scn) {
                     group->verts.push_back(vert);
                 }
             }
+            oobj->groups.push_back(group);
         }
         obj->objects.push_back(oobj);
     }
@@ -4453,7 +4418,7 @@ obj_scene* scene_to_obj(const scene* scn) {
         auto omat = new obj_material();
         omat->name = env->name + "_mat";
         omat->ke = env->ke;
-        omat->ke_txt = add_texture(env->ke_txt);
+        omat->ke_txt = make_texture_info(env->ke_txt, env->ke_txt_info);
         oenv->name = env->name;
         oenv->matname = omat->name;
         oenv->frame = env->frame;
@@ -4469,7 +4434,7 @@ obj_scene* scene_to_obj(const scene* scn) {
             if (nde->cam) onde->camname = nde->cam->name;
             if (nde->ist) onde->objname = nde->ist->name;
             if (nde->env) onde->envname = nde->env->name;
-            onde->frame = to_mat(nde->frame);
+            onde->frame = nde->frame;
             onde->translation = nde->translation;
             onde->rotation = nde->rotation;
             onde->scaling = nde->scaling;
@@ -4498,8 +4463,8 @@ obj_scene* scene_to_obj(const scene* scn) {
 
 // Save an obj scene
 void save_obj_scene(
-    const string& filename, const scene* scn, const save_options& opts) {
-    auto oscn = unique_ptr<obj_scene>(scene_to_obj(scn));
+    const std::string& filename, const scene* scn, const save_options& opts) {
+    auto oscn = std::unique_ptr<obj_scene>(scene_to_obj(scn));
     save_obj(filename, oscn.get(), opts.save_textures, opts.skip_missing,
         opts.obj_flip_texcoord, opts.obj_flip_tr);
 }
@@ -4515,79 +4480,51 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
     for (auto gtxt : gltf->images) {
         auto txt = new texture();
         txt->name = gtxt->name;
-        txt->path =
-            (startswith(gtxt->uri, "data:")) ? string("inlines") : gtxt->uri;
+        txt->path = (startswith(gtxt->uri, "data:")) ? std::string("inlines") :
+                                                       gtxt->uri;
         if (!gtxt->data.datab.empty()) {
-            txt->ldr = image4b(gtxt->data.width, gtxt->data.height);
-            for (auto j = 0; j < gtxt->data.height; j++) {
-                for (auto i = 0; i < gtxt->data.width; i++) {
-                    auto v = gtxt->data.datab.data() +
-                             (gtxt->data.width * j + i) * gtxt->data.ncomp;
-                    switch (gtxt->data.ncomp) {
-                        case 1:
-                            txt->ldr.at(i, j) = {v[0], v[0], v[0], 255};
-                            break;
-                        case 2: txt->ldr.at(i, j) = {v[0], v[1], 0, 255}; break;
-                        case 3:
-                            txt->ldr.at(i, j) = {v[0], v[1], v[2], 255};
-                            break;
-                        case 4:
-                            txt->ldr.at(i, j) = {v[0], v[1], v[2], v[3]};
-                            break;
-                        default: assert(false); break;
-                    }
-                }
-            }
+            txt->ldr = make_image(gtxt->data.width, gtxt->data.height,
+                gtxt->data.ncomp, gtxt->data.datab.data(), vec4b{0, 0, 0, 255});
         } else if (!gtxt->data.dataf.empty()) {
-            txt->hdr = image4f(gtxt->data.width, gtxt->data.height);
-            for (auto j = 0; j < gtxt->data.height; j++) {
-                for (auto i = 0; i < gtxt->data.width; i++) {
-                    auto v = gtxt->data.dataf.data() +
-                             (gtxt->data.width * j + i) * gtxt->data.ncomp;
-                    switch (gtxt->data.ncomp) {
-                        case 1:
-                            txt->hdr.at(i, j) = {v[0], v[0], v[0], 1};
-                            break;
-                        case 2: txt->hdr.at(i, j) = {v[0], v[1], 0, 1}; break;
-                        case 3:
-                            txt->hdr.at(i, j) = {v[0], v[1], v[2], 1};
-                            break;
-                        case 4:
-                            txt->hdr.at(i, j) = {v[0], v[1], v[2], v[3]};
-                            break;
-                        default: assert(false); break;
-                    }
-                }
-            }
+            txt->hdr = make_image(gtxt->data.width, gtxt->data.height,
+                gtxt->data.ncomp, gtxt->data.dataf.data(), vec4f{0, 0, 0, 1});
         }
         scn->textures.push_back(txt);
     }
 
     // add a texture
-    auto add_texture = [gltf, scn](glTFTextureInfo* ginfo, bool normal = false,
-                           bool occlusion = false) {
-        auto info = texture_info();
+    auto get_texture = [gltf, scn](glTFTextureInfo* ginfo) -> texture* {
+        if (!ginfo) return nullptr;
+        auto gtxt = gltf->get(ginfo->index);
+        if (!gtxt || !gtxt->source) return nullptr;
+        return scn->textures.at((int)gtxt->source);
+    };
+
+    // add a texture
+    auto make_texture_info = [gltf, scn](glTFTextureInfo* ginfo,
+                                 bool normal = false, bool occlusion = false) {
+        auto info = (texture_info*)nullptr;
         if (!ginfo) return info;
         auto gtxt = gltf->get(ginfo->index);
         if (!gtxt || !gtxt->source) return info;
         auto txt = scn->textures.at((int)gtxt->source);
         if (!txt) return info;
-        info.txt = scn->textures.at((int)gtxt->source);
         auto gsmp = gltf->get(gtxt->sampler);
+        info = new texture_info();
         if (gsmp) {
-            info.linear = gsmp->magFilter != glTFSamplerMagFilter::Nearest;
-            info.mipmap = gsmp->minFilter != glTFSamplerMinFilter::Linear &&
-                          gsmp->minFilter != glTFSamplerMinFilter::Nearest;
-            info.wrap_s = gsmp->wrapS != glTFSamplerWrapS::ClampToEdge;
-            info.wrap_t = gsmp->wrapT != glTFSamplerWrapT::ClampToEdge;
+            info->linear = gsmp->magFilter != glTFSamplerMagFilter::Nearest;
+            info->mipmap = gsmp->minFilter != glTFSamplerMinFilter::Linear &&
+                           gsmp->minFilter != glTFSamplerMinFilter::Nearest;
+            info->wrap_s = gsmp->wrapS != glTFSamplerWrapS::ClampToEdge;
+            info->wrap_t = gsmp->wrapT != glTFSamplerWrapT::ClampToEdge;
         }
         if (normal) {
             auto ninfo = (glTFMaterialNormalTextureInfo*)ginfo;
-            info.scale = ninfo->scale;
+            info->scale = ninfo->scale;
         }
         if (occlusion) {
             auto ninfo = (glTFMaterialOcclusionTextureInfo*)ginfo;
-            info.scale = ninfo->strength;
+            info->scale = ninfo->strength;
         }
         return info;
     };
@@ -4597,7 +4534,8 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
         auto mat = new material();
         mat->name = gmat->name;
         mat->ke = gmat->emissiveFactor;
-        mat->ke_txt = add_texture(gmat->emissiveTexture);
+        mat->ke_txt = get_texture(gmat->emissiveTexture);
+        mat->ke_txt_info = make_texture_info(gmat->emissiveTexture);
         if (gmat->pbrMetallicRoughness) {
             mat->type = material_type::metallic_roughness;
             auto gmr = gmat->pbrMetallicRoughness;
@@ -4607,8 +4545,10 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
             mat->ks = {
                 gmr->metallicFactor, gmr->metallicFactor, gmr->metallicFactor};
             mat->rs = gmr->roughnessFactor;
-            mat->kd_txt = add_texture(gmr->baseColorTexture);
-            mat->ks_txt = add_texture(gmr->metallicRoughnessTexture);
+            mat->kd_txt = get_texture(gmr->baseColorTexture);
+            mat->kd_txt_info = make_texture_info(gmr->baseColorTexture);
+            mat->ks_txt = get_texture(gmr->metallicRoughnessTexture);
+            mat->ks_txt_info = make_texture_info(gmr->metallicRoughnessTexture);
         }
         if (gmat->pbrSpecularGlossiness) {
             mat->type = material_type::specular_glossiness;
@@ -4618,11 +4558,18 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
             mat->op = gsg->diffuseFactor[3];
             mat->ks = gsg->specularFactor;
             mat->rs = gsg->glossinessFactor;
-            mat->kd_txt = add_texture(gsg->diffuseTexture);
-            mat->ks_txt = add_texture(gsg->specularGlossinessTexture);
+            mat->kd_txt = get_texture(gsg->diffuseTexture);
+            mat->kd_txt_info = make_texture_info(gsg->diffuseTexture);
+            mat->ks_txt = get_texture(gsg->specularGlossinessTexture);
+            mat->ks_txt_info =
+                make_texture_info(gsg->specularGlossinessTexture);
         }
-        mat->norm_txt = add_texture(gmat->normalTexture, true, false);
-        mat->occ_txt = add_texture(gmat->occlusionTexture, false, true);
+        mat->norm_txt = get_texture(gmat->normalTexture);
+        mat->norm_txt_info =
+            make_texture_info(gmat->normalTexture, true, false);
+        mat->occ_txt = get_texture(gmat->occlusionTexture);
+        mat->occ_txt_info =
+            make_texture_info(gmat->occlusionTexture, false, true);
         mat->double_sided = gmat->doubleSided;
         scn->materials.push_back(mat);
     }
@@ -4635,7 +4582,7 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
         auto gid = 0;
         for (auto gprim : gmesh->primitives) {
             auto shp = new shape();
-            shp->name = gmesh->name + "_" + to_string(gid++);
+            shp->name = gmesh->name + "_" + std::to_string(gid++);
             if (gprim->material) {
                 shp->mat = scn->materials[(int)gprim->material];
             }
@@ -4787,7 +4734,7 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
     }
 
     // convert cameras
-    auto cameras = vector<camera>();
+    auto cameras = std::vector<camera>();
     for (auto gcam : gltf->cameras) {
         cameras.push_back({});
         auto cam = &cameras.back();
@@ -4835,7 +4782,7 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
         nde->translation = gnde->translation;
         nde->rotation = gnde->rotation;
         nde->scaling = gnde->scale;
-        nde->frame = to_frame(gnde->matrix);
+        nde->frame = mat_to_frame(gnde->matrix);
 #if 0
         nde->weights = gnde->weights;
 #endif
@@ -4851,7 +4798,7 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
 
     // keyframe type conversion
     static auto keyframe_types =
-        unordered_map<glTFAnimationSamplerInterpolation, keyframe_type>{
+        std::unordered_map<glTFAnimationSamplerInterpolation, keyframe_type>{
             {glTFAnimationSamplerInterpolation::NotSet, keyframe_type::linear},
             {glTFAnimationSamplerInterpolation::Linear, keyframe_type::linear},
             {glTFAnimationSamplerInterpolation::Step, keyframe_type::step},
@@ -4865,7 +4812,7 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
     for (auto ganm : gltf->animations) {
         auto agr = new animation_group();
         agr->name = ganm->name;
-        auto sampler_map = unordered_map<vec2i, animation*>();
+        auto sampler_map = std::unordered_map<vec2i, animation*>();
         for (auto gchannel : ganm->channels) {
             if (sampler_map.find({(int)gchannel->sampler,
                     (int)gchannel->target->path}) == sampler_map.end()) {
@@ -4920,7 +4867,7 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
                         }
                     } break;
                     default: {
-                        throw runtime_error("should not have gotten here");
+                        throw std::runtime_error("should not have gotten here");
                     }
                 }
                 sampler_map[{
@@ -4949,12 +4896,12 @@ scene* gltf_to_scene(const glTF* gltf, const load_options& opts) {
 }
 
 // Load an gltf scene
-scene* load_gltf_scene(const string& filename, const load_options& opts) {
-    auto gscn = unique_ptr<glTF>(
+scene* load_gltf_scene(const std::string& filename, const load_options& opts) {
+    auto gscn = std::unique_ptr<glTF>(
         load_gltf(filename, true, opts.load_textures, opts.skip_missing));
-    auto scn = unique_ptr<scene>(gltf_to_scene(gscn.get(), opts));
+    auto scn = std::unique_ptr<scene>(gltf_to_scene(gscn.get(), opts));
     if (!scn) {
-        throw runtime_error("could not convert gltf scene");
+        throw std::runtime_error("could not convert gltf scene");
         return nullptr;
     }
     return scn.release();
@@ -4962,8 +4909,8 @@ scene* load_gltf_scene(const string& filename, const load_options& opts) {
 
 // Unflattnes gltf
 glTF* scene_to_gltf(
-    const scene* scn, const string& buffer_uri, bool separate_buffers) {
-    auto gltf = unique_ptr<glTF>(new glTF());
+    const scene* scn, const std::string& buffer_uri, bool separate_buffers) {
+    auto gltf = std::unique_ptr<glTF>(new glTF());
 
     // add asset info
     gltf->asset = new glTFAsset();
@@ -4998,7 +4945,7 @@ glTF* scene_to_gltf(
     for (auto txt : scn->textures) {
         auto gimg = new glTFImage();
         gimg->uri = txt->path;
-        if (txt->hdr) {
+        if (!txt->hdr.empty()) {
             gimg->data.width = txt->hdr.width();
             gimg->data.height = txt->hdr.height();
             gimg->data.ncomp = 4;
@@ -5006,7 +4953,7 @@ glTF* scene_to_gltf(
                 (float*)data(txt->hdr) +
                     txt->hdr.width() * txt->hdr.height() * 4);
         }
-        if (txt->ldr) {
+        if (!txt->ldr.empty()) {
             gimg->data.width = txt->ldr.width();
             gimg->data.height = txt->ldr.height();
             gimg->data.ncomp = 4;
@@ -5025,28 +4972,31 @@ glTF* scene_to_gltf(
     };
 
     // add a texture and sampler
-    auto add_texture = [&gltf, &index, scn](const texture_info& info,
-                           bool norm = false, bool occ = false) {
-        if (!info.txt) return (glTFTextureInfo*)nullptr;
+    auto add_texture_info = [&gltf, &index, scn](const texture* txt,
+                                const texture_info* info, bool norm = false,
+                                bool occ = false) {
+        if (!txt) return (glTFTextureInfo*)nullptr;
         auto gtxt = new glTFTexture();
-        gtxt->name = info.txt->name;
-        gtxt->source = glTFid<glTFImage>(index(scn->textures, info.txt));
+        gtxt->name = txt->name;
+        gtxt->source = glTFid<glTFImage>(index(scn->textures, txt));
 
         // check if it is default
-        auto is_default =
-            info.wrap_s && info.wrap_t && info.linear && info.mipmap;
-
+        auto is_default = !info || (info->wrap_s && info->wrap_t &&
+                                       info->linear && info->mipmap);
         if (!is_default) {
             auto gsmp = new glTFSampler();
-            gsmp->wrapS = (info.wrap_s) ? glTFSamplerWrapS::Repeat :
-                                          glTFSamplerWrapS::ClampToEdge;
-            gsmp->wrapT = (info.wrap_t) ? glTFSamplerWrapT::Repeat :
-                                          glTFSamplerWrapT::ClampToEdge;
-            gsmp->minFilter = (info.mipmap) ?
+            gsmp->wrapS = (!info || info->wrap_s) ?
+                              glTFSamplerWrapS::Repeat :
+                              glTFSamplerWrapS::ClampToEdge;
+            gsmp->wrapT = (!info || info->wrap_t) ?
+                              glTFSamplerWrapT::Repeat :
+                              glTFSamplerWrapT::ClampToEdge;
+            gsmp->minFilter = (!info || info->mipmap) ?
                                   glTFSamplerMinFilter::LinearMipmapLinear :
                                   glTFSamplerMinFilter::Nearest;
-            gsmp->magFilter = (info.linear) ? glTFSamplerMagFilter::Linear :
-                                              glTFSamplerMagFilter::Nearest;
+            gsmp->magFilter = (!info || info->linear) ?
+                                  glTFSamplerMagFilter::Linear :
+                                  glTFSamplerMagFilter::Nearest;
             gtxt->sampler = glTFid<glTFSampler>((int)gltf->samplers.size());
             gltf->samplers.push_back(gsmp);
         }
@@ -5054,12 +5004,12 @@ glTF* scene_to_gltf(
         if (norm) {
             auto ginfo = new glTFMaterialNormalTextureInfo();
             ginfo->index = glTFid<glTFTexture>{(int)gltf->textures.size() - 1};
-            ginfo->scale = info.scale;
+            ginfo->scale = (info) ? info->scale : 1;
             return (glTFTextureInfo*)ginfo;
         } else if (occ) {
             auto ginfo = new glTFMaterialOcclusionTextureInfo();
             ginfo->index = glTFid<glTFTexture>{(int)gltf->textures.size() - 1};
-            ginfo->strength = info.scale;
+            ginfo->strength = (info) ? info->scale : 1;
             return (glTFTextureInfo*)ginfo;
         } else {
             auto ginfo = new glTFTextureInfo();
@@ -5073,7 +5023,7 @@ glTF* scene_to_gltf(
         auto gmat = new glTFMaterial();
         gmat->name = mat->name;
         gmat->emissiveFactor = mat->ke;
-        gmat->emissiveTexture = add_texture(mat->ke_txt);
+        gmat->emissiveTexture = add_texture_info(mat->ke_txt, mat->ke_txt_info);
         switch (mat->type) {
             case material_type::specular_roughness: {
                 gmat->pbrSpecularGlossiness =
@@ -5083,8 +5033,10 @@ glTF* scene_to_gltf(
                     mat->kd[0], mat->kd[1], mat->kd[2], mat->op};
                 gsg->specularFactor = mat->ks;
                 gsg->glossinessFactor = 1 - mat->rs;
-                gsg->diffuseTexture = add_texture(mat->kd_txt);
-                gsg->specularGlossinessTexture = add_texture(mat->ks_txt);
+                gsg->diffuseTexture =
+                    add_texture_info(mat->kd_txt, mat->kd_txt_info);
+                gsg->specularGlossinessTexture =
+                    add_texture_info(mat->ks_txt, mat->ks_txt_info);
             } break;
             case material_type::metallic_roughness: {
                 gmat->pbrMetallicRoughness =
@@ -5094,8 +5046,10 @@ glTF* scene_to_gltf(
                     mat->kd.x, mat->kd.y, mat->kd.z, mat->op};
                 gmr->metallicFactor = mat->ks.x;
                 gmr->roughnessFactor = mat->rs;
-                gmr->baseColorTexture = add_texture(mat->kd_txt);
-                gmr->metallicRoughnessTexture = add_texture(mat->ks_txt);
+                gmr->baseColorTexture =
+                    add_texture_info(mat->kd_txt, mat->kd_txt_info);
+                gmr->metallicRoughnessTexture =
+                    add_texture_info(mat->ks_txt, mat->ks_txt_info);
             } break;
             case material_type::specular_glossiness: {
                 gmat->pbrSpecularGlossiness =
@@ -5105,20 +5059,23 @@ glTF* scene_to_gltf(
                     mat->kd[0], mat->kd[1], mat->kd[2], mat->op};
                 gsg->specularFactor = mat->ks;
                 gsg->glossinessFactor = mat->rs;
-                gsg->diffuseTexture = add_texture(mat->kd_txt);
-                gsg->specularGlossinessTexture = add_texture(mat->ks_txt);
+                gsg->diffuseTexture =
+                    add_texture_info(mat->kd_txt, mat->kd_txt_info);
+                gsg->specularGlossinessTexture =
+                    add_texture_info(mat->ks_txt, mat->ks_txt_info);
             } break;
         }
-        gmat->normalTexture = (glTFMaterialNormalTextureInfo*)add_texture(
-            mat->norm_txt, true, false);
-        gmat->occlusionTexture = (glTFMaterialOcclusionTextureInfo*)add_texture(
-            mat->occ_txt, false, true);
+        gmat->normalTexture = (glTFMaterialNormalTextureInfo*)add_texture_info(
+            mat->norm_txt, mat->norm_txt_info, true, false);
+        gmat->occlusionTexture =
+            (glTFMaterialOcclusionTextureInfo*)add_texture_info(
+                mat->occ_txt, mat->occ_txt_info, false, true);
         gmat->doubleSided = mat->double_sided;
         gltf->materials.push_back(gmat);
     }
 
     // add buffer
-    auto add_buffer = [&gltf](const string& buffer_uri) {
+    auto add_buffer = [&gltf](const std::string& buffer_uri) {
         auto gbuffer = new glTFBuffer();
         gltf->buffers.push_back(gbuffer);
         gbuffer->uri = buffer_uri;
@@ -5130,7 +5087,7 @@ glTF* scene_to_gltf(
 
     // add an optional buffer
     auto add_opt_buffer = [&gbuffer_global, buffer_uri, &add_buffer,
-                              separate_buffers](const string& uri) {
+                              separate_buffers](const std::string& uri) {
         if (separate_buffers && uri != "") {
             return add_buffer(uri);
         } else {
@@ -5140,8 +5097,8 @@ glTF* scene_to_gltf(
     };
 
     // attribute handling
-    auto add_accessor = [&gltf, &index](glTFBuffer* gbuffer, const string& name,
-                            glTFAccessorType type,
+    auto add_accessor = [&gltf, &index](glTFBuffer* gbuffer,
+                            const std::string& name, glTFAccessorType type,
                             glTFAccessorComponentType ctype, int count,
                             int csize, const void* data, bool save_min_max) {
         gltf->bufferViews.push_back(new glTFBufferView());
@@ -5267,9 +5224,9 @@ glTF* scene_to_gltf(
                     (int*)triangles.data(), false);
                 gprim->mode = glTFMeshPrimitiveMode::Triangles;
             } else if (!shp->quads_pos.empty()) {
-                throw runtime_error("face varying not supported in glTF");
+                throw std::runtime_error("face varying not supported in glTF");
             } else {
-                throw runtime_error("empty mesh");
+                throw std::runtime_error("empty mesh");
             }
             gmesh->primitives.push_back(gprim);
         }
@@ -5283,7 +5240,7 @@ glTF* scene_to_gltf(
             auto gnode = new glTFNode();
             gnode->name = ist->name;
             gnode->mesh = glTFid<glTFMesh>(index(scn->shapes, ist->shp));
-            gnode->matrix = to_mat(ist->frame);
+            gnode->matrix = frame_to_mat(ist->frame);
             gltf->nodes.push_back(gnode);
         }
 
@@ -5292,7 +5249,7 @@ glTF* scene_to_gltf(
             auto gnode = new glTFNode();
             gnode->name = cam->name;
             gnode->camera = glTFid<glTFCamera>(index(scn->cameras, cam));
-            gnode->matrix = to_mat(cam->frame);
+            gnode->matrix = frame_to_mat(cam->frame);
             gltf->nodes.push_back(gnode);
         }
 
@@ -5319,7 +5276,7 @@ glTF* scene_to_gltf(
                 gnode->mesh =
                     glTFid<glTFMesh>(index(scn->shapes, nde->ist->shp));
             }
-            gnode->matrix = to_mat(nde->frame);
+            gnode->matrix = frame_to_mat(nde->frame);
             gnode->translation = nde->translation;
             gnode->rotation = nde->rotation;
             gnode->scale = nde->scaling;
@@ -5335,7 +5292,7 @@ glTF* scene_to_gltf(
         }
 
         // root nodes
-        auto is_root = vector<bool>(gltf->nodes.size(), true);
+        auto is_root = std::vector<bool>(gltf->nodes.size(), true);
         for (auto idx = 0; idx < gltf->nodes.size(); idx++) {
             auto gnde = gltf->nodes.at(idx);
             for (auto idx1 = 0; idx1 < gnde->children.size(); idx1++) {
@@ -5371,7 +5328,7 @@ glTF* scene_to_gltf(
         auto gbuffer = add_opt_buffer(agr->path);
         auto count = 0;
         auto paths =
-            unordered_map<animation*, glTFAnimationChannelTargetPath>();
+            std::unordered_map<animation*, glTFAnimationChannelTargetPath>();
         for (auto anm : agr->animations) {
             auto aid = ganm->name + "_" + std::to_string(count++);
             auto gsmp = new glTFAnimationSampler();
@@ -5410,7 +5367,7 @@ glTF* scene_to_gltf(
                     (int)values.size(), sizeof(float), values.data(), false);
                 path = glTFAnimationChannelTargetPath::Weights;
             } else {
-                throw runtime_error("should not have gotten here");
+                throw std::runtime_error("should not have gotten here");
             }
             gsmp->interpolation = interpolation_map.at(anm->type);
             ganm->samplers.push_back(gsmp);
@@ -5437,9 +5394,9 @@ glTF* scene_to_gltf(
 
 // Save a gltf scene
 void save_gltf_scene(
-    const string& filename, const scene* scn, const save_options& opts) {
+    const std::string& filename, const scene* scn, const save_options& opts) {
     auto buffer_uri = path_basename(filename) + ".bin";
-    auto gscn = unique_ptr<glTF>(
+    auto gscn = std::unique_ptr<glTF>(
         scene_to_gltf(scn, buffer_uri, opts.gltf_separate_buffers));
     save_gltf(filename, gscn.get(), true, opts.save_textures);
 }
@@ -5455,7 +5412,7 @@ scene* svg_to_scene(const svg_scene* sscn, const load_options& opts) {
     for (auto sshp : sscn->shapes) {
         // TODO: recursive shape
         auto sgr = new shape_group();
-        sgr->name = "shape" + to_string(sid++);
+        sgr->name = "shape" + std::to_string(sid++);
         auto shp = new shape();
         shp->name = sgr->name;
         for (auto spth : sshp->paths) {
@@ -5487,16 +5444,16 @@ scene* svg_to_scene(const svg_scene* sscn, const load_options& opts) {
 }
 
 // Load an svg scene
-scene* load_svg_scene(const string& filename, const load_options& opts) {
-    auto sscn = unique_ptr<svg_scene>(load_svg(filename));
-    auto scn = unique_ptr<scene>(svg_to_scene(sscn.get(), opts));
+scene* load_svg_scene(const std::string& filename, const load_options& opts) {
+    auto sscn = std::unique_ptr<svg_scene>(load_svg(filename));
+    auto scn = std::unique_ptr<scene>(svg_to_scene(sscn.get(), opts));
     return scn.release();
 }
 
 #endif
 
 // Load a scene
-scene* load_scene(const string& filename, const load_options& opts) {
+scene* load_scene(const std::string& filename, const load_options& opts) {
     auto ext = path_extension(filename);
     if (ext == ".obj" || ext == ".OBJ") return load_obj_scene(filename, opts);
 #if YGL_GLTF
@@ -5506,13 +5463,13 @@ scene* load_scene(const string& filename, const load_options& opts) {
 #if YGL_SVG
     if (ext == ".svg" || ext == ".SVG") return load_svg_scene(filename, opts);
 #endif
-    throw runtime_error("unsupported extension " + ext);
+    throw std::runtime_error("unsupported extension " + ext);
     return nullptr;
 }
 
 // Save a scene
 void save_scene(
-    const string& filename, const scene* scn, const save_options& opts) {
+    const std::string& filename, const scene* scn, const save_options& opts) {
     auto ext = path_extension(filename);
     if (ext == ".obj" || ext == ".OBJ")
         return save_obj_scene(filename, scn, opts);
@@ -5520,7 +5477,7 @@ void save_scene(
     if (ext == ".gltf" || ext == ".GLTF")
         return save_gltf_scene(filename, scn, opts);
 #endif
-    throw runtime_error("unsupported extension " + ext);
+    throw std::runtime_error("unsupported extension " + ext);
 }
 
 }  // namespace ygl
@@ -5662,7 +5619,7 @@ float sample_next1f(trace_pixel& pxl, trace_rng_type type, int nsamples) {
         case trace_rng_type::stratified: {
             auto p = hash_uint64_32((uint64_t)pxl.i | (uint64_t)pxl.j << 16 |
                                     (uint64_t)pxl.dimension << 32);
-            auto s = hash_permute(pxl.sample, nsamples, p);
+            auto s = cmjs_permute(pxl.sample, nsamples, p);
             pxl.dimension += 1;
             return clamp(
                 (s + next_rand1f(pxl.rng)) / nsamples, 0.0f, 1 - flt_eps);
@@ -5683,7 +5640,7 @@ vec2f sample_next2f(trace_pixel& pxl, trace_rng_type type, int nsamples) {
         case trace_rng_type::stratified: {
             auto p = hash_uint64_32((uint64_t)pxl.i | (uint64_t)pxl.j << 16 |
                                     (uint64_t)pxl.dimension << 32);
-            auto s = hash_permute(pxl.sample, nsamples, p);
+            auto s = cmjs_permute(pxl.sample, nsamples, p);
             auto nsamples2 = (int)round(sqrt(nsamples));
             pxl.dimension += 2;
             return {clamp((s % nsamples2 + next_rand1f(pxl.rng)) / nsamples2,
@@ -5698,8 +5655,8 @@ vec2f sample_next2f(trace_pixel& pxl, trace_rng_type type, int nsamples) {
     }
 }
 
-// Surface point with geometry and material data. Supports point on envmap too.
-// This is the key data manipulated in the path tracer.
+// Surface point with geometry and material data. Supports point on
+// envmap too. This is the key data manipulated in the path tracer.
 struct trace_point {
     const shape* shp = nullptr;        // shape
     const environment* env = nullptr;  // environment
@@ -5711,6 +5668,7 @@ struct trace_point {
     vec3f ks = {0, 0, 0};              // specular
     float rs = 0;                      // specular roughness
     vec3f kt = {0, 0, 0};              // transmission (thin glass)
+    float op = 1.0f;                   // opacity
     bool has_brdf() const { return shp && kd + ks + kt != zero3f; }
     vec3f rho() const { return kd + ks + kt; }
     vec3f brdf_weights() const {
@@ -5731,8 +5689,8 @@ vec3f eval_emission(const trace_point& pt, const vec3f& wo) {
 
 // Evaluates the BRDF scaled by the cosine of the incoming direction.
 // - ggx from [Heitz 2014] and [Walter 2007] and [Lagarde 2014]
-// "Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs"
-// http://jcgt.org/published/0003/02/03/
+// "Understanding the Masking-Shadowing Function in Microfacet-Based
+// BRDFs" http://jcgt.org/published/0003/02/03/
 // - "Microfacet Models for Refraction through Rough Surfaces" EGSR 07
 // https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf
 vec3f eval_ggx_brdfcos(const trace_point& pt, const vec3f& wo, const vec3f& wi,
@@ -5884,7 +5842,7 @@ float weight_brdfcos(const trace_point& pt, const vec3f& wo, const vec3f& wi,
 }
 
 // Picks a direction based on the BRDF
-tuple<vec3f, bool> sample_ggx_brdfcos(
+std::tuple<vec3f, bool> sample_ggx_brdfcos(
     const trace_point& pt, const vec3f& wo, float rnl, const vec2f& rn) {
     auto weights = pt.brdf_weights();
     auto ndo = dot(pt.norm, wo);
@@ -5918,7 +5876,7 @@ tuple<vec3f, bool> sample_ggx_brdfcos(
 }
 
 // Picks a direction based on the BRDF
-tuple<vec3f, bool> sample_kajiyakay_brdfcos(
+std::tuple<vec3f, bool> sample_kajiyakay_brdfcos(
     const trace_point& pt, const vec3f& wo, float rnl, const vec2f& rn) {
     auto weights = pt.brdf_weights();
     // diffuse and specular: samnple a uniform spherical direction
@@ -5937,7 +5895,7 @@ tuple<vec3f, bool> sample_kajiyakay_brdfcos(
 }
 
 // Picks a direction based on the BRDF
-tuple<vec3f, bool> sample_point_brdfcos(
+std::tuple<vec3f, bool> sample_point_brdfcos(
     const trace_point& pt, const vec3f& wo, float rnl, const vec2f& rn) {
     auto weights = pt.brdf_weights();
     // diffuse and specular: samnple a uniform spherical direction
@@ -5957,7 +5915,7 @@ tuple<vec3f, bool> sample_point_brdfcos(
 }
 
 // Picks a direction based on the BRDF
-tuple<vec3f, bool> sample_brdfcos(
+std::tuple<vec3f, bool> sample_brdfcos(
     const trace_point& pt, const vec3f& wo, float rnl, const vec2f& rn) {
     if (!pt.has_brdf()) return {zero3f, false};
     if (!pt.shp->triangles.empty())
@@ -5970,7 +5928,8 @@ tuple<vec3f, bool> sample_brdfcos(
         return {zero3f, false};
 }
 
-// Create a point for an environment map. Resolves material with textures.
+// Create a point for an environment map. Resolves material with
+// textures.
 trace_point eval_point(const environment* env, const vec3f& wo) {
     auto pt = trace_point();
     pt.env = env;
@@ -5982,14 +5941,16 @@ trace_point eval_point(const environment* env, const vec3f& wo) {
         auto theta = acos(clamp(w.y, -1.0f, 1.0f));
         auto phi = atan2(w.z, w.x);
         auto texcoord = vec2f{0.5f + phi / (2 * pif), theta / pif};
-        pt.ke *= eval_texture(env->ke_txt, texcoord).xyz();
+        auto txt = eval_texture(env->ke_txt, env->ke_txt_info, texcoord);
+        pt.ke *= {txt.x, txt.y, txt.z};
     }
     return pt;
 }
 
-// Create a point for a shape. Resolves geometry and material with textures.
+// Create a point for a shape. Resolves geometry and material with
+// textures.
 trace_point eval_point(
-    const instance* ist, int sid, int eid, const vec4f& euv, const vec3f& wo) {
+    const instance* ist, int sid, int eid, const vec2f& euv, const vec3f& wo) {
     // default material
     static auto def_material = (material*)nullptr;
     if (!def_material) {
@@ -6010,9 +5971,10 @@ trace_point eval_point(
     // handle normal map
     if (mat->norm_txt) {
         auto tangsp = eval_tangsp(pt.shp, eid, euv);
-        auto txt =
-            eval_texture(mat->norm_txt, pt.texcoord, false).xyz() * 2.0f -
-            vec3f{1, 1, 1};
+        auto txt = eval_texture(
+                       mat->norm_txt, mat->norm_txt_info, pt.texcoord, false) *
+                       2.0f -
+                   vec4f{1};
         auto ntxt = normalize(vec3f{txt.x, -txt.y, txt.z});
         auto frame = make_frame_fromzx(
             {0, 0, 0}, pt.norm, {tangsp.x, tangsp.y, tangsp.z});
@@ -6027,60 +5989,108 @@ trace_point eval_point(
     // correct for double sided
     if (mat->double_sided && dot(pt.norm, wo) < 0) pt.norm = -pt.norm;
 
-    // handle color
-    auto kx_scale = vec4f{1, 1, 1, 1};
-    if (!pt.shp->color.empty()) kx_scale *= eval_color(pt.shp, eid, euv);
+    // initialized material values
+    auto kx = vec3f{1, 1, 1};
+    pt.op = 1;
+    if (!pt.shp->color.empty()) {
+        auto col = eval_color(pt.shp, eid, euv);
+        kx *= {col.x, col.y, col.z};
+        pt.op *= col.w;
+    }
 
     // handle occlusion
-    if (mat->occ_txt)
-        kx_scale.xyz() *= eval_texture(mat->occ_txt, pt.texcoord).xyz();
+    if (mat->occ_txt) {
+        auto txt = eval_texture(mat->occ_txt, mat->occ_txt_info, pt.texcoord);
+        kx *= {txt.x, txt.y, txt.z};
+    }
 
     // sample emission
-    pt.ke =
-        mat->ke * kx_scale.xyz() * eval_texture(mat->ke_txt, pt.texcoord).xyz();
+    pt.ke = mat->ke * kx;
+    if (mat->ke_txt) {
+        auto txt = eval_texture(mat->ke_txt, mat->ke_txt_info, pt.texcoord);
+        pt.ke *= {txt.x, txt.y, txt.z};
+    }
 
     // sample reflectance
-    auto kd = zero4f, ks = zero4f, kt = zero4f;
     switch (mat->type) {
         case material_type::specular_roughness: {
-            kd = vec4f{mat->kd, mat->op} * kx_scale *
-                 eval_texture(mat->kd_txt, pt.texcoord);
-            ks = vec4f{mat->ks, mat->rs} * vec4f{kx_scale.xyz(), 1} *
-                 eval_texture(mat->ks_txt, pt.texcoord);
-            kt = vec4f{mat->kt, mat->rs} * vec4f{kx_scale.xyz(), 1} *
-                 eval_texture(mat->kt_txt, pt.texcoord);
+            pt.kd = mat->kd * kx;
+            if (mat->kd_txt) {
+                auto txt =
+                    eval_texture(mat->kd_txt, mat->kd_txt_info, pt.texcoord);
+                pt.kd *= {txt.x, txt.y, txt.z};
+                pt.op *= txt.w;
+            }
+            pt.ks = mat->ks * kx;
+            pt.rs = mat->rs;
+            if (mat->ks_txt) {
+                auto txt =
+                    eval_texture(mat->ks_txt, mat->ks_txt_info, pt.texcoord);
+                pt.ks *= {txt.x, txt.y, txt.z};
+            }
+            pt.kt = mat->kt * kx;
+            if (mat->kt_txt) {
+                auto txt =
+                    eval_texture(mat->kt_txt, mat->kt_txt_info, pt.texcoord);
+                pt.kt *= {txt.x, txt.y, txt.z};
+            }
         } break;
         case material_type::metallic_roughness: {
-            auto kb = vec4f{mat->kd, mat->op} * kx_scale *
-                      eval_texture(mat->kd_txt, pt.texcoord);
-            auto km = vec2f{mat->ks.x, mat->rs};
-            if (mat->ks_txt) {
-                auto ks_txt = eval_texture(mat->ks_txt, pt.texcoord);
-                km.x *= ks_txt.y;
-                km.y *= ks_txt.z;
+            auto kb = mat->kd * kx;
+            if (mat->kd_txt) {
+                auto txt =
+                    eval_texture(mat->kd_txt, mat->kd_txt_info, pt.texcoord);
+                kb *= {txt.x, txt.y, txt.z};
+                pt.op *= txt.w;
             }
-            kd = vec4f{kb.xyz() * (1 - km.x), kb.w};
-            ks =
-                vec4f{kb.xyz() * km.x + vec3f{0.04f, 0.04f, 0.04f} * (1 - km.x),
-                    km.y};
+            auto km = mat->ks.x;
+            pt.rs = mat->rs;
+            if (mat->ks_txt) {
+                auto txt =
+                    eval_texture(mat->ks_txt, mat->ks_txt_info, pt.texcoord);
+                km *= txt.y;
+                pt.rs *= txt.z;
+            }
+            pt.kd = kb * (1 - km);
+            pt.ks = kb * km + vec3f{0.04f} * (1 - km);
         } break;
         case material_type::specular_glossiness: {
-            kd = vec4f{mat->kd, mat->op} * kx_scale *
-                 eval_texture(mat->kd_txt, pt.texcoord);
-            ks = vec4f{mat->ks, mat->rs} * vec4f{kx_scale.xyz(), 1} *
-                 eval_texture(mat->ks_txt, pt.texcoord);
-            ks.w = 1 - ks.w;  // glossiness -> roughness
+            pt.kd = mat->kd * kx;
+            if (mat->kd_txt) {
+                auto txt =
+                    eval_texture(mat->kd_txt, mat->kd_txt_info, pt.texcoord);
+                pt.kd *= {txt.x, txt.y, txt.z};
+                pt.op *= txt.w;
+            }
+            pt.ks = mat->ks * kx;
+            pt.rs = mat->rs;
+            if (mat->ks_txt) {
+                auto txt =
+                    eval_texture(mat->ks_txt, mat->ks_txt_info, pt.texcoord);
+                pt.ks *= {txt.x, txt.y, txt.z};
+                pt.rs *= txt.w;
+            }
+            pt.rs = 1 - pt.rs;  // glossiness -> roughnes
+            pt.kt = mat->kt * kx;
+            if (mat->kt_txt) {
+                auto txt =
+                    eval_texture(mat->kt_txt, mat->kt_txt_info, pt.texcoord);
+                pt.kt *= {txt.x, txt.y, txt.z};
+            }
         } break;
     }
 
-    // TODO: fix emission for opacity
-
     // set up final values
-    pt.kd = kd.xyz() * kd.w;
-    pt.ks = (ks.xyz() != zero3f && ks.w < 0.9999f) ? ks.xyz() * kd.w : zero3f;
-    pt.rs = (ks.xyz() != zero3f && ks.w < 0.9999f) ? ks.w * ks.w : 0;
-    pt.kt = {1 - kd.w, 1 - kd.w, 1 - kd.w};
-    if (kt.xyz() != zero3f) pt.kt *= kt.xyz();
+    pt.ke *= pt.op;
+    pt.kd *= pt.op;
+    if (pt.ks != zero3f && pt.rs < 0.9999f) {
+        pt.ks *= pt.op;
+        pt.rs = pt.rs * pt.rs;
+    } else {
+        pt.ks = zero3f;
+        pt.rs = 0;
+    }
+    if (pt.kt == zero3f) pt.kt = vec3f{1 - pt.op};
 
     // done
     return pt;
@@ -6114,32 +6124,25 @@ float weight_lights(
 
 // Picks a point on a light.
 trace_point sample_light(const trace_lights& lights, const trace_light& lgt,
-    const trace_point& pt, float rne, const vec2f& rn) {
+    const trace_point& pt, float rel, const vec2f& ruv) {
     if (lgt.ist) {
         auto shp = lgt.ist->shp->shapes.at(0);
+        auto& cdf = lights.shape_cdfs.at(shp);
         auto eid = 0;
-        auto euv = zero4f;
-        if (!shp->points.empty()) {
-            eid = sample_points(lights.shape_cdfs.at(shp), rne);
-            euv = {1, 0, 0, 0};
+        auto euv = zero2f;
+        if (!shp->triangles.empty()) {
+            std::tie(eid, euv) = sample_triangles(cdf, rel, ruv);
         } else if (!shp->lines.empty()) {
-            std::tie(eid, (vec2f&)euv) =
-                sample_lines(lights.shape_cdfs.at(shp), rne, rn.x);
-        } else if (!shp->triangles.empty()) {
-            std::tie(eid, (vec3f&)euv) =
-                sample_triangles(lights.shape_cdfs.at(shp), rne, rn);
-        } else if (!shp->quads.empty()) {
-            std::tie(eid, (vec4f&)euv) =
-                sample_quads(lights.shape_cdfs.at(shp), rne, rn);
-        } else {
-            assert(false);
+            std::tie(eid, (float&)euv) = sample_lines(cdf, rel, ruv.x);
+        } else if (!shp->lines.empty()) {
+            eid = sample_points(cdf, rel);
         }
         return eval_point(lgt.ist, 0, eid, euv, zero3f);
     }
     if (lgt.env) {
-        auto z = -1 + 2 * rn.y;
+        auto z = -1 + 2 * ruv.y;
         auto rr = sqrt(clamp(1 - z * z, 0.0f, 1.0f));
-        auto phi = 2 * pif * rn.x;
+        auto phi = 2 * pif * ruv.x;
         auto wo = vec3f{cos(phi) * rr, z, sin(phi) * rr};
         return eval_point(lgt.env, wo);
     }
@@ -6159,7 +6162,7 @@ trace_point sample_lights(const trace_lights& lights, const trace_point& pt,
 trace_point intersect_scene(
     const scene* scn, const bvh_tree* bvh, const ray3f& ray) {
     auto iid = 0, sid = 0, eid = 0;
-    auto euv = zero4f;
+    auto euv = zero2f;
     auto ray_t = 0.0f;
     if (intersect_bvh(bvh, ray, false, ray_t, iid, sid, eid, euv)) {
         return eval_point(scn->instances[iid], sid, eid, euv, -ray.d);
@@ -6173,7 +6176,7 @@ trace_point intersect_scene(
 // Test occlusion
 vec3f eval_transmission(const scene* scn, const bvh_tree* bvh,
     const trace_point& pt, const trace_point& lpt, const trace_params& params) {
-    if (params.shadow_notransmission) {
+    if (params.notransmission) {
         auto ray = make_segment(pt.pos, lpt.pos);
         return (intersect_bvh(bvh, ray, true)) ? zero3f : vec3f{1, 1, 1};
     } else {
@@ -6215,9 +6218,9 @@ vec3f trace_path(const scene* scn, const bvh_tree* bvh,
         if (emission) l += weight * eval_emission(pt, wo);
 
         // direct – light
-        auto rll = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rle = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rluv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto rll = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rle = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rluv = sample_next2f(pxl, params.rng, params.nsamples);
         auto& lgt = lights.lights[(int)(rll * lights.lights.size())];
         auto lpt = sample_light(lights, lgt, pt, rle, rluv);
         auto lw = weight_light(lights, lpt, pt) * (float)lights.size();
@@ -6231,8 +6234,8 @@ vec3f trace_path(const scene* scn, const bvh_tree* bvh,
         }
 
         // direct – brdf
-        auto rbl = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rbuv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto rbl = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rbuv = sample_next2f(pxl, params.rng, params.nsamples);
         auto bwi = zero3f;
         auto bdelta = false;
         std::tie(bwi, bdelta) = sample_brdfcos(pt, wo, rbl, rbuv);
@@ -6256,8 +6259,7 @@ vec3f trace_path(const scene* scn, const bvh_tree* bvh,
         // roussian roulette
         if (bounce > 2) {
             auto rrprob = 1.0f - min(max_element_value(pt.rho()), 0.95f);
-            if (sample_next1f(pxl, params.rtype, params.nsamples) < rrprob)
-                break;
+            if (sample_next1f(pxl, params.rng, params.nsamples) < rrprob) break;
             weight *= 1 / (1 - rrprob);
         }
 
@@ -6289,9 +6291,9 @@ vec3f trace_path_nomis(const scene* scn, const bvh_tree* bvh,
         if (emission) l += weight * eval_emission(pt, wo);
 
         // direct
-        auto rll = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rle = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rluv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto rll = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rle = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rluv = sample_next2f(pxl, params.rng, params.nsamples);
         auto& lgt = lights.lights[(int)(rll * lights.lights.size())];
         auto lpt = sample_light(lights, lgt, pt, rle, rluv);
         auto lwi = normalize(lpt.pos - pt.pos);
@@ -6307,14 +6309,13 @@ vec3f trace_path_nomis(const scene* scn, const bvh_tree* bvh,
         // roussian roulette
         if (bounce > 2) {
             auto rrprob = 1.0f - min(max_element_value(pt.rho()), 0.95f);
-            if (sample_next1f(pxl, params.rtype, params.nsamples) < rrprob)
-                break;
+            if (sample_next1f(pxl, params.rng, params.nsamples) < rrprob) break;
             weight *= 1 / (1 - rrprob);
         }
 
         // continue path
-        auto rbl = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rbuv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto rbl = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rbuv = sample_next2f(pxl, params.rng, params.nsamples);
         auto bwi = zero3f;
         auto bdelta = false;
         std::tie(bwi, bdelta) = sample_brdfcos(pt, wo, rbl, rbuv);
@@ -6349,9 +6350,9 @@ vec3f trace_path_hack(const scene* scn, const bvh_tree* bvh,
     auto weight = vec3f{1, 1, 1};
     for (auto bounce = 0; bounce < params.max_depth; bounce++) {
         // direct
-        auto rll = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rle = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rluv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto rll = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rle = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rluv = sample_next2f(pxl, params.rng, params.nsamples);
         auto& lgt = lights.lights[(int)(rll * lights.lights.size())];
         auto lpt = sample_light(lights, lgt, pt, rle, rluv);
         auto lwi = normalize(lpt.pos - pt.pos);
@@ -6367,8 +6368,7 @@ vec3f trace_path_hack(const scene* scn, const bvh_tree* bvh,
         // roussian roulette
         if (bounce > 2) {
             auto rrprob = 1.0f - min(max_element_value(pt.rho()), 0.95f);
-            if (sample_next1f(pxl, params.rtype, params.nsamples) < rrprob)
-                break;
+            if (sample_next1f(pxl, params.rng, params.nsamples) < rrprob) break;
             weight *= 1 / (1 - rrprob);
         }
 
@@ -6376,8 +6376,8 @@ vec3f trace_path_hack(const scene* scn, const bvh_tree* bvh,
         auto bwi = zero3f;
         auto bdelta = false;
         std::tie(bwi, bdelta) = sample_brdfcos(pt, wo,
-            sample_next1f(pxl, params.rtype, params.nsamples),
-            sample_next2f(pxl, params.rtype, params.nsamples));
+            sample_next1f(pxl, params.rng, params.nsamples),
+            sample_next2f(pxl, params.rng, params.nsamples));
         weight *= eval_brdfcos(pt, wo, bwi, bdelta) *
                   weight_brdfcos(pt, wo, bwi, bdelta);
         if (weight == zero3f) break;
@@ -6406,8 +6406,8 @@ vec3f trace_direct(const scene* scn, const bvh_tree* bvh,
 
     // direct
     for (auto& lgt : lights.lights) {
-        auto rle = sample_next1f(pxl, params.rtype, params.nsamples);
-        auto rluv = sample_next2f(pxl, params.rtype, params.nsamples);
+        auto rle = sample_next1f(pxl, params.rng, params.nsamples);
+        auto rluv = sample_next2f(pxl, params.rng, params.nsamples);
         auto lpt = sample_light(lights, lgt, pt, rle, rluv);
         auto lwi = normalize(lpt.pos - pt.pos);
         auto ld = eval_emission(lpt, -lwi) * eval_brdfcos(pt, wo, lwi) *
@@ -6505,7 +6505,7 @@ using trace_shader = vec3f (*)(const scene* scn, const bvh_tree* bvh,
 using trace_filter = float (*)(float);
 
 // map to convert trace samplers
-static auto trace_shaders = unordered_map<trace_shader_type, trace_shader>{
+static auto trace_shaders = std::unordered_map<trace_shader_type, trace_shader>{
     {trace_shader_type::eyelight, trace_eyelight},
     {trace_shader_type::direct, trace_direct},
     {trace_shader_type::pathtrace, trace_path},
@@ -6516,7 +6516,7 @@ static auto trace_shaders = unordered_map<trace_shader_type, trace_shader>{
 };
 
 // map to convert trace filters
-static auto trace_filters = unordered_map<trace_filter_type, trace_filter>{
+static auto trace_filters = std::unordered_map<trace_filter_type, trace_filter>{
     {trace_filter_type::box, (trace_filter) nullptr},
     {trace_filter_type::triangle, filter_triangle},
     {trace_filter_type::cubic, filter_cubic},
@@ -6525,7 +6525,7 @@ static auto trace_filters = unordered_map<trace_filter_type, trace_filter>{
 };
 
 // map to convert trace filters
-static auto trace_filter_sizes = unordered_map<trace_filter_type, int>{
+static auto trace_filter_sizes = std::unordered_map<trace_filter_type, int>{
     {trace_filter_type::box, 0},
     {trace_filter_type::triangle, 1},
     {trace_filter_type::cubic, 2},
@@ -6539,10 +6539,10 @@ void trace_sample(const scene* scn, const camera* cam, const bvh_tree* bvh,
     const trace_params& params) {
     pxl.sample += 1;
     pxl.dimension = 0;
-    auto crn = sample_next2f(pxl, params.rtype, params.nsamples);
-    auto lrn = sample_next2f(pxl, params.rtype, params.nsamples);
-    auto uv = vec2f{
-        (pxl.i + crn.x) / params.width, 1 - (pxl.j + crn.y) / params.height};
+    auto crn = sample_next2f(pxl, params.rng, params.nsamples);
+    auto lrn = sample_next2f(pxl, params.rng, params.nsamples);
+    auto uv = vec2f{(pxl.i + crn.x) / (cam->aspect * params.resolution),
+        1 - (pxl.j + crn.y) / params.resolution};
     auto ray = eval_camera_ray(cam, uv, lrn);
     auto pt = intersect_scene(scn, bvh, ray);
     if (!pt.shp && params.envmap_invisible) return;
@@ -6552,26 +6552,29 @@ void trace_sample(const scene* scn, const camera* cam, const bvh_tree* bvh,
         return;
     }
     if (params.pixel_clamp > 0) l = clamplen(l, params.pixel_clamp);
-    pxl.acc += {l, 1};
+    pxl.col += l;
+    pxl.alpha += 1;
 }
 
 // Trace the next nsamples.
 void trace_samples(const scene* scn, const camera* cam, const bvh_tree* bvh,
     const trace_lights& lights, image4f& img, image<trace_pixel>& pixels,
     int nsamples, const trace_params& params) {
-    auto shader = trace_shaders.at(params.stype);
+    auto shader = trace_shaders.at(params.shader);
     if (params.parallel) {
         auto nthreads = std::thread::hardware_concurrency();
-        auto threads = vector<std::thread>();
+        auto threads = std::vector<std::thread>();
         for (auto tid = 0; tid < std::thread::hardware_concurrency(); tid++) {
             threads.push_back(std::thread([=, &img, &pixels, &params]() {
-                for (auto j = tid; j < params.height; j += nthreads) {
-                    for (auto i = 0; i < params.width; i++) {
+                for (auto j = tid; j < img.height(); j += nthreads) {
+                    for (auto i = 0; i < img.width(); i++) {
                         auto& pxl = pixels.at(i, j);
                         for (auto s = 0; s < nsamples; s++)
                             trace_sample(
                                 scn, cam, bvh, lights, pxl, shader, params);
-                        img.at(i, j) = pxl.acc / pxl.sample;
+                        img.at(i, j) =
+                            vec4f{pxl.col.x, pxl.col.y, pxl.col.z, pxl.alpha};
+                        img.at(i, j) /= pxl.sample;
                     }
                 }
             }));
@@ -6579,13 +6582,15 @@ void trace_samples(const scene* scn, const camera* cam, const bvh_tree* bvh,
         for (auto& t : threads) t.join();
         threads.clear();
     } else {
-        auto shader = trace_shaders.at(params.stype);
-        for (auto j = 0; j < params.height; j++) {
-            for (auto i = 0; i < params.width; i++) {
+        auto shader = trace_shaders.at(params.shader);
+        for (auto j = 0; j < img.height(); j++) {
+            for (auto i = 0; i < img.width(); i++) {
                 auto& pxl = pixels.at(i, j);
                 for (auto s = 0; s < params.nsamples; s++)
                     trace_sample(scn, cam, bvh, lights, pxl, shader, params);
-                img.at(i, j) = pxl.acc / pxl.sample;
+                img.at(i, j) =
+                    vec4f{pxl.col.x, pxl.col.y, pxl.col.z, pxl.alpha};
+                img.at(i, j) /= pxl.sample;
             }
         }
     }
@@ -6593,15 +6598,15 @@ void trace_samples(const scene* scn, const camera* cam, const bvh_tree* bvh,
 
 // Trace a filtered sample of samples
 void trace_sample_filtered(const scene* scn, const camera* cam,
-    const bvh_tree* bvh, const trace_lights& lights, trace_pixel& pxl,
-    trace_shader shader, trace_filter filter, int filter_size,
+    const bvh_tree* bvh, const trace_lights& lights, image4f& img,
+    trace_pixel& pxl, trace_shader shader, trace_filter filter, int filter_size,
     std::mutex& image_mutex, const trace_params& params) {
     pxl.sample += 1;
     pxl.dimension = 0;
-    auto crn = sample_next2f(pxl, params.rtype, params.nsamples);
-    auto lrn = sample_next2f(pxl, params.rtype, params.nsamples);
-    auto uv = vec2f{
-        (pxl.i + crn.x) / params.width, 1 - (pxl.j + crn.y) / params.height};
+    auto crn = sample_next2f(pxl, params.rng, params.nsamples);
+    auto lrn = sample_next2f(pxl, params.rng, params.nsamples);
+    auto uv = vec2f{(pxl.i + crn.x) / (cam->aspect * params.resolution),
+        1 - (pxl.j + crn.y) / params.resolution};
     auto ray = eval_camera_ray(cam, uv, lrn);
     auto pt = intersect_scene(scn, bvh, ray);
     if (!pt.shp && params.envmap_invisible) return;
@@ -6611,18 +6616,20 @@ void trace_sample_filtered(const scene* scn, const camera* cam,
         return;
     }
     if (params.pixel_clamp > 0) l = clamplen(l, params.pixel_clamp);
-    if (params.ftype == trace_filter_type::box) {
-        pxl.acc += {l, 1};
+    if (params.filter == trace_filter_type::box) {
+        pxl.col += l;
+        pxl.alpha += 1;
         pxl.weight += 1;
     } else {
         std::lock_guard<std::mutex> lock(image_mutex);
         for (auto fj = max(0, pxl.j - filter_size);
-             fj <= min(params.height - 1, pxl.j + filter_size); fj++) {
+             fj <= min(img.height() - 1, pxl.j + filter_size); fj++) {
             for (auto fi = max(0, pxl.i - filter_size);
-                 fi <= min(params.width - 1, pxl.i + filter_size); fi++) {
+                 fi <= min(img.width() - 1, pxl.i + filter_size); fi++) {
                 auto w = filter((fi - pxl.i) - uv.x + 0.5f) *
                          filter((fj - pxl.j) - uv.y + 0.5f);
-                pxl.acc += {l * w, w};
+                pxl.col += l * w;
+                pxl.alpha += w;
                 pxl.weight += w;
             }
         }
@@ -6633,22 +6640,22 @@ void trace_sample_filtered(const scene* scn, const camera* cam,
 void trace_samples_filtered(const scene* scn, const camera* cam,
     const bvh_tree* bvh, const trace_lights& lights, image4f& img,
     image<trace_pixel>& pixels, int nsamples, const trace_params& params) {
-    auto shader = trace_shaders.at(params.stype);
-    auto filter = trace_filters.at(params.ftype);
-    auto filter_size = trace_filter_sizes.at(params.ftype);
+    auto shader = trace_shaders.at(params.shader);
+    auto filter = trace_filters.at(params.filter);
+    auto filter_size = trace_filter_sizes.at(params.filter);
     std::mutex image_mutex;
     if (params.parallel) {
         auto nthreads = std::thread::hardware_concurrency();
-        auto threads = vector<std::thread>();
+        auto threads = std::vector<std::thread>();
         for (auto tid = 0; tid < std::thread::hardware_concurrency(); tid++) {
             threads.push_back(
-                std::thread([=, &pixels, &params, &image_mutex]() {
-                    for (auto j = tid; j < params.height; j += nthreads) {
-                        for (auto i = 0; i < params.width; i++) {
+                std::thread([=, &pixels, &params, &image_mutex, &img]() {
+                    for (auto j = tid; j < img.height(); j += nthreads) {
+                        for (auto i = 0; i < img.width(); i++) {
                             auto& pxl = pixels.at(i, j);
                             for (auto s = 0; s < nsamples; s++) {
                                 trace_sample_filtered(scn, cam, bvh, lights,
-                                    pxl, shader, filter, filter_size,
+                                    img, pxl, shader, filter, filter_size,
                                     image_mutex, params);
                             }
                         }
@@ -6658,19 +6665,21 @@ void trace_samples_filtered(const scene* scn, const camera* cam,
         for (auto& t : threads) t.join();
         threads.clear();
     } else {
-        for (auto j = 0; j < params.height; j++) {
-            for (auto i = 0; i < params.width; i++) {
+        for (auto j = 0; j < img.height(); j++) {
+            for (auto i = 0; i < img.width(); i++) {
                 auto& pxl = pixels.at(i, j);
                 for (auto s = 0; s < params.nsamples; s++) {
-                    trace_sample_filtered(scn, cam, bvh, lights, pxl, shader,
-                        filter, filter_size, image_mutex, params);
+                    trace_sample_filtered(scn, cam, bvh, lights, img, pxl,
+                        shader, filter, filter_size, image_mutex, params);
                 }
             }
         }
     }
-    for (auto j = 0; j < params.height; j++) {
-        for (auto i = 0; i < params.width; i++) {
-            img.at(i, j) = pixels.at(i, j).acc / pixels.at(i, j).weight;
+    for (auto j = 0; j < img.height(); j++) {
+        for (auto i = 0; i < img.width(); i++) {
+            auto& pxl = pixels.at(i, j);
+            img.at(i, j) = {pxl.col.x, pxl.col.y, pxl.col.z, pxl.alpha};
+            img.at(i, j) /= pxl.weight;
         }
     }
 }
@@ -6678,20 +6687,23 @@ void trace_samples_filtered(const scene* scn, const camera* cam,
 // Starts an anyncrhounous renderer.
 void trace_async_start(const scene* scn, const camera* cam, const bvh_tree* bvh,
     const trace_lights& lights, image4f& img, image<trace_pixel>& pixels,
-    vector<std::thread>& threads, bool& stop_flag, const trace_params& params) {
-    pixels = make_trace_pixels(params);
+    std::vector<std::thread>& threads, bool& stop_flag,
+    const trace_params& params) {
+    pixels = make_trace_pixels(img, params);
     auto nthreads = std::thread::hardware_concurrency();
     for (auto tid = 0; tid < std::thread::hardware_concurrency(); tid++) {
         threads.push_back(std::thread([=, &img, &pixels, &stop_flag]() {
-            auto shader = trace_shaders.at(params.stype);
+            auto shader = trace_shaders.at(params.shader);
             for (auto s = 0; s < params.nsamples; s++) {
-                for (auto j = tid; j < params.height; j += nthreads) {
-                    for (auto i = 0; i < params.width; i++) {
+                for (auto j = tid; j < img.height(); j += nthreads) {
+                    for (auto i = 0; i < img.width(); i++) {
                         if (stop_flag) return;
                         auto& pxl = pixels.at(i, j);
                         trace_sample(
                             scn, cam, bvh, lights, pxl, shader, params);
-                        img.at(i, j) = pxl.acc / pxl.sample;
+                        img.at(i, j) = {
+                            pxl.col.x, pxl.col.y, pxl.col.z, pxl.alpha};
+                        img.at(i, j) /= pxl.sample;
                     }
                 }
             }
@@ -6700,7 +6712,7 @@ void trace_async_start(const scene* scn, const camera* cam, const bvh_tree* bvh,
 }
 
 // Stop the asynchronous renderer.
-void trace_async_stop(vector<std::thread>& threads, bool& stop_flag) {
+void trace_async_stop(std::vector<std::thread>& threads, bool& stop_flag) {
     stop_flag = true;
     for (auto& t : threads) t.join();
     stop_flag = false;
@@ -6741,14 +6753,15 @@ trace_lights make_trace_lights(const scene* scn) {
 }
 
 // Initialize a rendering state
-image<trace_pixel> make_trace_pixels(const trace_params& params) {
-    auto pixels = image<trace_pixel>(params.width, params.height);
-    for (auto j = 0; j < params.height; j++) {
-        for (auto i = 0; i < params.width; i++) {
+image<trace_pixel> make_trace_pixels(
+    const image4f& img, const trace_params& params) {
+    auto pixels = image<trace_pixel>(img.width(), img.height());
+    for (auto j = 0; j < img.height(); j++) {
+        for (auto i = 0; i < img.width(); i++) {
             auto pxl = trace_pixel();
             pxl.i = i;
             pxl.j = j;
-            pxl.rng = init_rng(params.seed, (j * params.width + i) * 2 + 1);
+            pxl.rng = init_rng(params.seed, (j * img.width() + i) * 2 + 1);
             pixels.at(i, j) = pxl;
         }
     }
@@ -6762,58 +6775,42 @@ image<trace_pixel> make_trace_pixels(const trace_params& params) {
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-// Parse a value
-template <typename T>
-inline void obj_parse_val(stringstream& ss, T& v) {
-    ss >> v;
+// cleanup
+obj_object::~obj_object() {
+    for (auto v : groups) delete v;
 }
 
-// Parse a value
-inline void obj_parse_val(stringstream& ss, string& v) {
-    ss >> v;
-    if (v.length() == 0) return;
-    if ((v.front() == '"' && v.back() == '"') ||
-        (v.front() == '\'' && v.back() == '\'')) {
-        v = v.substr(1, v.length() - 2);
-        return;
-    }
-}
-
-// Parse a value
-template <typename T, int N>
-inline void obj_parse_val(stringstream& ss, vec<T, N>& v) {
-    for (auto i = 0; i < N; i++) obj_parse_val(ss, v[i]);
-}
-
-// Parse a value
-template <typename T, int N>
-inline void obj_parse_val(stringstream& ss, quat<T, N>& v) {
-    for (auto i = 0; i < N; i++) obj_parse_val(ss, v[i]);
-}
-
-// Parse a value
-template <typename T>
-inline void obj_parse_val(stringstream& ss, frame<T, 3>& v) {
-    obj_parse_val(ss, v.x);
-    obj_parse_val(ss, v.y);
-    obj_parse_val(ss, v.z);
-    obj_parse_val(ss, v.o);
+// cleanup
+obj_scene::~obj_scene() {
+    for (auto v : objects)
+        if (v) delete v;
+    for (auto v : materials)
+        if (v) delete v;
+    for (auto v : textures)
+        if (v) delete v;
+    for (auto v : cameras)
+        if (v) delete v;
+    for (auto v : environments)
+        if (v) delete v;
+    for (auto v : nodes)
+        if (v) delete v;
 }
 
 // Parse texture options and name
-inline void parse_texture(stringstream& ss, obj_texture_info& info,
-    vector<string>& textures, unordered_set<string>& texture_set,
-    bool bump = false) {
+std::istream& operator>>(std::istream& is, obj_texture_info& info) {
+    // initialize
+    info = obj_texture_info();
+
     // get tokens
-    auto tokens = vector<string>();
-    while (ss) {
-        auto s = string();
-        ss >> s;
+    auto tokens = std::vector<std::string>();
+    while (is) {
+        auto s = std::string();
+        is >> s;
         if (!s.empty()) tokens.push_back(s);
     }
 
     // exit if no tokens
-    if (tokens.empty()) return;
+    if (tokens.empty()) return is;
 
     // texture name
     info.path = tokens.back();
@@ -6821,68 +6818,60 @@ inline void parse_texture(stringstream& ss, obj_texture_info& info,
         if (c == '\\') c = '/';
 
     // texture options
-    auto last = string();
+    auto last = std::string();
     for (auto& tok : tokens) {
         if (tok == tokens.back()) break;
         if (tok[0] == '-') {
             last = tok;
-            info.unknown_props[last] = {};
+            info.props[last] = {};
         } else {
-            info.unknown_props[last].push_back(tok);
+            info.props[last].push_back(tok);
         }
     }
 
     // clamp
-    if (info.unknown_props.find("-clamp") != info.unknown_props.end() &&
-        info.unknown_props.at("-clamp").size() > 0) {
-        auto& clamp_vec = info.unknown_props.at("-clamp");
+    if (info.props.find("-clamp") != info.props.end() &&
+        info.props.at("-clamp").size() > 0) {
+        auto& clamp_vec = info.props.at("-clamp");
         auto clamp_str = (clamp_vec.empty()) ? "" : clamp_vec.front();
         info.clamp = clamp_str == "on" || clamp_str == "1";
-        info.unknown_props.erase("-clamp");
+        info.props.erase("-clamp");
     }
 
-    if (info.unknown_props.find("-bm") != info.unknown_props.end() &&
-        info.unknown_props.at("-bm").size() > 0) {
-        auto& bm_vec = info.unknown_props.at("-bm");
+    if (info.props.find("-bm") != info.props.end() &&
+        info.props.at("-bm").size() > 0) {
+        auto& bm_vec = info.props.at("-bm");
         auto bm_str = (bm_vec.empty()) ? "" : bm_vec.front();
         info.scale = std::atof(bm_str.c_str());
-        info.unknown_props.erase("-bm");
+        info.props.erase("-bm");
     }
 
-    // insert texture
-    if (!info.path.empty() &&
-        texture_set.find(info.path) == texture_set.end()) {
-        textures.push_back(info.path);
-        texture_set.insert(info.path);
-    }
+    return is;
 }
 
 // Load MTL
-vector<obj_material*> load_mtl(
-    const string& filename, bool flip_tr, vector<string>& textures) {
+std::vector<obj_material*> load_mtl(const std::string& filename, bool flip_tr,
+    std::vector<std::string>& textures) {
     // clear materials
-    auto materials = vector<obj_material*>();
-
-    // clear textures
-    textures.clear();
-    auto texture_set = unordered_set<string>();
+    auto materials = std::vector<obj_material*>();
 
     // open file
-    auto fs = fstream(filename, ios_base::in);
-    if (!fs) throw runtime_error("cannot open filename " + filename);
+    auto fs = std::fstream(filename, std::ios_base::in);
+    if (!fs) throw std::runtime_error("cannot open filename " + filename);
     // fs.exceptions(ios_base::failbit);
 
     // add a material preemptively to avoid crashes
     materials.push_back(new obj_material());
+    auto mat = materials.back();
 
     // read the file line by line
-    string line;
+    std::string line;
     auto linenum = 0;
     while (getline(fs, line)) {
         // prepare to parse
         linenum += 1;
-        auto ss = stringstream(line);
-        auto cmd = string();
+        auto ss = std::stringstream(line);
+        auto cmd = std::string();
         ss >> cmd;
 
         // skip empty and comments
@@ -6891,73 +6880,66 @@ vector<obj_material*> load_mtl(
         // possible token values
         if (cmd == "newmtl") {
             materials.push_back(new obj_material());
-            obj_parse_val(ss, materials.back()->name);
+            mat = materials.back();
+            ss >> mat->name;
         } else if (cmd == "illum") {
-            obj_parse_val(ss, materials.back()->illum);
+            ss >> mat->illum;
         } else if (cmd == "Ke") {
-            obj_parse_val(ss, materials.back()->ke);
+            ss >> mat->ke;
         } else if (cmd == "Ka") {
-            obj_parse_val(ss, materials.back()->ka);
+            ss >> mat->ka;
         } else if (cmd == "Kd") {
-            obj_parse_val(ss, materials.back()->kd);
+            ss >> mat->kd;
         } else if (cmd == "Ks") {
-            obj_parse_val(ss, materials.back()->ks);
+            ss >> mat->ks;
         } else if (cmd == "Kr") {
-            obj_parse_val(ss, materials.back()->kr);
+            ss >> mat->kr;
         } else if (cmd == "Kt" || cmd == "Tf") {
-            auto vals = zero3f;
             auto ntok = 0;
-            while (ss) obj_parse_val(ss, vals[ntok++]);
-            if (ntok >= 3)
-                materials.back()->kt = vals;
-            else
-                materials.back()->kt = {vals.x, vals.x, vals.x};
+            while (ss && ntok < 3) ss >> mat->kt[ntok++];
+            if (ntok < 3) mat->kt = {mat->kt.x, mat->kt.x, mat->kt.x};
         } else if (cmd == "Tr") {
-            auto vals = zero3f;
             auto ntok = 0;
-            while (ss) obj_parse_val(ss, vals[ntok++]);
-            if (ntok >= 3)
-                materials.back()->kt = vals;
-            else
-                materials.back()->op = (flip_tr) ? 1 - vals.x : vals.x;
+            while (ss) ss >> mat->kt[ntok++];
+            if (ntok < 3) {
+                materials.back()->op = (flip_tr) ? 1 - mat->kt.x : mat->kt.x;
+                mat->kt = {0, 0, 0};
+            }
         } else if (cmd == "Ns") {
-            obj_parse_val(ss, materials.back()->ns);
+            ss >> mat->ns;
         } else if (cmd == "d") {
-            obj_parse_val(ss, materials.back()->op);
+            ss >> mat->op;
         } else if (cmd == "Ni") {
-            obj_parse_val(ss, materials.back()->ior);
+            ss >> mat->ior;
         } else if (cmd == "map_Ke") {
-            parse_texture(ss, materials.back()->ke_txt, textures, texture_set);
+            ss >> mat->ke_txt;
         } else if (cmd == "map_Ka") {
-            parse_texture(ss, materials.back()->ka_txt, textures, texture_set);
+            ss >> mat->ka_txt;
         } else if (cmd == "map_Kd") {
-            parse_texture(ss, materials.back()->kd_txt, textures, texture_set);
+            ss >> mat->kd_txt;
         } else if (cmd == "map_Ks") {
-            parse_texture(ss, materials.back()->ks_txt, textures, texture_set);
+            ss >> mat->ks_txt;
         } else if (cmd == "map_Kr") {
-            parse_texture(ss, materials.back()->kr_txt, textures, texture_set);
+            ss >> mat->kr_txt;
         } else if (cmd == "map_Tr") {
-            parse_texture(ss, materials.back()->kt_txt, textures, texture_set);
+            ss >> mat->kt_txt;
         } else if (cmd == "map_Ns") {
-            parse_texture(ss, materials.back()->ns_txt, textures, texture_set);
+            ss >> mat->ns_txt;
         } else if (cmd == "map_d") {
-            parse_texture(ss, materials.back()->op_txt, textures, texture_set);
+            ss >> mat->op_txt;
         } else if (cmd == "map_Ni") {
-            parse_texture(ss, materials.back()->ior_txt, textures, texture_set);
+            ss >> mat->ior_txt;
         } else if (cmd == "map_bump" || cmd == "bump") {
-            parse_texture(
-                ss, materials.back()->bump_txt, textures, texture_set);
+            ss >> mat->bump_txt;
         } else if (cmd == "map_disp" || cmd == "disp") {
-            parse_texture(
-                ss, materials.back()->disp_txt, textures, texture_set);
+            ss >> mat->disp_txt;
         } else if (cmd == "map_norm" || cmd == "norm") {
-            parse_texture(
-                ss, materials.back()->norm_txt, textures, texture_set);
+            ss >> mat->norm_txt;
         } else {
             // copy into strings
             while (ss) {
-                materials.back()->unknown_props[cmd].push_back({});
-                obj_parse_val(ss, materials.back()->unknown_props[cmd].back());
+                mat->props[cmd].push_back("");
+                ss >> mat->props[cmd].back();
             }
         }
     }
@@ -6965,12 +6947,38 @@ vector<obj_material*> load_mtl(
     // remove first fake material
     materials.erase(materials.begin());
 
+    // create texture array
+    textures = {};
+    auto texture_set = std::unordered_set<std::string>();
+    auto add_texture = [&texture_set, &textures](const obj_texture_info& info) {
+        if (info.path == "") return;
+        if (texture_set.find(info.path) != texture_set.end()) return;
+        texture_set.insert(info.path);
+        textures.push_back(info.path);
+    };
+    for (auto mat : materials) {
+        add_texture(mat->ke_txt);
+        add_texture(mat->ka_txt);
+        add_texture(mat->kd_txt);
+        add_texture(mat->ks_txt);
+        add_texture(mat->kr_txt);
+        add_texture(mat->kt_txt);
+        add_texture(mat->ns_txt);
+        add_texture(mat->op_txt);
+        add_texture(mat->ior_txt);
+        add_texture(mat->bump_txt);
+        add_texture(mat->bump_txt);
+        add_texture(mat->disp_txt);
+        add_texture(mat->norm_txt);
+    }
+
     // done
     return materials;
 }
 
 // Loads textures for an scene.
-void load_textures(obj_scene* asset, const string& dirname, bool skip_missing) {
+void load_textures(
+    obj_scene* asset, const std::string& dirname, bool skip_missing) {
     for (auto txt : asset->textures) {
         auto filename = dirname + txt->path;
         for (auto& c : filename)
@@ -6986,64 +6994,50 @@ void load_textures(obj_scene* asset, const string& dirname, bool skip_missing) {
 #endif
         if (txt->datab.empty() && txt->dataf.empty()) {
             if (skip_missing) continue;
-            throw runtime_error("cannot laod image " + filename);
+            throw std::runtime_error("cannot laod image " + filename);
         }
-    }
-}
-
-// Parses an OBJ vertex list. Handles negative values.
-inline void obj_parse_vertlist(
-    stringstream& ss, vector<obj_vertex>& elems, const obj_vertex& vert_size) {
-    elems.clear();
-    while (true) {
-        auto tok = string();
-        obj_parse_val(ss, tok);
-        if (tok.empty()) break;
-        auto toks = split(tok, "/");
-        if (toks.empty()) break;
-        auto v = obj_vertex{-1, -1, -1, -1, -1};
-        for (auto i = 0; i < min(5, (int)toks.size()); i++) {
-            if (toks[i] == "") continue;
-            ((int*)&v)[i] = (int)atoi(toks[i].c_str());
-            ((int*)&v)[i] = (((int*)&v)[i] < 0) ?
-                                ((int*)&vert_size)[i] + ((int*)&v)[i] :
-                                ((int*)&v)[i] - 1;
-        }
-        elems.push_back(v);
     }
 }
 
 // Loads an OBJ
-obj_scene* load_obj(const string& filename, bool load_txt, bool skip_missing,
-    bool flip_texcoord, bool flip_tr) {
+obj_scene* load_obj(const std::string& filename, bool load_txt,
+    bool skip_missing, bool flip_texcoord, bool flip_tr) {
     // clear obj
-    auto asset = unique_ptr<obj_scene>(new obj_scene());
+    auto asset = std::unique_ptr<obj_scene>(new obj_scene());
 
     // open file
-    auto fs = fstream(filename, ios_base::in);
-    if (!fs) throw runtime_error("cannot open filename " + filename);
+    auto fs = std::fstream(filename, std::ios_base::in);
+    if (!fs) throw std::runtime_error("cannot open filename " + filename);
     // fs.exceptions(ios_base::failbit);
 
     // initializing obj
     asset->objects.push_back(new obj_object());
-    asset->objects.back()->groups.push_back({});
+    asset->objects.back()->groups.push_back(new obj_group());
 
-    // allocate buffers to avoid re-allocing
-    auto cur_elems = vector<obj_vertex>();
-    auto cur_matname = string();
-    auto cur_mtllibs = vector<string>();
+    // current parsing value
+    auto matname = std::string();
+    auto mtllibs = std::vector<std::string>();
+    auto object = asset->objects.back();
+    auto group = object->groups.back();
+    auto elems = std::vector<obj_vertex>();
 
     // keep track of array lengths
     auto vert_size = obj_vertex{0, 0, 0, 0, 0};
 
+    // elem type map
+    static auto elem_type_map =
+        std::unordered_map<std::string, obj_element_type>{
+            {"f", obj_element_type::face}, {"l", obj_element_type::line},
+            {"p", obj_element_type::point}, {"b", obj_element_type::bezier}};
+
     // read the file line by line
-    string line;
+    std::string line;
     auto linenum = 0;
     while (getline(fs, line)) {
         // prepare to parse
         linenum += 1;
-        auto ss = stringstream(line);
-        auto cmd = string();
+        auto ss = std::stringstream(line);
+        auto cmd = std::string();
         ss >> cmd;
 
         // skip empty and comments
@@ -7052,140 +7046,114 @@ obj_scene* load_obj(const string& filename, bool load_txt, bool skip_missing,
         // possible token values
         if (cmd == "v") {
             vert_size.pos += 1;
-            asset->pos.push_back({});
-            obj_parse_val(ss, asset->pos.back());
+            asset->pos.push_back(zero3f);
+            ss >> asset->pos.back();
         } else if (cmd == "vn") {
             vert_size.norm += 1;
-            asset->norm.push_back({});
-            obj_parse_val(ss, asset->norm.back());
+            asset->norm.push_back(zero3f);
+            ss >> asset->norm.back();
         } else if (cmd == "vt") {
             vert_size.texcoord += 1;
-            asset->texcoord.push_back({});
-            obj_parse_val(ss, asset->texcoord.back());
+            asset->texcoord.push_back(zero2f);
+            ss >> asset->texcoord.back();
             if (flip_texcoord)
                 asset->texcoord.back().y = 1 - asset->texcoord.back().y;
         } else if (cmd == "vc") {
             vert_size.color += 1;
-            asset->color.push_back({});
-            obj_parse_val(ss, asset->color.back());
+            asset->color.push_back(vec4f{0, 0, 0, 1});
+            ss >> asset->color.back();
         } else if (cmd == "vr") {
             vert_size.radius += 1;
-            asset->radius.push_back({});
-            obj_parse_val(ss, asset->radius.back());
-        } else if (cmd == "f") {
-            obj_parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(), obj_element_type::face,
-                (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "l") {
-            obj_parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(), obj_element_type::line,
-                (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "p") {
-            obj_parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(),
-                obj_element_type::point, (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "b") {
-            obj_parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(),
-                obj_element_type::bezier, (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "t") {
-            obj_parse_vertlist(ss, cur_elems, vert_size);
-            auto& g = asset->objects.back()->groups.back();
-            g.elems.push_back({(uint32_t)g.verts.size(),
-                obj_element_type::tetra, (uint16_t)cur_elems.size()});
-            g.verts.insert(g.verts.end(), cur_elems.begin(), cur_elems.end());
-        } else if (cmd == "o") {
-            auto name = string();
-            obj_parse_val(ss, name);
-            asset->objects.push_back(new obj_object{name, {}});
-            asset->objects.back()->groups.push_back({});
-            asset->objects.back()->groups.back().matname = cur_matname;
-        } else if (cmd == "usemtl") {
-            auto name = string();
-            obj_parse_val(ss, name);
-            cur_matname = name;
-            asset->objects.back()->groups.push_back({});
-            asset->objects.back()->groups.back().matname = cur_matname;
-        } else if (cmd == "g") {
-            auto name = string();
-            obj_parse_val(ss, name);
-            asset->objects.back()->groups.push_back({});
-            asset->objects.back()->groups.back().matname = cur_matname;
-            asset->objects.back()->groups.back().groupname = name;
-        } else if (cmd == "s") {
-            auto name = string();
-            obj_parse_val(ss, name);
-            auto smoothing = (name == "on");
-            if (asset->objects.back()->groups.empty()) {
-                asset->objects.back()->groups.push_back({});
-                asset->objects.back()->groups.back().matname = cur_matname;
-                asset->objects.back()->groups.back().smoothing = smoothing;
-            } else if (asset->objects.back()->groups.back().smoothing !=
-                       smoothing) {
-                auto gname = asset->objects.back()->groups.back().groupname;
-                asset->objects.back()->groups.push_back({});
-                asset->objects.back()->groups.back().matname = cur_matname;
-                asset->objects.back()->groups.back().groupname = gname;
-                asset->objects.back()->groups.back().smoothing = smoothing;
-            }
-        } else if (cmd == "sl") {
-            auto subdiv = zero2i;
-            obj_parse_val(ss, subdiv);
-            if (asset->objects.back()->groups.empty()) {
-                asset->objects.back()->groups.push_back({});
-                asset->objects.back()->groups.back().matname = cur_matname;
-            }
-            asset->objects.back()->groups.back().subdivision_level = subdiv.x;
-            asset->objects.back()->groups.back().subdivision_catmullclark =
-                (bool)subdiv.y;
-        } else if (cmd == "mtllib") {
-            auto name = string();
-            obj_parse_val(ss, name);
-            if (name != string("")) {
-                auto found = false;
-                for (auto lib : cur_mtllibs) {
-                    if (lib == name) {
-                        found = true;
-                        break;
-                    }
+            asset->radius.push_back(0);
+            ss >> asset->radius.back();
+        } else if (cmd == "f" || cmd == "l" || cmd == "p" || cmd == "b") {
+            group->elems.push_back(
+                {(uint32_t)group->verts.size(), elem_type_map.at(cmd), 0});
+            while (true) {
+                auto tok = std::string();
+                ss >> tok;
+                if (tok.empty()) break;
+                auto toks = split(tok, "/");
+                if (toks.empty()) break;
+                auto vert = obj_vertex{-1, -1, -1, -1, -1};
+                auto v = &vert.pos;
+                auto vs = &vert_size.pos;
+                for (auto i = 0; i < min(5, (int)toks.size()); i++) {
+                    if (toks[i].empty()) continue;
+                    v[i] = (int)atoi(toks[i].c_str());
+                    v[i] = (v[i] < 0) ? vs[i] + v[i] : v[i] - 1;
                 }
-                if (!found) cur_mtllibs.push_back(name);
+                group->verts.push_back(vert);
+                group->elems.back().size += 1;
             }
+        } else if (cmd == "o") {
+            asset->objects.push_back(new obj_object());
+            object = asset->objects.back();
+            ss >> object->name;
+            object->groups.push_back(new obj_group());
+            group = object->groups.back();
+            group->matname = matname;
+        } else if (cmd == "usemtl") {
+            ss >> matname;
+            object->groups.push_back(new obj_group());
+            group = object->groups.back();
+            group->matname = matname;
+        } else if (cmd == "g") {
+            object->groups.push_back(new obj_group());
+            group = object->groups.back();
+            ss >> group->groupname;
+            group->matname = matname;
+        } else if (cmd == "s") {
+            auto name = std::string();
+            ss >> name;
+            auto smoothing = (name == "on");
+            if (group->smoothing != smoothing) {
+                auto gname = group->groupname;
+                object->groups.push_back(new obj_group());
+                group = object->groups.back();
+                group->matname = matname;
+                group->groupname = gname;
+                group->smoothing = smoothing;
+            }
+        } else if (cmd == "gp") {
+            auto name = std::string();
+            ss >> name;
+            while (true) {
+                auto tok = std::string();
+                ss >> tok;
+                if (tok.empty()) break;
+                group->props[name].push_back(tok);
+            }
+        } else if (cmd == "op") {
+            auto name = std::string();
+            ss >> name;
+            while (true) {
+                auto tok = std::string();
+                ss >> tok;
+                if (tok.empty()) break;
+                object->props[name].push_back(tok);
+            }
+        } else if (cmd == "mtllib") {
+            mtllibs.push_back("");
+            ss >> mtllibs.back();
         } else if (cmd == "c") {
             auto cam = new obj_camera();
-            obj_parse_val(ss, cam->name);
-            obj_parse_val(ss, cam->ortho);
-            obj_parse_val(ss, cam->yfov);
-            obj_parse_val(ss, cam->aspect);
-            obj_parse_val(ss, cam->aperture);
-            obj_parse_val(ss, cam->focus);
-            obj_parse_val(ss, cam->frame);
+            ss >> cam->name >> cam->ortho >> cam->yfov >> cam->aspect >>
+                cam->aperture >> cam->focus >> cam->frame;
             asset->cameras.push_back(cam);
         } else if (cmd == "e") {
             auto env = new obj_environment();
-            obj_parse_val(ss, env->name);
-            obj_parse_val(ss, env->matname);
-            obj_parse_val(ss, env->frame);
+            ss >> env->name >> env->matname >> env->frame;
             asset->environments.push_back(env);
         } else if (cmd == "n") {
             auto nde = new obj_node();
-            obj_parse_val(ss, nde->name);
-            obj_parse_val(ss, nde->parent);
-            obj_parse_val(ss, nde->camname);
-            obj_parse_val(ss, nde->objname);
-            obj_parse_val(ss, nde->envname);
-            obj_parse_val(ss, nde->frame);
-            obj_parse_val(ss, nde->translation);
-            obj_parse_val(ss, nde->rotation);
-            obj_parse_val(ss, nde->scaling);
+            ss >> nde->name >> nde->parent >> nde->camname >> nde->objname >>
+                nde->envname >> nde->frame >> nde->translation >>
+                nde->rotation >> nde->scaling;
+            if (nde->parent == "\"\"") nde->parent = "";
+            if (nde->camname == "\"\"") nde->camname = "";
+            if (nde->objname == "\"\"") nde->objname = "";
+            if (nde->envname == "\"\"") nde->envname = "";
             asset->nodes.push_back(nde);
         } else {
             // unused
@@ -7193,22 +7161,34 @@ obj_scene* load_obj(const string& filename, bool load_txt, bool skip_missing,
     }
 
     // cleanup unused
-    for (auto o : asset->objects) {
+    for (auto& o : asset->objects) {
+        for (auto& g : o->groups) {
+            if (g->verts.empty()) {
+                delete g;
+                g = nullptr;
+            }
+        }
         auto end = std::remove_if(o->groups.begin(), o->groups.end(),
-            [](const obj_group& x) { return x.verts.empty(); });
+            [](const obj_group* x) { return !x; });
         o->groups.erase(end, o->groups.end());
+        if (o->groups.empty()) {
+            delete o;
+            o = nullptr;
+        }
     }
-    // TODO: possible memory leak
     auto end = std::remove_if(asset->objects.begin(), asset->objects.end(),
-        [](const obj_object* x) { return x->groups.empty(); });
+        [](const obj_object* x) { return !x; });
     asset->objects.erase(end, asset->objects.end());
 
     // parse materials
+    auto mtllibs_set =
+        std::unordered_set<std::string>(mtllibs.begin(), mtllibs.end());
+    mtllibs = std::vector<std::string>{mtllibs_set.begin(), mtllibs_set.end()};
     auto dirname = path_dirname(filename);
-    unordered_set<string> texture_set;
-    for (auto mtllib : cur_mtllibs) {
+    std::unordered_set<std::string> texture_set;
+    for (auto mtllib : mtllibs) {
         auto mtlname = dirname + mtllib;
-        vector<string> textures;
+        std::vector<std::string> textures;
         auto materials = load_mtl(mtlname, flip_tr, textures);
         asset->materials.insert(
             asset->materials.end(), materials.begin(), materials.end());
@@ -7228,139 +7208,79 @@ obj_scene* load_obj(const string& filename, bool load_txt, bool skip_missing,
 }
 
 // write to stream
-template <typename T>
-inline void obj_dump_val(fstream& fs, const T& v) {
-    fs << v;
-}
-
-// write to stream
-template <typename T, int N>
-inline void obj_dump_val(fstream& fs, const vec<T, N>& v) {
-    for (auto i = 0; i < N; i++) {
-        if (i) fs << ' ';
-        obj_dump_val(fs, v[i]);
+inline std::ostream& operator<<(std::ostream& os, const obj_texture_info& v) {
+    for (auto&& kv : v.props) {
+        os << kv.first << ' ';
+        for (auto&& vv : kv.second) os << vv << ' ';
     }
+    if (v.clamp) os << "-clamp on ";
+    os << v.path;
+    return os;
 }
 
-// write to stream
-template <typename T, int N>
-inline void obj_dump_val(fstream& fs, const quat<T, N>& v) {
-    for (auto i = 0; i < N; i++) {
-        if (i) fs << ' ';
-        obj_dump_val(fs, v[i]);
+// write an OBJ vertex using only the indices that are active
+inline std::ostream& operator<<(std::ostream& os, const obj_vertex& vert) {
+    auto vert_ptr = &vert.pos;
+    auto nto_write = 0;
+    for (auto i = 0; i < 5; i++) {
+        if (vert_ptr[i] >= 0) nto_write = i + 1;
     }
-}
-
-// write to stream
-template <typename T>
-inline void obj_dump_val(fstream& fs, const frame<T, 3>& v) {
-    obj_dump_val(fs, v.x);
-    fs << ' ';
-    obj_dump_val(fs, v.y);
-    fs << ' ';
-    obj_dump_val(fs, v.z);
-    fs << ' ';
-    obj_dump_val(fs, v.o);
-}
-
-// write to stream
-inline void obj_dump_val(fstream& fs, const obj_texture_info& v) {
-    for (auto&& kv : v.unknown_props) {
-        obj_dump_val(fs, kv.first + " ");
-        for (auto&& vv : kv.second) obj_dump_val(fs, vv + " ");
+    for (auto i = 0; i < nto_write; i++) {
+        if (i) os << '/';
+        if (vert_ptr[i] >= 0) os << vert_ptr[i] + 1;
     }
-    if (v.clamp) obj_dump_val(fs, "-clamp on ");
-    obj_dump_val(fs, v.path);
-}
-
-// write to stream
-template <typename T>
-inline void obj_dump_named_val(fstream& fs, const string& name, const T& v) {
-    obj_dump_val(fs, name);
-    fs << ' ';
-    obj_dump_val(fs, v);
-    fs << '\n';
-}
-
-// write to stream
-template <typename T>
-inline void obj_dump_opt_val(
-    fstream& fs, const string& name, const T& v, const T& def = {}) {
-    if (v == def) return;
-    obj_dump_named_val(fs, name, v);
-}
-
-// write an OBJ vertex triplet using only the indices that are active
-inline void obj_dump_objverts(
-    fstream& fs, const char* str, int nv, const obj_vertex* verts) {
-    obj_dump_val(fs, str);
-    for (auto v = 0; v < nv; v++) {
-        auto& vert = verts[v];
-        auto vert_ptr = &vert.pos;
-        auto nto_write = 0;
-        for (auto i = 0; i < 5; i++) {
-            if (vert_ptr[i] >= 0) nto_write = i + 1;
-        }
-        for (auto i = 0; i < nto_write; i++) {
-            if (vert_ptr[i] >= 0) {
-                obj_dump_val(fs, ((i == 0) ? ' ' : '/'));
-                obj_dump_val(fs, vert_ptr[i] + 1);
-            } else {
-                obj_dump_val(fs, '/');
-            }
-        }
-    }
-    obj_dump_val(fs, "\n");
+    return os;
 }
 
 // Save an MTL file
-void save_mtl(const string& filename, const vector<obj_material*>& materials,
-    bool flip_tr) {
+void save_mtl(const std::string& filename,
+    const std::vector<obj_material*>& materials, bool flip_tr) {
     // open file
-    auto fs = fstream(filename, ios_base::out);
-    if (!fs) throw runtime_error("cannot open filename " + filename);
-    fs.exceptions(ios_base::failbit);
+    auto fs = std::fstream(filename, std::ios_base::out);
+    if (!fs) throw std::runtime_error("cannot open filename " + filename);
+    fs.exceptions(std::ios_base::failbit);
 
     // for each material, dump all the values
     for (auto mat : materials) {
-        obj_dump_named_val(fs, "newmtl", mat->name);
-        obj_dump_named_val(fs, "  illum", mat->illum);
-        obj_dump_opt_val(fs, "  Ke", mat->ke);
-        obj_dump_opt_val(fs, "  Ka", mat->ka);
-        obj_dump_opt_val(fs, "  Kd", mat->kd);
-        obj_dump_opt_val(fs, "  Ks", mat->ks);
-        obj_dump_opt_val(fs, "  Kr", mat->kr);
-        obj_dump_opt_val(fs, "  Tf", mat->kt);
-        obj_dump_opt_val(fs, "  Ns", mat->ns, 0.0f);
-        obj_dump_opt_val(fs, "  d", mat->op, 1.0f);
-        obj_dump_opt_val(fs, "  Ni", mat->ior, 1.0f);
-        obj_dump_opt_val(fs, "  map_Ke", mat->ke_txt);
-        obj_dump_opt_val(fs, "  map_Ka", mat->ka_txt);
-        obj_dump_opt_val(fs, "  map_Kd", mat->kd_txt);
-        obj_dump_opt_val(fs, "  map_Ks", mat->ks_txt);
-        obj_dump_opt_val(fs, "  map_Kr", mat->kr_txt);
-        obj_dump_opt_val(fs, "  map_Kt", mat->kt_txt);
-        obj_dump_opt_val(fs, "  map_Ns", mat->ns_txt);
-        obj_dump_opt_val(fs, "  map_d", mat->op_txt);
-        obj_dump_opt_val(fs, "  map_Ni", mat->ior_txt);
-        obj_dump_opt_val(fs, "  map_bump", mat->bump_txt);
-        obj_dump_opt_val(fs, "  map_disp", mat->disp_txt);
-        obj_dump_opt_val(fs, "  map_norm", mat->norm_txt);
-        for (auto&& kv : mat->unknown_props) {
-            obj_dump_val(fs, kv.first);
-            for (auto&& v : kv.second) {
-                obj_dump_val(fs, " ");
-                obj_dump_val(fs, v);
-            }
-            obj_dump_val(fs, "\n");
+        fs << "newmtl " << mat->name << '\n';
+        fs << "  illum " << mat->illum << '\n';
+        if (mat->ke != zero3f) fs << "  Ke " << mat->ke << '\n';
+        if (mat->ka != zero3f) fs << "  Ka " << mat->ka << '\n';
+        if (mat->kd != zero3f) fs << "  Kd " << mat->kd << '\n';
+        if (mat->ks != zero3f) fs << "  Ks " << mat->ks << '\n';
+        if (mat->kr != zero3f) fs << "  Kr " << mat->kr << '\n';
+        if (mat->kt != zero3f) fs << "  Kt " << mat->kt << '\n';
+        if (mat->kt != zero3f) fs << "  Tf " << mat->kt << '\n';
+        if (mat->ns != 0.0f) fs << "  Ns " << mat->ns << '\n';
+        if (mat->op != 1.0f) fs << "  d " << mat->op << '\n';
+        if (mat->ior != 0.0f) fs << "  Ni " << mat->ior << '\n';
+        if (mat->ke_txt.path != "") fs << "  map_Ke " << mat->ke_txt << '\n';
+        if (mat->ka_txt.path != "") fs << "  map_Ka " << mat->ka_txt << '\n';
+        if (mat->kd_txt.path != "") fs << "  map_Kd " << mat->kd_txt << '\n';
+        if (mat->ks_txt.path != "") fs << "  map_Ks " << mat->ks_txt << '\n';
+        if (mat->kr_txt.path != "") fs << "  map_Kr " << mat->kr_txt << '\n';
+        if (mat->kt_txt.path != "") fs << "  map_Kt " << mat->kt_txt << '\n';
+        if (mat->ns_txt.path != "") fs << "  map_Ns " << mat->ns_txt << '\n';
+        if (mat->op_txt.path != "") fs << "  map_d  " << mat->op_txt << '\n';
+        if (mat->ior_txt.path != "") fs << "  map_Ni " << mat->ior_txt << '\n';
+        if (mat->bump_txt.path != "")
+            fs << "  map_bump " << mat->bump_txt << '\n';
+        if (mat->disp_txt.path != "")
+            fs << "  map_disp " << mat->disp_txt << '\n';
+        if (mat->norm_txt.path != "")
+            fs << "  map_norm " << mat->norm_txt << '\n';
+        for (auto&& kv : mat->props) {
+            fs << "  " << kv.first;
+            for (auto&& v : kv.second) fs << " " << v;
+            fs << '\n';
         }
-        obj_dump_val(fs, "\n");
+        fs << '\n';
     }
 }
 
 // Loads textures for an scene.
 void save_textures(
-    const obj_scene* asset, const string& dirname, bool skip_missing) {
+    const obj_scene* asset, const std::string& dirname, bool skip_missing) {
     for (auto txt : asset->textures) {
         if (txt->datab.empty() && txt->dataf.empty()) continue;
         auto filename = dirname + txt->path;
@@ -7379,123 +7299,90 @@ void save_textures(
 #endif
         if (!ok) {
             if (skip_missing) continue;
-            throw runtime_error("cannot save image " + filename);
+            throw std::runtime_error("cannot save image " + filename);
         }
     }
 }
 
 // Save an OBJ
-void save_obj(const string& filename, const obj_scene* asset, bool save_txt,
-    bool skip_missing, bool flip_texcoord, bool flip_tr) {
+void save_obj(const std::string& filename, const obj_scene* asset,
+    bool save_txt, bool skip_missing, bool flip_texcoord, bool flip_tr) {
     // open file
-    auto fs = fstream(filename, ios_base::out);
-    if (!fs) throw runtime_error("cannot open filename " + filename);
-    fs.exceptions(ios_base::failbit);
+    auto fs = std::fstream(filename, std::ios_base::out);
+    if (!fs) throw std::runtime_error("cannot open filename " + filename);
+    fs.exceptions(std::ios_base::failbit);
 
     // linkup to mtl
     auto dirname = path_dirname(filename);
     auto basename = filename.substr(dirname.length());
     basename = basename.substr(0, basename.length() - 4);
     if (!asset->materials.empty()) {
-        obj_dump_named_val(fs, "mtllib", basename + ".mtl");
+        fs << "mtllib " << basename << ".mtl" << '\n';
     }
 
     // save cameras
     for (auto cam : asset->cameras) {
-        obj_dump_val(fs, "c ");
-        obj_dump_val(fs, cam->name);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, cam->ortho);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, cam->yfov);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, cam->aspect);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, cam->aperture);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, cam->focus);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, cam->frame);
-        obj_dump_val(fs, "\n");
+        fs << "c " << ' ' << cam->name << ' ' << cam->ortho << ' ' << cam->yfov
+           << ' ' << cam->aspect << ' ' << cam->aperture << ' ' << cam->focus
+           << ' ' << cam->frame << '\n';
     }
 
     // save envs
     for (auto env : asset->environments) {
-        obj_dump_val(fs, "e ");
-        obj_dump_val(fs, env->name);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, env->matname);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, env->frame);
-        obj_dump_val(fs, "\n");
+        fs << "e " << env->name << ' ' << env->matname << ' ' << env->frame
+           << '\n';
     }
 
     // save nodes
     for (auto nde : asset->nodes) {
-        obj_dump_val(fs, "n ");
-        obj_dump_val(fs, nde->name);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, (nde->parent.empty()) ? string("\"\"") : nde->parent);
-        obj_dump_val(fs, " ");
-        obj_dump_val(
-            fs, (nde->camname.empty()) ? string("\"\"") : nde->camname);
-        obj_dump_val(fs, " ");
-        obj_dump_val(
-            fs, (nde->objname.empty()) ? string("\"\"") : nde->objname);
-        obj_dump_val(fs, " ");
-        obj_dump_val(
-            fs, (nde->envname.empty()) ? string("\"\"") : nde->envname);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, nde->frame);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, nde->translation);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, nde->rotation);
-        obj_dump_val(fs, " ");
-        obj_dump_val(fs, nde->scaling);
-        obj_dump_val(fs, "\n");
+        fs << "n " << nde->name << ' '
+           << ((nde->parent.empty()) ? "\"\""s : nde->parent) << ' '
+           << ((nde->camname.empty()) ? "\"\""s : nde->camname) << ' '
+           << ((nde->objname.empty()) ? "\"\""s : nde->objname) << ' '
+           << ((nde->envname.empty()) ? "\"\""s : nde->envname) << ' '
+           << nde->frame << ' ' << nde->translation << ' ' << nde->rotation
+           << ' ' << nde->scaling << '\n';
     }
 
     // save all vertex data
-    for (auto& v : asset->pos) obj_dump_named_val(fs, "v", v);
+    for (auto& v : asset->pos) fs << "v " << v << '\n';
     if (flip_texcoord) {
         for (auto& v : asset->texcoord)
-            obj_dump_named_val(fs, "vt", vec2f{v.x, 1 - v.y});
+            fs << "vt " << vec2f{v.x, 1 - v.y} << '\n';
     } else {
-        for (auto& v : asset->texcoord) obj_dump_named_val(fs, "vt", v);
+        for (auto& v : asset->texcoord) fs << "vt " << v << '\n';
     }
-    for (auto& v : asset->norm) obj_dump_named_val(fs, "vn", v);
-    for (auto& v : asset->color) obj_dump_named_val(fs, "vc", v);
-    for (auto& v : asset->radius) obj_dump_named_val(fs, "vr", v);
+    for (auto& v : asset->norm) fs << "vn " << v << '\n';
+    for (auto& v : asset->color) fs << "vc " << v << '\n';
+    for (auto& v : asset->radius) fs << "vr " << v << '\n';
 
     // save element data
-    static auto elem_labels =
-        unordered_map<obj_element_type, string>{{obj_element_type::point, "p"},
-            {obj_element_type::line, "l"}, {obj_element_type::face, "f"},
-            {obj_element_type::bezier, "b"}, {obj_element_type::tetra, "t"}};
+    static auto elem_labels = std::unordered_map<obj_element_type, std::string>{
+        {obj_element_type::point, "p"}, {obj_element_type::line, "l"},
+        {obj_element_type::face, "f"}, {obj_element_type::bezier, "b"}};
     for (auto object : asset->objects) {
-        obj_dump_named_val(fs, "o", object->name);
-        for (auto& group : object->groups) {
-            obj_dump_opt_val(fs, "usemtl", group.matname);
-            obj_dump_opt_val(fs, "g", group.groupname);
-            if (!group.smoothing) obj_dump_named_val(fs, "s", "off");
-            if (group.subdivision_level) {
-                auto sl = vec2i{group.subdivision_level,
-                    (group.subdivision_catmullclark) ? 1 : 0};
-                obj_dump_named_val(fs, "sl", sl);
+        fs << "o " << object->name << '\n';
+        for (auto& kv : object->props) {
+            fs << "op " << kv.first;
+            for (auto& v : kv.second) fs << ' ' << v;
+            fs << '\n';
+        }
+        for (auto group : object->groups) {
+            if (!group->matname.empty())
+                fs << "usemtl " << group->matname << '\n';
+            if (!group->groupname.empty())
+                fs << "g " << group->groupname << '\n';
+            if (!group->smoothing) fs << "s off" << '\n';
+            for (auto& kv : group->props) {
+                fs << "gp " << kv.first;
+                for (auto& v : kv.second) fs << ' ' << v;
+                fs << '\n';
             }
-            for (auto elem : group.elems) {
-                auto lbl = "";
-                switch (elem.type) {
-                    case obj_element_type::point: lbl = "p"; break;
-                    case obj_element_type::line: lbl = "l"; break;
-                    case obj_element_type::face: lbl = "f"; break;
-                    case obj_element_type::bezier: lbl = "b"; break;
-                    case obj_element_type::tetra: lbl = "t"; break;
-                    default: throw runtime_error("should not have gotten here");
-                }
-                obj_dump_objverts(
-                    fs, lbl, elem.size, group.verts.data() + elem.start);
+            for (auto elem : group->elems) {
+                fs << elem_labels.at(elem.type) << ' ';
+                for (auto i = elem.start; i < elem.start + elem.size; i++)
+                    fs << group->verts[i] << ' ';
+                fs << '\n';
             }
         }
     }
@@ -7506,168 +7393,6 @@ void save_obj(const string& filename, const obj_scene* asset, bool save_txt,
 
     // save textures
     if (save_txt) save_textures(asset, dirname, skip_missing);
-}
-
-// A hash function for vecs
-struct obj_vertex_hash {
-    std::hash<int> Th;
-    size_t operator()(const obj_vertex& vv) const {
-        auto v = (const int*)&vv;
-        size_t h = 0;
-        for (auto i = 0; i < sizeof(obj_vertex) / sizeof(int); i++) {
-            // embads hash_combine below
-            h ^= (Th(v[i]) + 0x9e3779b9 + (h << 6) + (h >> 2));
-        }
-        return h;
-    }
-};
-
-// Flattens an scene
-obj_mesh* get_mesh(
-    const obj_scene* model, const obj_object& oshape, bool facet_non_smooth) {
-    // convert meshes
-    auto msh = new obj_mesh();
-    msh->name = oshape.name;
-    for (auto& group : oshape.groups) {
-        if (group.verts.empty()) continue;
-        if (group.elems.empty()) continue;
-        msh->shapes.emplace_back();
-        auto prim = &msh->shapes.back();
-        prim->name = group.groupname;
-        prim->matname = group.matname;
-
-        // insert all vertices
-        unordered_map<obj_vertex, int, obj_vertex_hash> vert_map;
-        vector<int> vert_ids;
-        // vert_map.clear();
-        // vert_ids.clear();
-        for (auto& vert : group.verts) {
-            if (vert_map.find(vert) == vert_map.end()) {
-                // split in two to avoid undefined behaviour
-                auto size = (int)vert_map.size();
-                vert_map[vert] = size;
-            }
-            vert_ids.push_back(vert_map.at(vert));
-        }
-
-        // convert elements
-        for (auto& elem : group.elems) {
-            switch (elem.type) {
-                case obj_element_type::point: {
-                    for (auto i = elem.start; i < elem.start + elem.size; i++) {
-                        prim->points.push_back(vert_ids[i]);
-                    }
-                } break;
-                case obj_element_type::line: {
-                    for (auto i = elem.start; i < elem.start + elem.size - 1;
-                         i++) {
-                        prim->lines.push_back({vert_ids[i], vert_ids[i + 1]});
-                    }
-                } break;
-                case obj_element_type::face: {
-                    for (auto i = elem.start + 2; i < elem.start + elem.size;
-                         i++) {
-                        prim->triangles.push_back({vert_ids[elem.start],
-                            vert_ids[i - 1], vert_ids[i]});
-                    }
-                } break;
-                case obj_element_type::bezier: {
-                    if ((elem.size - 1) % 3)
-                        throw runtime_error("bad obj bezier");
-                    for (auto i = elem.start + 1; i < elem.start + elem.size;
-                         i += 3) {
-                        prim->bezier.push_back({vert_ids[i - 1], vert_ids[i],
-                            vert_ids[i + 1], vert_ids[i + 2]});
-                    }
-                } break;
-                case obj_element_type::tetra: {
-                    for (auto i = elem.start; i < elem.start + elem.size;
-                         i += 4) {
-                        if (i + 3 >= vert_ids.size()) continue;
-                        prim->tetras.push_back({vert_ids[i], vert_ids[i + 1],
-                            vert_ids[i + 2], vert_ids[i + 3]});
-                    }
-                } break;
-                default: { assert(false); }
-            }
-        }
-
-        // check for errors
-        // copy vertex data
-        auto v = group.verts[0];
-        if (v.pos >= 0) prim->pos.resize(vert_map.size());
-        if (v.texcoord >= 0) prim->texcoord.resize(vert_map.size());
-        if (v.norm >= 0) prim->norm.resize(vert_map.size());
-        if (v.color >= 0) prim->color.resize(vert_map.size());
-        if (v.radius >= 0) prim->radius.resize(vert_map.size());
-        for (auto& kv : vert_map) {
-            if (v.pos >= 0 && kv.first.pos >= 0) {
-                prim->pos[kv.second] = model->pos[kv.first.pos];
-            }
-            if (v.texcoord >= 0 && kv.first.texcoord >= 0) {
-                prim->texcoord[kv.second] = model->texcoord[kv.first.texcoord];
-            }
-            if (v.norm >= 0 && kv.first.norm >= 0) {
-                prim->norm[kv.second] = model->norm[kv.first.norm];
-            }
-            if (v.color >= 0 && kv.first.color >= 0) {
-                prim->color[kv.second] = model->color[kv.first.color];
-            }
-            if (v.radius >= 0 && kv.first.radius >= 0) {
-                prim->radius[kv.second] = model->radius[kv.first.radius];
-            }
-        }
-
-        // fix smoothing
-        if (!group.smoothing && facet_non_smooth) {
-            auto faceted_ = obj_shape();
-            auto faceted = &faceted_;
-            faceted->name = prim->name;
-            faceted->matname = prim->matname;
-            auto pidx = vector<int>();
-            for (auto point : prim->points) {
-                faceted->points.push_back((int)pidx.size());
-                pidx.push_back(point);
-            }
-            for (auto line : prim->lines) {
-                faceted->lines.push_back(
-                    {(int)pidx.size() + 0, (int)pidx.size() + 1});
-                pidx.push_back(line.x);
-                pidx.push_back(line.y);
-            }
-            for (auto triangle : prim->triangles) {
-                faceted->triangles.push_back({(int)pidx.size() + 0,
-                    (int)pidx.size() + 1, (int)pidx.size() + 2});
-                pidx.push_back(triangle.x);
-                pidx.push_back(triangle.y);
-                pidx.push_back(triangle.z);
-            }
-            for (auto tetra : prim->tetras) {
-                faceted->tetras.push_back(
-                    {(int)pidx.size() + 0, (int)pidx.size() + 1,
-                        (int)pidx.size() + 2, (int)pidx.size() + 3});
-                pidx.push_back(tetra.x);
-                pidx.push_back(tetra.y);
-                pidx.push_back(tetra.z);
-                pidx.push_back(tetra.w);
-            }
-            for (auto idx : pidx) {
-                if (!prim->pos.empty()) faceted->pos.push_back(prim->pos[idx]);
-                if (!prim->norm.empty())
-                    faceted->norm.push_back(prim->norm[idx]);
-                if (!prim->texcoord.empty())
-                    faceted->texcoord.push_back(prim->texcoord[idx]);
-                if (!prim->color.empty())
-                    faceted->color.push_back(prim->color[idx]);
-                if (!prim->radius.empty())
-                    faceted->radius.push_back(prim->radius[idx]);
-            }
-            *prim = *faceted;
-        }
-    }
-
-    // done
-    return msh;
 }
 
 }  // namespace ygl
@@ -7685,7 +7410,8 @@ using json = nlohmann::json;
 // Parse int function.
 void serialize(int& val, json& js, bool reading) {
     if (reading) {
-        if (!js.is_number_integer()) throw runtime_error("integer expected");
+        if (!js.is_number_integer())
+            throw std::runtime_error("integer expected");
         val = js;
     } else {
         js = val;
@@ -7695,7 +7421,7 @@ void serialize(int& val, json& js, bool reading) {
 // Parse float function.
 void serialize(float& val, json& js, bool reading) {
     if (reading) {
-        if (!js.is_number()) throw runtime_error("number expected");
+        if (!js.is_number()) throw std::runtime_error("number expected");
         val = js;
     } else {
         js = val;
@@ -7705,17 +7431,17 @@ void serialize(float& val, json& js, bool reading) {
 // Parse bool function.
 void serialize(bool& val, json& js, bool reading) {
     if (reading) {
-        if (!js.is_boolean()) throw runtime_error("bool expected");
+        if (!js.is_boolean()) throw std::runtime_error("bool expected");
         val = js;
     } else {
         js = val;
     }
 }
 
-// Parse std::string function.
-void serialize(string& val, json& js, bool reading) {
+// Parse string function.
+void serialize(std::string& val, json& js, bool reading) {
     if (reading) {
-        if (!js.is_string()) throw runtime_error("string expected");
+        if (!js.is_string()) throw std::runtime_error("string expected");
         val = js;
     } else {
         js = val;
@@ -7739,7 +7465,7 @@ void serialize(T*& val, json& js, bool reading) {
             val = nullptr;
             return;
         }
-        if (!js.is_object()) throw runtime_error("object expected");
+        if (!js.is_object()) throw std::runtime_error("object expected");
         if (!val) val = new T();
         serialize(*val, js, reading);
     } else {
@@ -7754,12 +7480,12 @@ void serialize(T*& val, json& js, bool reading) {
 
 // Parse support function.
 template <typename T>
-void serialize(vector<T>& vals, json& js, bool reading) {
+void serialize(std::vector<T>& vals, json& js, bool reading) {
     if (reading) {
-        if (!js.is_array()) throw runtime_error("array expected");
+        if (!js.is_array()) throw std::runtime_error("array expected");
         vals.resize(js.size());
         for (auto i = 0; i < js.size(); i++) {
-            // this is contrived to support for vector<bool>
+            // this is contrived to support for std::vector<bool>
             auto v = T();
             serialize(v, js[i], reading);
             vals[i] = v;
@@ -7773,10 +7499,10 @@ void serialize(vector<T>& vals, json& js, bool reading) {
 
 // Parse support function.
 template <typename T, size_t N>
-void serialize(array<T, N>& vals, json& js, bool reading) {
+void serialize(std::array<T, N>& vals, json& js, bool reading) {
     if (reading) {
-        if (!js.is_array()) throw runtime_error("array expected");
-        if (N != js.size()) throw runtime_error("wrong array size");
+        if (!js.is_array()) throw std::runtime_error("array expected");
+        if (N != js.size()) throw std::runtime_error("wrong array size");
         for (auto i = 0; i < N; i++) serialize(vals[i], js.at(i), reading);
     } else {
         js = json::array();
@@ -7786,9 +7512,9 @@ void serialize(array<T, N>& vals, json& js, bool reading) {
 
 // Parse support function.
 template <typename T>
-void serialize(map<string, T>& vals, json& js, bool reading) {
+void serialize(std::map<std::string, T>& vals, json& js, bool reading) {
     if (reading) {
-        if (!js.is_object()) throw runtime_error("object expected");
+        if (!js.is_object()) throw std::runtime_error("object expected");
         for (auto kv = js.begin(); kv != js.end(); ++kv) {
             serialize(vals[kv.key()], kv.value(), reading);
         }
@@ -7800,8 +7526,8 @@ void serialize(map<string, T>& vals, json& js, bool reading) {
 
 // Parse support function.
 template <typename T, typename T1>
-void serialize(
-    T& val, json& js, bool reading, const vector<pair<T1, T>>& table) {
+void serialize(T& val, json& js, bool reading,
+    const std::vector<std::pair<T1, T>>& table) {
     if (reading) {
         auto v = T1();
         serialize(v, js, reading);
@@ -7813,7 +7539,7 @@ void serialize(
                 break;
             }
         }
-        if (!found) throw runtime_error("bad enum value");
+        if (!found) throw std::runtime_error("bad enum value");
     } else {
         auto found = false;
         auto v = T1();
@@ -7824,7 +7550,7 @@ void serialize(
                 break;
             }
         }
-        if (!found) throw runtime_error("invalid value");
+        if (!found) throw std::runtime_error("invalid value");
         serialize(v, js, reading);
     }
 }
@@ -7832,31 +7558,31 @@ void serialize(
 // Parse support function.
 template <typename T, int N>
 void serialize(vec<T, N>& vals, json& js, bool reading) {
-    serialize((array<T, N>&)vals, js, reading);
+    serialize((std::array<T, N>&)vals, js, reading);
 }
 
 // Parse support function.
 template <typename T, int N>
 void serialize(quat<T, N>& vals, json& js, bool reading) {
-    serialize((array<T, N>&)vals, js, reading);
+    serialize((std::array<T, N>&)vals, js, reading);
 }
 
 // Parse support function.
 template <typename T, int N>
 void serialize(mat<T, N>& vals, json& js, bool reading) {
-    serialize((array<T, N * N>&)vals, js, reading);
+    serialize((std::array<T, N * N>&)vals, js, reading);
 }
 
 // Parse support function.
 template <typename T, int N>
 void serialize(frame<T, N>& vals, json& js, bool reading) {
-    serialize((array<T, N*(N + 1)>&)vals, js, reading);
+    serialize((std::array<T, N*(N + 1)>&)vals, js, reading);
 }
 
 // Parse support function.
 void serialize_obj(json& js, bool reading) {
     if (reading) {
-        if (!js.is_object()) throw runtime_error("object expected");
+        if (!js.is_object()) throw std::runtime_error("object expected");
     } else {
         if (!js.is_object()) js = json::object();
     }
@@ -7868,7 +7594,7 @@ void serialize_attr(T& val, json& js, const char* name, bool reading,
     bool required = true, const T& def = {}) {
     if (reading) {
         if (required) {
-            if (!js.count(name)) throw runtime_error("missing value");
+            if (!js.count(name)) throw std::runtime_error("missing value");
             serialize(val, js.at(name), reading);
         } else {
             if (!js.count(name))
@@ -7883,11 +7609,11 @@ void serialize_attr(T& val, json& js, const char* name, bool reading,
 
 // Dump support function.
 template <typename T>
-void serialize_attr(vector<T>& val, json& js, const char* name, bool reading,
-    bool required = true, const vector<T>& def = {}) {
+void serialize_attr(std::vector<T>& val, json& js, const char* name,
+    bool reading, bool required = true, const std::vector<T>& def = {}) {
     if (reading) {
         if (required) {
-            if (!js.count(name)) throw runtime_error("missing value");
+            if (!js.count(name)) throw std::runtime_error("missing value");
             serialize(val, js.at(name), reading);
         } else {
             if (!js.count(name))
@@ -7900,7 +7626,8 @@ void serialize_attr(vector<T>& val, json& js, const char* name, bool reading,
     }
 }
 
-// #codegen begin func ---------------------------------------------------------
+// #codegen begin gltf-func
+// ----------------------------------------------------
 
 // Check for default value
 template <typename T>
@@ -7918,7 +7645,7 @@ bool operator!=(const glTFid<T>& a, const glTFid<T>& b) {
 template <typename T>
 void serialize(glTFid<T>& val, json& js, bool reading) {
     if (reading) {
-        if (!js.is_number_integer()) throw runtime_error("int expected");
+        if (!js.is_number_integer()) throw std::runtime_error("int expected");
         val = glTFid<T>((int)js);
     } else {
         js = (int)val;
@@ -7928,7 +7655,7 @@ void serialize(glTFid<T>& val, json& js, bool reading) {
 // Parses a glTFProperty object
 void serialize(glTFProperty& val, json& js, bool reading) {
     if (reading) {
-        if (!js.is_object()) throw runtime_error("object expected");
+        if (!js.is_object()) throw std::runtime_error("object expected");
 #if YGL_GLTFJSON
         if (js.count("extensions"))
             serialize(val.extensions, js.at("extensions"), reading);
@@ -7954,11 +7681,12 @@ void serialize(glTFChildOfRootProperty& val, json& js, bool reading) {
 // Parse a glTFAccessorSparseIndicesComponentType enum
 void serialize(
     glTFAccessorSparseIndicesComponentType& val, json& js, bool reading) {
-    static vector<pair<int, glTFAccessorSparseIndicesComponentType>> table = {
-        {5121, glTFAccessorSparseIndicesComponentType::UnsignedByte},
-        {5123, glTFAccessorSparseIndicesComponentType::UnsignedShort},
-        {5125, glTFAccessorSparseIndicesComponentType::UnsignedInt},
-    };
+    static std::vector<std::pair<int, glTFAccessorSparseIndicesComponentType>>
+        table = {
+            {5121, glTFAccessorSparseIndicesComponentType::UnsignedByte},
+            {5123, glTFAccessorSparseIndicesComponentType::UnsignedShort},
+            {5125, glTFAccessorSparseIndicesComponentType::UnsignedInt},
+        };
     serialize(val, js, reading, table);
 }
 
@@ -7997,7 +7725,7 @@ void serialize(glTFAccessorSparse& val, json& js, bool reading) {
 }
 // Parse a glTFAccessorComponentType enum
 void serialize(glTFAccessorComponentType& val, json& js, bool reading) {
-    static vector<pair<int, glTFAccessorComponentType>> table = {
+    static std::vector<std::pair<int, glTFAccessorComponentType>> table = {
         {5120, glTFAccessorComponentType::Byte},
         {5121, glTFAccessorComponentType::UnsignedByte},
         {5122, glTFAccessorComponentType::Short},
@@ -8010,7 +7738,7 @@ void serialize(glTFAccessorComponentType& val, json& js, bool reading) {
 
 // Parse a glTFAccessorType enum
 void serialize(glTFAccessorType& val, json& js, bool reading) {
-    static vector<pair<string, glTFAccessorType>> table = {
+    static std::vector<std::pair<std::string, glTFAccessorType>> table = {
         {"SCALAR", glTFAccessorType::Scalar},
         {"VEC2", glTFAccessorType::Vec2},
         {"VEC3", glTFAccessorType::Vec3},
@@ -8043,12 +7771,13 @@ void serialize(glTFAccessor& val, json& js, bool reading) {
 }
 // Parse a glTFAnimationChannelTargetPath enum
 void serialize(glTFAnimationChannelTargetPath& val, json& js, bool reading) {
-    static vector<pair<string, glTFAnimationChannelTargetPath>> table = {
-        {"translation", glTFAnimationChannelTargetPath::Translation},
-        {"rotation", glTFAnimationChannelTargetPath::Rotation},
-        {"scale", glTFAnimationChannelTargetPath::Scale},
-        {"weights", glTFAnimationChannelTargetPath::Weights},
-    };
+    static std::vector<std::pair<std::string, glTFAnimationChannelTargetPath>>
+        table = {
+            {"translation", glTFAnimationChannelTargetPath::Translation},
+            {"rotation", glTFAnimationChannelTargetPath::Rotation},
+            {"scale", glTFAnimationChannelTargetPath::Scale},
+            {"weights", glTFAnimationChannelTargetPath::Weights},
+        };
     serialize(val, js, reading, table);
 }
 
@@ -8071,13 +7800,15 @@ void serialize(glTFAnimationChannel& val, json& js, bool reading) {
 }
 // Parse a glTFAnimationSamplerInterpolation enum
 void serialize(glTFAnimationSamplerInterpolation& val, json& js, bool reading) {
-    static vector<pair<string, glTFAnimationSamplerInterpolation>> table = {
-        {"LINEAR", glTFAnimationSamplerInterpolation::Linear},
-        {"STEP", glTFAnimationSamplerInterpolation::Step},
-        {"CATMULLROMSPLINE",
-            glTFAnimationSamplerInterpolation::CatmullRomSpline},
-        {"CUBICSPLINE", glTFAnimationSamplerInterpolation::CubicSpline},
-    };
+    static std::vector<
+        std::pair<std::string, glTFAnimationSamplerInterpolation>>
+        table = {
+            {"LINEAR", glTFAnimationSamplerInterpolation::Linear},
+            {"STEP", glTFAnimationSamplerInterpolation::Step},
+            {"CATMULLROMSPLINE",
+                glTFAnimationSamplerInterpolation::CatmullRomSpline},
+            {"CUBICSPLINE", glTFAnimationSamplerInterpolation::CubicSpline},
+        };
     serialize(val, js, reading, table);
 }
 
@@ -8126,7 +7857,7 @@ void serialize(glTFBuffer& val, json& js, bool reading) {
 }
 // Parse a glTFBufferViewTarget enum
 void serialize(glTFBufferViewTarget& val, json& js, bool reading) {
-    static vector<pair<int, glTFBufferViewTarget>> table = {
+    static std::vector<std::pair<int, glTFBufferViewTarget>> table = {
         {34962, glTFBufferViewTarget::ArrayBuffer},
         {34963, glTFBufferViewTarget::ElementArrayBuffer},
     };
@@ -8172,7 +7903,7 @@ void serialize(glTFCameraPerspective& val, json& js, bool reading) {
 }
 // Parse a glTFCameraType enum
 void serialize(glTFCameraType& val, json& js, bool reading) {
-    static vector<pair<string, glTFCameraType>> table = {
+    static std::vector<std::pair<std::string, glTFCameraType>> table = {
         {"perspective", glTFCameraType::Perspective},
         {"orthographic", glTFCameraType::Orthographic},
     };
@@ -8192,7 +7923,7 @@ void serialize(glTFCamera& val, json& js, bool reading) {
 }
 // Parse a glTFImageMimeType enum
 void serialize(glTFImageMimeType& val, json& js, bool reading) {
-    static vector<pair<string, glTFImageMimeType>> table = {
+    static std::vector<std::pair<std::string, glTFImageMimeType>> table = {
         {"image/jpeg", glTFImageMimeType::ImageJpeg},
         {"image/png", glTFImageMimeType::ImagePng},
     };
@@ -8280,7 +8011,7 @@ void serialize(glTFMaterialPbrSpecularGlossiness& val, json& js, bool reading) {
 }
 // Parse a glTFMaterialAlphaMode enum
 void serialize(glTFMaterialAlphaMode& val, json& js, bool reading) {
-    static vector<pair<string, glTFMaterialAlphaMode>> table = {
+    static std::vector<std::pair<std::string, glTFMaterialAlphaMode>> table = {
         {"OPAQUE", glTFMaterialAlphaMode::Opaque},
         {"MASK", glTFMaterialAlphaMode::Mask},
         {"BLEND", glTFMaterialAlphaMode::Blend},
@@ -8327,7 +8058,7 @@ void serialize(glTFMaterial& val, json& js, bool reading) {
 }
 // Parse a glTFMeshPrimitiveMode enum
 void serialize(glTFMeshPrimitiveMode& val, json& js, bool reading) {
-    static vector<pair<int, glTFMeshPrimitiveMode>> table = {
+    static std::vector<std::pair<int, glTFMeshPrimitiveMode>> table = {
         {0, glTFMeshPrimitiveMode::Points},
         {1, glTFMeshPrimitiveMode::Lines},
         {2, glTFMeshPrimitiveMode::LineLoop},
@@ -8380,7 +8111,7 @@ void serialize(glTFNode& val, json& js, bool reading) {
 }
 // Parse a glTFSamplerMagFilter enum
 void serialize(glTFSamplerMagFilter& val, json& js, bool reading) {
-    static vector<pair<int, glTFSamplerMagFilter>> table = {
+    static std::vector<std::pair<int, glTFSamplerMagFilter>> table = {
         {9728, glTFSamplerMagFilter::Nearest},
         {9729, glTFSamplerMagFilter::Linear},
     };
@@ -8389,7 +8120,7 @@ void serialize(glTFSamplerMagFilter& val, json& js, bool reading) {
 
 // Parse a glTFSamplerMinFilter enum
 void serialize(glTFSamplerMinFilter& val, json& js, bool reading) {
-    static vector<pair<int, glTFSamplerMinFilter>> table = {
+    static std::vector<std::pair<int, glTFSamplerMinFilter>> table = {
         {9728, glTFSamplerMinFilter::Nearest},
         {9729, glTFSamplerMinFilter::Linear},
         {9984, glTFSamplerMinFilter::NearestMipmapNearest},
@@ -8402,7 +8133,7 @@ void serialize(glTFSamplerMinFilter& val, json& js, bool reading) {
 
 // Parse a glTFSamplerWrapS enum
 void serialize(glTFSamplerWrapS& val, json& js, bool reading) {
-    static vector<pair<int, glTFSamplerWrapS>> table = {
+    static std::vector<std::pair<int, glTFSamplerWrapS>> table = {
         {33071, glTFSamplerWrapS::ClampToEdge},
         {33648, glTFSamplerWrapS::MirroredRepeat},
         {10497, glTFSamplerWrapS::Repeat},
@@ -8412,7 +8143,7 @@ void serialize(glTFSamplerWrapS& val, json& js, bool reading) {
 
 // Parse a glTFSamplerWrapT enum
 void serialize(glTFSamplerWrapT& val, json& js, bool reading) {
-    static vector<pair<int, glTFSamplerWrapT>> table = {
+    static std::vector<std::pair<int, glTFSamplerWrapT>> table = {
         {33071, glTFSamplerWrapT::ClampToEdge},
         {33648, glTFSamplerWrapT::MirroredRepeat},
         {10497, glTFSamplerWrapT::Repeat},
@@ -8482,17 +8213,17 @@ void serialize(glTF& val, json& js, bool reading) {
     serialize_attr(val.textures, js, "textures", reading, false, def.textures);
 }
 
-// #codegen end func
+// #codegen end gltf-func
 
 // Encode in base64
-string base64_encode(
+std::string base64_encode(
     unsigned char const* bytes_to_encode, unsigned int in_len) {
-    static const string base64_chars =
+    static const std::string base64_chars =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "abcdefghijklmnopqrstuvwxyz"
         "0123456789+/";
 
-    string ret;
+    std::string ret;
     int i = 0;
     int j = 0;
     unsigned char char_array_3[3];
@@ -8532,8 +8263,8 @@ string base64_encode(
 }
 
 // Decode from base64
-string base64_decode(string const& encoded_string) {
-    static const string base64_chars =
+std::string base64_decode(std::string const& encoded_string) {
+    static const std::string base64_chars =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "abcdefghijklmnopqrstuvwxyz"
         "0123456789+/";
@@ -8547,7 +8278,7 @@ string base64_decode(string const& encoded_string) {
     int j = 0;
     int in_ = 0;
     unsigned char char_array_4[4], char_array_3[3];
-    string ret;
+    std::string ret;
 
     while (in_len-- && (encoded_string[in_] != '=') &&
            is_base64(encoded_string[in_])) {
@@ -8587,7 +8318,7 @@ string base64_decode(string const& encoded_string) {
 }
 
 // Load buffer data.
-void load_buffers(glTF* gltf, const string& dirname, bool skip_missing) {
+void load_buffers(glTF* gltf, const std::string& dirname, bool skip_missing) {
     for (auto buffer : gltf->buffers) {
         if (buffer->uri == "") continue;
         try {
@@ -8596,25 +8327,25 @@ void load_buffers(glTF* gltf, const string& dirname, bool skip_missing) {
                 auto pos = buffer->uri.find(',');
                 if (pos == buffer->uri.npos) {
                     if (skip_missing) continue;
-                    throw runtime_error("could not decode base64 data");
+                    throw std::runtime_error("could not decode base64 data");
                 }
                 // decode
                 auto data = base64_decode(buffer->uri.substr(pos + 1));
                 buffer->data =
-                    vector<unsigned char>((unsigned char*)data.c_str(),
+                    std::vector<unsigned char>((unsigned char*)data.c_str(),
                         (unsigned char*)data.c_str() + data.length());
             } else {
                 buffer->data =
                     load_binary(path_convert_eparator(dirname + buffer->uri));
                 if (buffer->data.empty()) {
                     if (skip_missing) continue;
-                    throw runtime_error(
+                    throw std::runtime_error(
                         "could not load binary file " +
                         path_convert_eparator(dirname + buffer->uri));
                 }
             }
             if (buffer->byteLength != buffer->data.size()) {
-                throw runtime_error("mismatched buffer size");
+                throw std::runtime_error("mismatched buffer size");
             }
         } catch (const std::exception&) {
             if (skip_missing) continue;
@@ -8624,13 +8355,13 @@ void load_buffers(glTF* gltf, const string& dirname, bool skip_missing) {
 }
 
 // Loads images.
-void load_images(glTF* gltf, const string& dirname, bool skip_missing) {
+void load_images(glTF* gltf, const std::string& dirname, bool skip_missing) {
     for (auto image : gltf->images) {
         image->data = image_data();
-        auto filename = string();
+        auto filename = std::string();
 #if YGL_IMAGEIO
         if (image->bufferView || startswith(image->uri, "data:")) {
-            auto buffer = string();
+            auto buffer = std::string();
             auto data = (unsigned char*)nullptr;
             auto data_size = 0;
             if (image->bufferView) {
@@ -8638,7 +8369,7 @@ void load_images(glTF* gltf, const string& dirname, bool skip_missing) {
                 auto buffer = gltf->get(view->buffer);
                 if (!view || !buffer || view->byteStride) {
                     if (skip_missing) continue;
-                    throw runtime_error("invalid image buffer view");
+                    throw std::runtime_error("invalid image buffer view");
                 }
                 if (image->mimeType == glTFImageMimeType::ImagePng)
                     filename = "internal_data.png";
@@ -8646,7 +8377,7 @@ void load_images(glTF* gltf, const string& dirname, bool skip_missing) {
                     filename = "internal_data.jpg";
                 else {
                     if (skip_missing) continue;
-                    throw runtime_error("unsupported image format");
+                    throw std::runtime_error("unsupported image format");
                 }
                 data = buffer->data.data() + view->byteOffset;
                 data_size = view->byteLength;
@@ -8655,16 +8386,17 @@ void load_images(glTF* gltf, const string& dirname, bool skip_missing) {
                 auto pos = image->uri.find(',');
                 if (pos == image->uri.npos) {
                     if (skip_missing) continue;
-                    throw runtime_error("could not decode base64 data");
+                    throw std::runtime_error("could not decode base64 data");
                 }
                 auto header = image->uri.substr(0, pos);
                 for (auto format : {"png", "jpg", "jpeg", "tga", "ppm", "hdr"})
                     if (header.find(format) != header.npos)
-                        filename = string("fake.") + format;
+                        filename = std::string("fake.") + format;
                 if (is_hdr_filename(filename)) {
                     if (skip_missing) continue;
-                    throw runtime_error("unsupported embedded image format " +
-                                        header.substr(0, pos));
+                    throw std::runtime_error(
+                        "unsupported embedded image format " +
+                        header.substr(0, pos));
                 }
                 // decode
                 buffer = base64_decode(image->uri.substr(pos + 1));
@@ -8693,34 +8425,34 @@ void load_images(glTF* gltf, const string& dirname, bool skip_missing) {
 #endif
         if (image->data.dataf.empty() && image->data.datab.empty()) {
             if (skip_missing) continue;
-            throw runtime_error("cannot load image " + filename);
+            throw std::runtime_error("cannot load image " + filename);
         }
     }
 }
 
 // Loads a gltf.
-glTF* load_gltf(
-    const string& filename, bool load_bin, bool load_image, bool skip_missing) {
+glTF* load_gltf(const std::string& filename, bool load_bin, bool load_image,
+    bool skip_missing) {
     // clear data
-    auto gltf = unique_ptr<glTF>(new glTF());
+    auto gltf = std::unique_ptr<glTF>(new glTF());
 
     // load json
     std::ifstream stream(filename.c_str());
-    if (!stream) throw runtime_error("could not load json " + filename);
+    if (!stream) throw std::runtime_error("could not load json " + filename);
     auto js = json();
     try {
         stream >> js;
-    } catch (const exception& e) {
-        throw runtime_error(
-            string("could not load json with error ") + e.what());
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            std::string("could not load json with error ") + e.what());
     }
 
     // parse json
     auto gltf_ = gltf.get();
     try {
         serialize(gltf_, js, true);
-    } catch (const exception& e) {
-        throw runtime_error("error parsing gltf " + string(e.what()));
+    } catch (const std::exception& e) {
+        throw std::runtime_error("error parsing gltf " + std::string(e.what()));
     }
 
     // load external resources
@@ -8733,11 +8465,13 @@ glTF* load_gltf(
 }
 
 // Save buffer data.
-void save_buffers(const glTF* gltf, const string& dirname, bool skip_missing) {
+void save_buffers(
+    const glTF* gltf, const std::string& dirname, bool skip_missing) {
     for (auto buffer : gltf->buffers) {
         try {
             if (startswith(buffer->uri, "data:")) {
-                throw runtime_error("saving of embedded data not supported");
+                throw std::runtime_error(
+                    "saving of embedded data not supported");
             }
             save_binary(dirname + buffer->uri, buffer->data);
         } catch (const std::exception&) {
@@ -8748,11 +8482,13 @@ void save_buffers(const glTF* gltf, const string& dirname, bool skip_missing) {
 }
 
 // Save images.
-void save_images(const glTF* gltf, const string& dirname, bool skip_missing) {
+void save_images(
+    const glTF* gltf, const std::string& dirname, bool skip_missing) {
     for (auto image : gltf->images) {
         try {
             if (startswith(image->uri, "data:")) {
-                throw runtime_error("saving of embedded data not supported");
+                throw std::runtime_error(
+                    "saving of embedded data not supported");
             }
             auto filename = dirname + image->uri;
             auto ok = false;
@@ -8767,7 +8503,9 @@ void save_images(const glTF* gltf, const string& dirname, bool skip_missing) {
                         image->data.ncomp, image->data.dataf.data());
             }
 #endif
-            if (!ok) { throw runtime_error("cannot save image " + filename); }
+            if (!ok) {
+                throw std::runtime_error("cannot save image " + filename);
+            }
         } catch (const std::exception&) {
             if (skip_missing) continue;
             throw;
@@ -8776,8 +8514,8 @@ void save_images(const glTF* gltf, const string& dirname, bool skip_missing) {
 }
 
 // Saves a gltf.
-void save_gltf(
-    const string& filename, const glTF* gltf, bool save_bin, bool save_image) {
+void save_gltf(const std::string& filename, const glTF* gltf, bool save_bin,
+    bool save_image) {
     // dumps json
     auto js = json();
     serialize((glTF*&)gltf, js, false);
@@ -8795,44 +8533,44 @@ void save_gltf(
 template <typename T>
 void gltf_fread(FILE* f, T* v, int count) {
     if (fread(v, sizeof(T), count, f) != count)
-        throw runtime_error("could not read binary file");
+        throw std::runtime_error("could not read binary file");
 }
 
 // writing shortcut
 template <typename T>
 void gltf_fwrite(FILE* f, const T* v, int count) {
     if (fwrite(v, sizeof(T), count, f) != count)
-        runtime_error("could not write binary file");
+        std::runtime_error("could not write binary file");
 }
 
 // Loads a binary gltf.
-glTF* load_binary_gltf(
-    const string& filename, bool load_bin, bool load_image, bool skip_missing) {
+glTF* load_binary_gltf(const std::string& filename, bool load_bin,
+    bool load_image, bool skip_missing) {
     // clear data
-    auto gltf = unique_ptr<glTF>(new glTF());
+    auto gltf = std::unique_ptr<glTF>(new glTF());
 
     // opens binary file
     auto f = fopen(filename.c_str(), "rb");
-    if (!f) throw runtime_error("could not load binary file " + filename);
+    if (!f) throw std::runtime_error("could not load binary file " + filename);
 
     // read magic
     uint32_t magic;
     gltf_fread(f, &magic, 1);
-    if (magic != 0x46546C67) throw runtime_error("corrupted glb format");
+    if (magic != 0x46546C67) throw std::runtime_error("corrupted glb format");
 
     // read version
     uint32_t version;
     gltf_fread(f, &version, 1);
     if (version != 1 && version != 2)
-        throw runtime_error("unsupported glb version");
+        throw std::runtime_error("unsupported glb version");
 
     // read length
     uint32_t length;
     gltf_fread(f, &length, 1);
 
     // data
-    auto json_bytes = vector<char>();
-    auto buffer_bytes = vector<unsigned char>();
+    auto json_bytes = std::vector<char>();
+    auto buffer_bytes = std::vector<unsigned char>();
     uint32_t buffer_length = 0;
 
     if (version == 1) {
@@ -8859,7 +8597,7 @@ glTF* load_binary_gltf(
         gltf_fread(f, &json_length, 1);
         gltf_fread(f, &json_format, 1);
         if (json_format != 0x4E4F534A) {
-            throw runtime_error("corrupt binary format");
+            throw std::runtime_error("corrupt binary format");
             return nullptr;
         }
 
@@ -8872,7 +8610,7 @@ glTF* load_binary_gltf(
         gltf_fread(f, &buffer_length, 1);
         gltf_fread(f, &buffer_format, 1);
         if (buffer_format != 0x004E4942)
-            throw runtime_error("corrupt binary format");
+            throw std::runtime_error("corrupt binary format");
 
         // read buffer bytes
         if (load_bin) {
@@ -8886,17 +8624,18 @@ glTF* load_binary_gltf(
     try {
         json_bytes.push_back(0);
         js = json::parse(json_bytes.data());
-    } catch (const exception& e) {
-        throw runtime_error(
-            string("could not load json with error ") + e.what());
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            std::string("could not load json with error ") + e.what());
     }
 
     // parse json
     auto gltf_ = gltf.get();
     try {
         serialize(gltf_, js, true);
-    } catch (const exception& e) {
-        throw runtime_error("cannot parse gltf json " + string(e.what()));
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            "cannot parse gltf json " + std::string(e.what()));
         return nullptr;
     }
 
@@ -8919,11 +8658,11 @@ glTF* load_binary_gltf(
 }
 
 // Saves a binary gltf.
-void save_binary_gltf(
-    const string& filename, const glTF* gltf, bool save_bin, bool save_image) {
+void save_binary_gltf(const std::string& filename, const glTF* gltf,
+    bool save_bin, bool save_image) {
     // opens binary file
     auto f = fopen(filename.c_str(), "wb");
-    if (!f) throw runtime_error("could not write binary file");
+    if (!f) throw std::runtime_error("could not write binary file");
 
     // dumps json
     auto js = json();
@@ -8987,13 +8726,14 @@ accessor_view::accessor_view(const glTF* gltf, const glTFAccessor* accessor) {
         buffer->data.size() - (_data - buffer->data.data());
     auto view_bytes = _size * _stride;
     _valid = remaining_buffer_bytes >= view_bytes;
-    if (!_valid) throw runtime_error("corrupted glTF accessor view");
+    if (!_valid) throw std::runtime_error("corrupted glTF accessor view");
 }
 
 float accessor_view::get(int idx, int c) const {
     auto i = min(max(c, 0), ncomp() - 1);
     auto valb = _data + _stride * idx + i * _ctype_size(_ctype);
-    // use double for integer conversion to attempt to maintain precision
+    // use double for integer conversion to attempt to maintain
+    // precision
     if (!_normalize) {
         switch (_ctype) {
             case glTFAccessorComponentType::Float:
@@ -9008,7 +8748,7 @@ float accessor_view::get(int idx, int c) const {
             case glTFAccessorComponentType::UnsignedInt:
                 return (float)(*(unsigned int*)valb);
             case glTFAccessorComponentType::NotSet:
-                throw runtime_error("bad enum value");
+                throw std::runtime_error("bad enum value");
                 break;
         }
 
@@ -9027,7 +8767,7 @@ float accessor_view::get(int idx, int c) const {
             case glTFAccessorComponentType::UnsignedInt:
                 return (float)(max((float)(c / 2147483647.0), -1.0f));
             case glTFAccessorComponentType::NotSet:
-                throw runtime_error("bad enum value");
+                throw std::runtime_error("bad enum value");
                 break;
         }
     }
@@ -9037,7 +8777,8 @@ float accessor_view::get(int idx, int c) const {
 int accessor_view::geti(int idx, int c) const {
     auto i = min(max(c, 0), ncomp() - 1);
     auto valb = _data + _stride * idx + i * _ctype_size(_ctype);
-    // use double for integer conversion to attempt to maintain precision
+    // use double for integer conversion to attempt to maintain
+    // precision
     switch (_ctype) {
         case glTFAccessorComponentType::Float: return (int)(*(float*)valb);
         case glTFAccessorComponentType::Byte: return (int)(*(char*)valb);
@@ -9049,7 +8790,7 @@ int accessor_view::geti(int idx, int c) const {
         case glTFAccessorComponentType::UnsignedInt:
             return (int)(*(unsigned int*)valb);
         case glTFAccessorComponentType::NotSet:
-            throw runtime_error("bad enum value");
+            throw std::runtime_error("bad enum value");
             break;
     }
     return 0;
@@ -9092,9 +8833,9 @@ int accessor_view::_ctype_size(glTFAccessorComponentType componentType) {
 namespace ygl {
 
 // Load SVG
-svg_scene* load_svg(const string& filename) {
+svg_scene* load_svg(const std::string& filename) {
     auto svg = nsvgParseFromFile(filename.c_str(), "mm", 96);
-    if (!svg) throw runtime_error("cannot load SVG");
+    if (!svg) throw std::runtime_error("cannot load SVG");
     auto scn = new svg_scene();
     for (auto shape = svg->shapes; shape != nullptr; shape = shape->next) {
         auto shp = new svg_shape();
@@ -9113,8 +8854,8 @@ svg_scene* load_svg(const string& filename) {
 }
 
 // Save SVG
-void save_svg(const string& filename, const vector<svg_path>& paths) {
-    throw runtime_error("not implemented yet");
+void save_svg(const std::string& filename, const std::vector<svg_path>& paths) {
+    throw std::runtime_error("not implemented yet");
 }
 
 }  // namespace ygl
@@ -9127,198 +8868,154 @@ void save_svg(const string& filename, const vector<svg_path>& paths) {
 namespace ygl {
 
 // Make a sphere. This is not watertight.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvsphere(
-    int tesselation, bool flipped) {
-    auto quads = vector<vec4i>();
-    auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) =
-        make_uvquads(pow2(tesselation + 2), pow2(tesselation + 1));
-    auto pos = vector<vec3f>(texcoord.size());
-    auto norm = vector<vec3f>(texcoord.size());
+void make_uvsphere(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation,
+    bool flipped) {
     if (!flipped) {
-        for (auto i = 0; i < texcoord.size(); i++) {
-            auto uv = texcoord[i];
-            auto a = vec2f{2 * pif * uv.x, pif * (1 - uv.y)};
-            pos[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-            norm[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-        }
+        make_quads(quads, pos, norm, texcoord, pow2(tesselation + 2),
+            pow2(tesselation + 1),
+            [](auto uv, auto& pos, auto& norm, auto& texcoord) {
+                auto a = vec2f{2 * pif * uv.x, pif * (1 - uv.y)};
+                pos = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                norm = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                texcoord = uv;
+            });
     } else {
-        for (auto i = 0; i < texcoord.size(); i++) {
-            auto uv = texcoord[i];
-            auto a = vec2f{2 * pif * uv.x, pif * uv.y};
-            pos[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-            norm[i] = {-cos(a.x) * sin(a.y), -sin(a.x) * sin(a.y), -cos(a.y)};
-            texcoord[i] = {uv.x, 1 - uv.y};
-        }
+        make_quads(quads, pos, norm, texcoord, pow2(tesselation + 2),
+            pow2(tesselation + 1),
+            [](auto uv, auto& pos, auto& norm, auto& texcoord) {
+                auto a = vec2f{2 * pif * uv.x, pif * uv.y};
+                pos = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                norm = {-cos(a.x) * sin(a.y), -sin(a.x) * sin(a.y), -cos(a.y)};
+                texcoord = {uv.x, 1 - uv.y};
+            });
     }
-    return {quads, pos, norm, texcoord};
 }
 
 // Make a geodesic sphere.
-tuple<vector<vec3i>, vector<vec3f>> make_geodesicsphere(int tesselation) {
+void make_geodesicsphere(
+    std::vector<vec3i>& triangles, std::vector<vec3f>& pos, int tesselation) {
     // https://stackoverflow.com/questions/17705621/algorithm-for-a-geodesic-sphere
     const float X = 0.525731112119133606f;
     const float Z = 0.850650808352039932f;
-    auto pos = vector<vec3f>{{-X, 0.0, Z}, {X, 0.0, Z}, {-X, 0.0, -Z},
+    pos = std::vector<vec3f>{{-X, 0.0, Z}, {X, 0.0, Z}, {-X, 0.0, -Z},
         {X, 0.0, -Z}, {0.0, Z, X}, {0.0, Z, -X}, {0.0, -Z, X}, {0.0, -Z, -X},
         {Z, X, 0.0}, {-Z, X, 0.0}, {Z, -X, 0.0}, {-Z, -X, 0.0}};
-    auto triangles = vector<vec3i>{{0, 1, 4}, {0, 4, 9}, {9, 4, 5}, {4, 8, 5},
+    triangles = std::vector<vec3i>{{0, 1, 4}, {0, 4, 9}, {9, 4, 5}, {4, 8, 5},
         {4, 1, 8}, {8, 1, 10}, {8, 10, 3}, {5, 8, 3}, {5, 3, 2}, {2, 3, 7},
         {7, 3, 10}, {7, 10, 6}, {7, 6, 11}, {11, 6, 0}, {0, 6, 1}, {6, 10, 1},
         {9, 11, 0}, {9, 2, 11}, {9, 5, 2}, {7, 11, 2}};
-    for (auto l = 0; l < tesselation - 2; l++) {
-        vector<vec2i> _lines;
-        vector<vec4i> _quads;
-        vector<vec2i> edges;
-        vector<vec4i> faces;
-        tie(_lines, triangles, _quads, edges, faces) =
-            subdivide_elems_linear({}, triangles, {}, (int)pos.size());
-        pos = subdivide_vert_linear(pos, edges, faces);
-    }
+    for (auto l = 0; l < max(0, tesselation - 2); l++)
+        subdivide_triangles(triangles, pos);
     for (auto& p : pos) p = normalize(p);
-    return {triangles, pos};
 }
 
 // Make a sphere. This is not watertight.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvhemisphere(int tesselation, bool flipped) {
-    auto quads = vector<vec4i>();
-    auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) =
-        make_uvquads(pow2(tesselation + 2), pow2(tesselation));
-    auto pos = vector<vec3f>(texcoord.size());
-    auto norm = vector<vec3f>(texcoord.size());
+void make_uvhemisphere(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation,
+    bool flipped) {
     if (!flipped) {
-        for (auto i = 0; i < texcoord.size(); i++) {
-            auto uv = texcoord[i];
-            auto a = vec2f{2 * pif * uv.x, pif * 0.5f * (1 - uv.y)};
-            pos[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-            norm[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-        }
+        make_quads(quads, pos, norm, texcoord, pow2(tesselation + 2),
+            pow2(tesselation),
+            [](auto uv, auto& pos, auto& norm, auto& texcoord) {
+                auto a = vec2f{2 * pif * uv.x, pif * 0.5f * (1 - uv.y)};
+                pos = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                norm = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                texcoord = uv;
+            });
     } else {
-        for (auto i = 0; i < texcoord.size(); i++) {
-            auto uv = texcoord[i];
-            auto a = vec2f{2 * pif * uv.x, pif * (0.5f + 0.5f * uv.y)};
-            pos[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-            norm[i] = {-cos(a.x) * sin(a.y), -sin(a.x) * sin(a.y), -cos(a.y)};
-            texcoord[i] = {uv.x, 1 - uv.y};
-        }
+        make_quads(quads, pos, norm, texcoord, pow2(tesselation + 2),
+            pow2(tesselation),
+            [](auto uv, auto& pos, auto& norm, auto& texcoord) {
+                auto a = vec2f{2 * pif * uv.x, pif * (0.5f + 0.5f * uv.y)};
+                pos = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                norm = {-cos(a.x) * sin(a.y), -sin(a.x) * sin(a.y), -cos(a.y)};
+                texcoord = {uv.x, 1 - uv.y};
+            });
     }
-    return {quads, pos, norm, texcoord};
 }
 
 // Make a quad.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvquad(
-    int tesselation) {
-    auto quads = vector<vec4i>();
-    auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) = make_uvquads(pow2(tesselation), pow2(tesselation));
-    auto pos = vector<vec3f>(texcoord.size());
-    auto norm = vector<vec3f>(texcoord.size());
-    for (auto i = 0; i < texcoord.size(); i++) {
-        auto uv = texcoord[i];
-        pos[i] = {(-1 + uv.x * 2), (-1 + uv.y * 2), 0};
-        norm[i] = {0, 0, 1};
-    }
-    return {quads, pos, norm, texcoord};
+void make_uvquad(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation) {
+    make_quads(quads, pos, norm, texcoord, pow2(tesselation), pow2(tesselation),
+        [](auto uv, auto& pos, auto& norm, auto& texcoord) {
+            pos = vec3f{(-1 + uv.x * 2), (-1 + uv.y * 2), 0};
+            norm = vec3f{0, 0, 1};
+            texcoord = uv;
+        });
 }
 
 // Make a cube with unique vertices. This is watertight but has no
 // texture coordinates or normals.
-tuple<vector<vec4i>, vector<vec3f>> make_cube(int tesselation) {
-    static auto pos = vector<vec3f>{{-1, -1, -1}, {-1, +1, -1}, {+1, +1, -1},
+void make_cube(
+    std::vector<vec4i>& quads, std::vector<vec3f>& pos, int tesselation) {
+    pos = std::vector<vec3f>{{-1, -1, -1}, {-1, +1, -1}, {+1, +1, -1},
         {+1, -1, -1}, {-1, -1, +1}, {-1, +1, +1}, {+1, +1, +1}, {+1, -1, +1}};
-    static auto quads = vector<vec4i>{{0, 1, 2, 3}, {7, 6, 5, 4}, {4, 5, 1, 0},
+    quads = std::vector<vec4i>{{0, 1, 2, 3}, {7, 6, 5, 4}, {4, 5, 1, 0},
         {6, 7, 3, 2}, {2, 1, 5, 6}, {0, 3, 7, 4}};
 
-    auto tpos = pos;
-    auto tquads = quads;
-    for (auto l = 0; l < tesselation; l++) {
-        auto lines = vector<vec2i>();
-        auto triangles = vector<vec3i>();
-        auto edges = vector<vec2i>();
-        auto faces = vector<vec4i>();
-        tie(lines, triangles, tquads, edges, faces) =
-            subdivide_elems_linear({}, {}, tquads, (int)tpos.size());
-        tpos = subdivide_vert_linear(tpos, edges, faces);
-    }
-
-    return {tquads, tpos};
+    for (auto l = 0; l < tesselation; l++) subdivide_quads(quads, pos);
 }
 
 // Make a facevarying cube with unique vertices but different texture
 // coordinates.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec4i>, vector<vec3f>, vector<vec4i>,
-    vector<vec2f>>
-make_fvcube(int tesselation) {
-    static auto pos = vector<vec3f>{{-1, -1, -1}, {-1, +1, -1}, {+1, +1, -1},
+void make_fvcube(std::vector<vec4i>& quads_pos, std::vector<vec3f>& pos,
+    std::vector<vec4i>& quads_norm, std::vector<vec3f>& norm,
+    std::vector<vec4i>& quads_texcoord, std::vector<vec2f>& texcoord,
+    int tesselation) {
+    pos = std::vector<vec3f>{{-1, -1, -1}, {-1, +1, -1}, {+1, +1, -1},
         {+1, -1, -1}, {-1, -1, +1}, {-1, +1, +1}, {+1, +1, +1}, {+1, -1, +1}};
-    static auto quads_pos = vector<vec4i>{{0, 1, 2, 3}, {7, 6, 5, 4},
-        {4, 5, 1, 0}, {6, 7, 3, 2}, {2, 1, 5, 6}, {0, 3, 7, 4}};
-    static auto norm = vector<vec3f>{{0, 0, -1}, {0, 0, -1}, {0, 0, -1},
-        {0, 0, -1}, {0, 0, +1}, {0, 0, +1}, {0, 0, +1}, {0, 0, +1}, {-1, 0, 0},
-        {-1, 0, 0}, {-1, 0, 0}, {-1, 0, 0}, {+1, 0, 0}, {+1, 0, 0}, {+1, 0, 0},
-        {+1, 0, 0}, {0, +1, 0}, {0, +1, 0}, {0, +1, 0}, {0, +1, 0}, {0, -1, 0},
-        {0, -1, 0}, {0, -1, 0}, {0, -1, 0}};
-    static auto quads_norm = vector<vec4i>{{0, 1, 2, 3}, {4, 5, 6, 7},
-        {8, 9, 10, 11}, {12, 13, 14, 15}, {16, 17, 18, 19}, {20, 21, 22, 23}};
-    static auto texcoord = vector<vec2f>{{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0},
+    quads_pos = std::vector<vec4i>{{0, 1, 2, 3}, {7, 6, 5, 4}, {4, 5, 1, 0},
+        {6, 7, 3, 2}, {2, 1, 5, 6}, {0, 3, 7, 4}};
+    norm = std::vector<vec3f>{{0, 0, -1}, {0, 0, -1}, {0, 0, -1}, {0, 0, -1},
+        {0, 0, +1}, {0, 0, +1}, {0, 0, +1}, {0, 0, +1}, {-1, 0, 0}, {-1, 0, 0},
+        {-1, 0, 0}, {-1, 0, 0}, {+1, 0, 0}, {+1, 0, 0}, {+1, 0, 0}, {+1, 0, 0},
+        {0, +1, 0}, {0, +1, 0}, {0, +1, 0}, {0, +1, 0}, {0, -1, 0}, {0, -1, 0},
+        {0, -1, 0}, {0, -1, 0}};
+    quads_norm = std::vector<vec4i>{{0, 1, 2, 3}, {4, 5, 6, 7}, {8, 9, 10, 11},
+        {12, 13, 14, 15}, {16, 17, 18, 19}, {20, 21, 22, 23}};
+    texcoord = std::vector<vec2f>{{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0},
         {1, 0}, {1, 1}, {0, 1}, {0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0}, {1, 0},
         {1, 1}, {0, 1}, {0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0}, {1, 0}, {1, 1},
         {0, 1}};
-    static auto quads_texcoord = vector<vec4i>{{0, 1, 2, 3}, {4, 5, 6, 7},
+    quads_texcoord = std::vector<vec4i>{{0, 1, 2, 3}, {4, 5, 6, 7},
         {8, 9, 10, 11}, {12, 13, 14, 15}, {16, 17, 18, 19}, {20, 21, 22, 23}};
 
-    if (!tesselation)
-        return {quads_pos, pos, quads_norm, norm, quads_texcoord, texcoord};
-
-    auto tpos = pos, tnorm = norm;
-    auto ttexcoord = texcoord;
-    auto tquads_pos = quads_pos, tquads_norm = quads_norm,
-         tquads_texcoord = quads_texcoord;
     for (auto l = 0; l < tesselation; l++) {
-        auto lines = vector<vec2i>();
-        auto triangles = vector<vec3i>();
-        auto edges = vector<vec2i>();
-        auto faces = vector<vec4i>();
-        tie(lines, triangles, tquads_pos, edges, faces) =
-            subdivide_elems_linear({}, {}, tquads_pos, (int)tpos.size());
-        tpos = subdivide_vert_linear(tpos, edges, faces);
-        tie(lines, triangles, tquads_norm, edges, faces) =
-            subdivide_elems_linear({}, {}, tquads_norm, (int)tnorm.size());
-        tnorm = subdivide_vert_linear(tnorm, edges, faces);
-        tie(lines, triangles, tquads_texcoord, edges, faces) =
-            subdivide_elems_linear(
-                {}, {}, tquads_texcoord, (int)ttexcoord.size());
-        ttexcoord = subdivide_vert_linear(ttexcoord, edges, faces);
+        subdivide_quads(quads_pos, pos);
+        subdivide_quads(quads_norm, norm);
+        subdivide_quads(quads_texcoord, texcoord);
     }
-
-    return {tquads_pos, tpos, tquads_norm, tnorm, tquads_texcoord, ttexcoord};
 }
 
 // Make a facevarying sphere with unique vertices but different texture
 // coordinates.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec4i>, vector<vec3f>, vector<vec4i>,
-    vector<vec2f>>
-make_fvsphere(int tesselation) {
-    auto usteps = pow2(tesselation + 2), vsteps = pow2(tesselation + 1);
-    auto qpos = vector<vec4i>(), qtexcoord = vector<vec4i>();
-    auto uvpos = vector<vec2f>(), texcoord = vector<vec2f>();
-    tie(qpos, uvpos) = make_uvquads(usteps, vsteps, true, false, true, true);
-    tie(qtexcoord, texcoord) = make_uvquads(usteps, vsteps);
-    auto pos = vector<vec3f>(uvpos.size());
-    for (auto i = 0; i < uvpos.size(); i++) {
-        auto uv = uvpos[i];
-        auto a = vec2f{2 * pif * uv.x, pif * (1 - uv.y)};
-        pos[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-    }
-    return {qpos, pos, qpos, pos, qtexcoord, texcoord};
+void make_fvsphere(std::vector<vec4i>& quads_pos, std::vector<vec3f>& pos,
+    std::vector<vec4i>& quads_norm, std::vector<vec3f>& norm,
+    std::vector<vec4i>& quads_texcoord, std::vector<vec2f>& texcoord,
+    int tesselation) {
+    make_quads(quads_pos, pos, pow2(tesselation + 2), pow2(tesselation + 1),
+        [](auto uv) {
+            auto a = vec2f{2 * pif * uv.x, pif * (1 - uv.y)};
+            return vec3f{cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+        },
+        true, false, true, true);
+    make_quads(quads_norm, norm, pow2(tesselation + 2), pow2(tesselation + 1),
+        [](auto uv) {
+            auto a = vec2f{2 * pif * uv.x, pif * (1 - uv.y)};
+            return vec3f{cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+        },
+        true, false, true, true);
+    make_quads(quads_texcoord, texcoord, pow2(tesselation + 2),
+        pow2(tesselation + 1), [](auto uv) { return uv; });
 }
 
 // Make a suzanne monkey model for testing. Note that some quads are
 // degenerate.
-tuple<vector<vec4i>, vector<vec3f>> make_suzanne(int tesselation) {
-    static auto suzanne_pos = vector<vec3f>{{0.4375, 0.1640625, 0.765625},
+void make_suzanne(
+    std::vector<vec4i>& quads, std::vector<vec3f>& pos, int tesselation) {
+    static auto suzanne_pos = std::vector<vec3f>{{0.4375, 0.1640625, 0.765625},
         {-0.4375, 0.1640625, 0.765625}, {0.5, 0.09375, 0.6875},
         {-0.5, 0.09375, 0.6875}, {0.546875, 0.0546875, 0.578125},
         {-0.546875, 0.0546875, 0.578125}, {0.3515625, -0.0234375, 0.6171875},
@@ -9574,27 +9271,27 @@ tuple<vector<vec4i>, vector<vec3f>> make_suzanne(int tesselation) {
         {-1.0390625, -0.0859375, -0.4921875}, {0.7890625, -0.125, -0.328125},
         {-0.7890625, -0.125, -0.328125}, {0.859375, 0.3828125, -0.3828125},
         {-0.859375, 0.3828125, -0.3828125}};
-    static auto suzanne_triangles = vector<vec3i>{{60, 64, 48}, {49, 65, 61},
-        {62, 64, 60}, {61, 65, 63}, {60, 58, 62}, {63, 59, 61}, {60, 56, 58},
-        {59, 57, 61}, {60, 54, 56}, {57, 55, 61}, {60, 52, 54}, {55, 53, 61},
-        {60, 50, 52}, {53, 51, 61}, {60, 48, 50}, {51, 49, 61}, {224, 228, 226},
-        {227, 229, 225}, {72, 283, 73}, {73, 284, 72}, {341, 347, 383},
-        {384, 348, 342}, {299, 345, 343}, {344, 346, 300}, {323, 379, 351},
-        {352, 380, 324}, {441, 443, 445}, {446, 444, 442}, {463, 491, 465},
-        {466, 492, 464}, {495, 497, 499}, {500, 498, 496}};
-    static auto suzanne_quads = vector<vec4i>{{46, 0, 2, 44}, {3, 1, 47, 45},
-        {44, 2, 4, 42}, {5, 3, 45, 43}, {2, 8, 6, 4}, {7, 9, 3, 5},
-        {0, 10, 8, 2}, {9, 11, 1, 3}, {10, 12, 14, 8}, {15, 13, 11, 9},
-        {8, 14, 16, 6}, {17, 15, 9, 7}, {14, 20, 18, 16}, {19, 21, 15, 17},
-        {12, 22, 20, 14}, {21, 23, 13, 15}, {22, 24, 26, 20}, {27, 25, 23, 21},
-        {20, 26, 28, 18}, {29, 27, 21, 19}, {26, 32, 30, 28}, {31, 33, 27, 29},
-        {24, 34, 32, 26}, {33, 35, 25, 27}, {34, 36, 38, 32}, {39, 37, 35, 33},
-        {32, 38, 40, 30}, {41, 39, 33, 31}, {38, 44, 42, 40}, {43, 45, 39, 41},
-        {36, 46, 44, 38}, {45, 47, 37, 39}, {46, 36, 50, 48}, {51, 37, 47, 49},
-        {36, 34, 52, 50}, {53, 35, 37, 51}, {34, 24, 54, 52}, {55, 25, 35, 53},
-        {24, 22, 56, 54}, {57, 23, 25, 55}, {22, 12, 58, 56}, {59, 13, 23, 57},
-        {12, 10, 62, 58}, {63, 11, 13, 59}, {10, 0, 64, 62}, {65, 1, 11, 63},
-        {0, 46, 48, 64}, {49, 47, 1, 65}, {88, 173, 175, 90},
+    static auto suzanne_triangles = std::vector<vec3i>{{60, 64, 48},
+        {49, 65, 61}, {62, 64, 60}, {61, 65, 63}, {60, 58, 62}, {63, 59, 61},
+        {60, 56, 58}, {59, 57, 61}, {60, 54, 56}, {57, 55, 61}, {60, 52, 54},
+        {55, 53, 61}, {60, 50, 52}, {53, 51, 61}, {60, 48, 50}, {51, 49, 61},
+        {224, 228, 226}, {227, 229, 225}, {72, 283, 73}, {73, 284, 72},
+        {341, 347, 383}, {384, 348, 342}, {299, 345, 343}, {344, 346, 300},
+        {323, 379, 351}, {352, 380, 324}, {441, 443, 445}, {446, 444, 442},
+        {463, 491, 465}, {466, 492, 464}, {495, 497, 499}, {500, 498, 496}};
+    static auto suzanne_quads = std::vector<vec4i>{{46, 0, 2, 44},
+        {3, 1, 47, 45}, {44, 2, 4, 42}, {5, 3, 45, 43}, {2, 8, 6, 4},
+        {7, 9, 3, 5}, {0, 10, 8, 2}, {9, 11, 1, 3}, {10, 12, 14, 8},
+        {15, 13, 11, 9}, {8, 14, 16, 6}, {17, 15, 9, 7}, {14, 20, 18, 16},
+        {19, 21, 15, 17}, {12, 22, 20, 14}, {21, 23, 13, 15}, {22, 24, 26, 20},
+        {27, 25, 23, 21}, {20, 26, 28, 18}, {29, 27, 21, 19}, {26, 32, 30, 28},
+        {31, 33, 27, 29}, {24, 34, 32, 26}, {33, 35, 25, 27}, {34, 36, 38, 32},
+        {39, 37, 35, 33}, {32, 38, 40, 30}, {41, 39, 33, 31}, {38, 44, 42, 40},
+        {43, 45, 39, 41}, {36, 46, 44, 38}, {45, 47, 37, 39}, {46, 36, 50, 48},
+        {51, 37, 47, 49}, {36, 34, 52, 50}, {53, 35, 37, 51}, {34, 24, 54, 52},
+        {55, 25, 35, 53}, {24, 22, 56, 54}, {57, 23, 25, 55}, {22, 12, 58, 56},
+        {59, 13, 23, 57}, {12, 10, 62, 58}, {63, 11, 13, 59}, {10, 0, 64, 62},
+        {65, 1, 11, 63}, {0, 46, 48, 64}, {49, 47, 1, 65}, {88, 173, 175, 90},
         {175, 174, 89, 90}, {86, 171, 173, 88}, {174, 172, 87, 89},
         {84, 169, 171, 86}, {172, 170, 85, 87}, {82, 167, 169, 84},
         {170, 168, 83, 85}, {80, 165, 167, 82}, {168, 166, 81, 83},
@@ -9736,45 +9433,26 @@ tuple<vector<vec4i>, vector<vec3f>> make_suzanne(int tesselation) {
         {388, 382, 314, 506}, {313, 505, 503, 321}, {504, 506, 314, 322},
         {319, 321, 503, 389}, {504, 322, 320, 390}};
 
-    auto tpos = suzanne_pos;
-    auto tquads = suzanne_quads;
-    tquads.reserve(suzanne_quads.size() + suzanne_triangles.size());
-    for (auto& t : suzanne_triangles) {
-        tquads.push_back({t.x, t.y, t.z, t.z});
-    }
+    pos = suzanne_pos;
+    quads = suzanne_quads;
+    for (auto& t : suzanne_triangles) { quads.push_back({t.x, t.y, t.z, t.z}); }
 
-    if (!tesselation) return {tquads, tpos};
-
-    for (auto l = 0; l < tesselation; l++) {
-        auto lines = vector<vec2i>();
-        auto triangles = vector<vec3i>();
-        auto edges = vector<vec2i>();
-        auto faces = vector<vec4i>();
-        tie(lines, triangles, tquads, edges, faces) =
-            subdivide_elems_linear({}, {}, tquads, (int)tpos.size());
-        tpos = subdivide_vert_linear(tpos, edges, faces);
-    }
-
-    return {tquads, tpos};
+    for (auto l = 0; l < tesselation; l++) subdivide_quads(quads, pos);
 }
 
 // Make a cube with uv. This is not watertight.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvcube(
-    int tesselation) {
+void make_uvcube(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation) {
     frame3f frames[6] = {frame3f{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 1}},
         frame3f{{-1, 0, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, -1}},
         frame3f{{-1, 0, 0}, {0, 0, 1}, {0, 1, 0}, {0, 1, 0}},
         frame3f{{1, 0, 0}, {0, 0, 1}, {0, -1, 0}, {0, -1, 0}},
         frame3f{{0, 1, 0}, {0, 0, 1}, {1, 0, 0}, {1, 0, 0}},
         frame3f{{0, -1, 0}, {0, 0, 1}, {-1, 0, 0}, {-1, 0, 0}}};
-    vector<vec3f> quad_pos, quad_norm;
-    vector<vec2f> quad_texcoord;
-    vector<vec4i> quad_quads;
-    tie(quad_quads, quad_pos, quad_norm, quad_texcoord) =
-        make_uvquad(tesselation);
-    vector<vec3f> pos, norm;
-    vector<vec2f> texcoord;
-    vector<vec4i> quads;
+    std::vector<vec3f> quad_pos, quad_norm;
+    std::vector<vec2f> quad_texcoord;
+    std::vector<vec4i> quad_quads;
+    make_uvquad(quad_quads, quad_pos, quad_norm, quad_texcoord, tesselation);
     for (auto i = 0; i < 6; i++) {
         pos.insert(pos.end(), quad_pos.begin(), quad_pos.end());
         norm.insert(norm.end(), quad_norm.begin(), quad_norm.end());
@@ -9798,46 +9476,36 @@ tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>> make_uvcube(
             quads[j].w += quad_verts * i;
         }
     }
-    return {quads, pos, norm, texcoord};
 }
 
 // Make a sphere from a cube. This is not watertight.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvspherecube(int tesselation) {
-    vector<vec3f> pos, norm;
-    vector<vec2f> texcoord;
-    vector<vec4i> quads;
-    tie(quads, pos, norm, texcoord) = make_uvcube(tesselation);
+void make_uvspherecube(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation) {
+    make_uvcube(quads, pos, norm, texcoord, tesselation);
     for (auto i = 0; i < pos.size(); i++) {
         pos[i] = normalize(pos[i]);
         norm[i] = normalize(pos[i]);
     }
-    return {quads, pos, norm, texcoord};
 }
 
 // Make a cube than stretch it towards a sphere. This is not watertight.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvspherizedcube(int tesselation, float radius) {
-    vector<vec3f> pos, norm;
-    vector<vec2f> texcoord;
-    vector<vec4i> quads;
-    tie(quads, pos, norm, texcoord) = make_uvcube(tesselation);
+void make_uvspherizedcube(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation,
+    float radius) {
+    make_uvcube(quads, pos, norm, texcoord, tesselation);
     for (auto i = 0; i < pos.size(); i++) {
         norm[i] = normalize(pos[i]);
         pos[i] *= 1 - radius;
         pos[i] += norm[i] * radius;
     }
-    norm = compute_normals({}, {}, quads, pos, true);
-    return {quads, pos, norm, texcoord};
+    compute_normals(quads, pos, norm);
 }
 
 // Make a flipped sphere. This is not watertight.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvflipcapsphere(int tesselation, float z, bool flipped) {
-    vector<vec3f> pos, norm;
-    vector<vec2f> texcoord;
-    vector<vec4i> quads;
-    tie(quads, pos, norm, texcoord) = make_uvsphere(tesselation, flipped);
+void make_uvflipcapsphere(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation,
+    float z, bool flipped) {
+    make_uvsphere(quads, pos, norm, texcoord, tesselation, flipped);
     for (auto i = 0; i < pos.size(); i++) {
         if (pos[i].z > z) {
             pos[i].z = 2 * z - pos[i].z;
@@ -9849,42 +9517,40 @@ make_uvflipcapsphere(int tesselation, float z, bool flipped) {
             norm[i].y = -norm[i].y;
         }
     }
-    return {quads, pos, norm, texcoord};
 }
 
 // Make a cutout sphere. This is not watertight.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvcutsphere(int tesselation, float z, bool flipped) {
-    auto quads = vector<vec4i>();
-    auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) =
-        make_uvquads(pow2(tesselation + 2), pow2(tesselation + 1));
-    auto pos = vector<vec3f>(texcoord.size());
-    auto norm = vector<vec3f>(texcoord.size());
+void make_uvcutsphere(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation,
+    float z, bool flipped) {
     if (!flipped) {
-        for (auto i = 0; i < texcoord.size(); i++) {
-            auto uv = texcoord[i];
-            auto p = 1 - acos(z) / pif;
-            auto a = vec2f{2 * pif * uv.x, pif * (1 - p * uv.y)};
-            pos[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-            norm[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-        }
+        make_quads(quads, pos, norm, texcoord, pow2(tesselation + 2),
+            pow2(tesselation + 1),
+            [=](auto uv, auto& pos, auto& norm, auto& texcoord) {
+                auto p = 1 - acos(z) / pif;
+                auto a = vec2f{2 * pif * uv.x, pif * (1 - p * uv.y)};
+                pos = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                norm = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                texcoord = uv;
+            });
     } else {
-        for (auto i = 0; i < texcoord.size(); i++) {
-            auto uv = texcoord[i];
-            auto p = 1 - acos(z) / pif;
-            auto a = vec2f{2 * pif * uv.x, pif * ((1 - p) + p * uv.y)};
-            pos[i] = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
-            norm[i] = {-cos(a.x) * sin(a.y), -sin(a.x) * sin(a.y), -cos(a.y)};
-            texcoord[i] = {uv.x, (1 - uv.y)};
-        }
+        make_quads(quads, pos, norm, texcoord, pow2(tesselation + 2),
+            pow2(tesselation + 1),
+            [=](auto uv, auto& pos, auto& norm, auto& texcoord) {
+                auto p = 1 - acos(z) / pif;
+                auto a = vec2f{2 * pif * uv.x, pif * ((1 - p) + p * uv.y)};
+                pos = {cos(a.x) * sin(a.y), sin(a.x) * sin(a.y), cos(a.y)};
+                norm = {-cos(a.x) * sin(a.y), -sin(a.x) * sin(a.y), -cos(a.y)};
+                texcoord = {uv.x, 1 - uv.y};
+            });
     }
-    return {quads, pos, norm, texcoord};
 }
 
-// Make a seashell. This is not watertight. Returns quads, pos, norm, texcoord.
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvseashell(int tesselation, const make_seashell_params& params) {
+// Make a seashell. This is not watertight. Returns quads, pos, norm,
+// texcoord.
+void make_uvseashell(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation,
+    const make_seashell_params& params) {
     auto R = params.spiral_revolutions;
     auto D = -1.0f;
     auto a = params.spiral_angle;
@@ -9899,68 +9565,66 @@ make_uvseashell(int tesselation, const make_seashell_params& params) {
 
     auto cot_a = 1 / tan(a);
 
-    auto quads = vector<vec4i>();
-    auto texcoord = vector<vec2f>();
-    tie(quads, texcoord) = make_uvquads(
-        pow2(tesselation + 2), pow2(tesselation + 1 + (int)round(R)));
-    auto pos = vector<vec3f>(texcoord.size());
-    for (auto i = 0; i < texcoord.size(); i++) {
-        auto uv = texcoord[i];
-        auto s = uv.x * 2 * pif;
-        auto t = uv.y * 2 * pif * R - pif * R;
-        auto re = 1 / sqrt(pow(cos(s) / e.x, 2) + pow(sin(s) / e.y, 2));
-        if (L && W.x && W.y && t > 0) {
-            auto l = (2 * pif / N) *
-                     ((N * t) / (2 * pif) - floor((N * t) / (2 * pif)));
-            auto rn =
-                L * exp(-pow((2 * (s - P)) / W.x, 2) - pow((2 * l) / W.y, 2));
-            re += rn;
-        }
-        pos[i].x = (A * sin(b) * cos(t) + cos(s + O.x) * cos(t + O.y) * re -
-                       sin(O.z) * sin(t + O.y) * re) *
-                   D * exp(t * cot_a);
-        pos[i].y = (A * sin(b) * sin(t) + cos(s + O.x) * sin(t + O.y) * re +
-                       sin(O.z) * sin(s + O.x) * cos(t + O.y) * re) *
-                   exp(t * cot_a);
-        pos[i].z =
-            (-A * cos(b) + cos(O.z) * sin(s + O.x) * re) * exp(t * cot_a);
-        texcoord[i] = {uv.x, uv.y * R};
-    }
-    auto norm = compute_normals({}, {}, quads, pos);
-    return {quads, pos, norm, texcoord};
+    make_quads(quads, pos, norm, texcoord, pow2(tesselation + 2),
+        pow2(tesselation + 1 + (int)round(R)),
+        [=](auto uv, auto& pos, auto& norm, auto& texcoord) {
+            auto s = uv.x * 2 * pif;
+            auto t = uv.y * 2 * pif * R - pif * R;
+            auto re = 1 / sqrt(pow(cos(s) / e.x, 2) + pow(sin(s) / e.y, 2));
+            if (L && W.x && W.y && t > 0) {
+                auto l = (2 * pif / N) *
+                         ((N * t) / (2 * pif) - floor((N * t) / (2 * pif)));
+                auto rn = L * exp(-pow((2 * (s - P)) / W.x, 2) -
+                                  pow((2 * l) / W.y, 2));
+                re += rn;
+            }
+            pos.x = (A * sin(b) * cos(t) + cos(s + O.x) * cos(t + O.y) * re -
+                        sin(O.z) * sin(t + O.y) * re) *
+                    D * exp(t * cot_a);
+            pos.y = (A * sin(b) * sin(t) + cos(s + O.x) * sin(t + O.y) * re +
+                        sin(O.z) * sin(s + O.x) * cos(t + O.y) * re) *
+                    exp(t * cot_a);
+            pos.z =
+                (-A * cos(b) + cos(O.z) * sin(s + O.x) * re) * exp(t * cot_a);
+            norm = vec3f{0, 0, 1};
+            texcoord = vec2f{uv.x, uv.y * R};
+        });
+
+    norm = std::vector<vec3f>(pos.size());
+    compute_normals(quads, pos, norm);
 }
 
 // Make a bezier circle. Returns bezier, pos.
-tuple<vector<vec4i>, vector<vec3f>> make_bezier_circle() {
+void make_bezier_circle(std::vector<vec4i>& beziers, std::vector<vec3f>& pos) {
     // constant from http://spencermortensen.com/articles/bezier-circle/
-    static auto c = 0.551915024494f;
-    static auto pos = vector<vec3f>{{1, 0, 0}, {1, c, 0}, {c, 1, 0}, {0, 1, 0},
+    auto c = 0.551915024494f;
+    pos = std::vector<vec3f>{{1, 0, 0}, {1, c, 0}, {c, 1, 0}, {0, 1, 0},
         {-c, 1, 0}, {-1, c, 0}, {-1, 0, 0}, {-1, -c, 0}, {-c, -1, 0},
         {0, -1, 0}, {c, -1, 0}, {1, -c, 0}};
-    static auto bezier =
-        vector<vec4i>{{0, 1, 2, 3}, {3, 4, 5, 6}, {6, 7, 8, 9}, {9, 10, 11, 0}};
-    return {bezier, pos};
+    beziers = std::vector<vec4i>{
+        {0, 1, 2, 3}, {3, 4, 5, 6}, {6, 7, 8, 9}, {9, 10, 11, 0}};
 }
 
 // Make a hair ball around a shape
-tuple<vector<vec2i>, vector<vec3f>, vector<vec3f>, vector<vec2f>, vector<float>>
-make_hair(int num, int tesselation, const vector<vec3i>& striangles,
-    const vector<vec4i>& squads, const vector<vec3f>& spos,
-    const vector<vec3f>& snorm, const vector<vec2f>& stexcoord,
-    const make_hair_params& params) {
-    vector<vec3f> bpos;
-    vector<vec3f> bnorm;
-    vector<vec2f> btexcoord;
-    tie(bpos, bnorm, btexcoord) = sample_triangles_points(
+void make_hair(std::vector<vec2i>& lines, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord,
+    std::vector<float>& radius, int num, int tesselation,
+    const std::vector<vec3i>& striangles, const std::vector<vec4i>& squads,
+    const std::vector<vec3f>& spos, const std::vector<vec3f>& snorm,
+    const std::vector<vec2f>& stexcoord, const make_hair_params& params) {
+    std::vector<vec3f> bpos;
+    std::vector<vec3f> bnorm;
+    std::vector<vec2f> btexcoord;
+    std::tie(bpos, bnorm, btexcoord) = sample_triangles_points(
         join(striangles, convert_quads_to_triangles(squads)), spos, snorm,
         stexcoord, num, params.seed);
 
     auto rng = init_rng(params.seed, 3);
-    auto blen = vector<float>(bpos.size());
+    auto blen = std::vector<float>(bpos.size());
     for (auto& l : blen)
         l = lerp(params.length.x, params.length.y, next_rand1f(rng));
 
-    auto cidx = vector<int>();
+    auto cidx = std::vector<int>();
     if (params.clump.x > 0) {
         for (auto bidx = 0; bidx < bpos.size(); bidx++) {
             cidx.push_back(0);
@@ -9976,12 +9640,10 @@ make_hair(int num, int tesselation, const vector<vec3i>& striangles,
     }
 
     auto usteps = pow2(tesselation);
-    auto lines = vector<vec2i>();
-    auto texcoord = vector<vec2f>();
-    tie(lines, texcoord) = make_uvlines(num, usteps);
-    auto pos = vector<vec3f>(texcoord.size());
-    auto norm = vector<vec3f>(texcoord.size());
-    auto radius = vector<float>(texcoord.size());
+    make_lines_uv(lines, texcoord, num, usteps);
+    pos = std::vector<vec3f>(texcoord.size());
+    norm = std::vector<vec3f>(texcoord.size());
+    radius = std::vector<float>(texcoord.size());
     for (auto i = 0; i < texcoord.size(); i++) {
         auto u = texcoord[i].x;
         auto bidx = i / (usteps + 1);
@@ -10005,9 +9667,7 @@ make_hair(int num, int tesselation, const vector<vec3i>& striangles,
     }
 
     if (params.clump.x > 0 || params.noise.x > 0 || params.rotation.x > 0)
-        norm = compute_normals(lines, {}, {}, pos);
-
-    return {lines, pos, norm, texcoord, radius};
+        compute_tangents(lines, pos, norm);
 }
 
 }  // namespace ygl
@@ -10021,11 +9681,11 @@ namespace ygl {
 // http://graphics.cs.williams.edu/data
 // http://www.graphics.cornell.edu/online/box/data.html
 scene* make_cornell_box_scene() {
-    auto make_camera = [](string name, vec3f from, vec3f to, float yfov,
+    auto make_camera = [](std::string name, vec3f from, vec3f to, float yfov,
                            float aperture, float aspect = 16.0f / 9.0f) {
         auto cam = new camera();
         cam->name = name;
-        cam->frame = lookat_frame3(from, to, {0, 1, 0});
+        cam->frame = lookat_frame(from, to, {0, 1, 0});
         cam->aperture = aperture;
         cam->focus = length(from - to);
         cam->yfov = yfov * pif / 180;
@@ -10033,42 +9693,43 @@ scene* make_cornell_box_scene() {
         return cam;
     };
 
-    auto make_instance = [](string name, shape_group* shp, vec3f pos,
+    auto make_instance = [](std::string name, shape_group* shp, vec3f pos,
                              vec3f rot = {0, 0, 0}) {
         auto ist = new instance();
         ist->name = name;
         ist->shp = shp;
-        ist->frame = {rotation_mat3(vec3f{0, 0, 1}, rot[2] * pif / 180) *
-                          rotation_mat3(vec3f{0, 1, 0}, rot[1] * pif / 180) *
-                          rotation_mat3(vec3f{1, 0, 0}, rot[0] * pif / 180),
-            pos};
+        ist->frame = translation_frame(pos) *
+                     rotation_frame(vec3f{0, 0, 1}, rot[2] * pif / 180) *
+                     rotation_frame(vec3f{0, 1, 0}, rot[1] * pif / 180) *
+                     rotation_frame(vec3f{1, 0, 0}, rot[0] * pif / 180);
         return ist;
-	};
-    auto make_quad = [](string name, material* mat, float scale = 1) {
+    };
+
+    auto make_quad = [](std::string name, material* mat, float scale = 1) {
         auto sgr = new shape_group();
         sgr->name = name;
         auto shp = new shape();
         shp->mat = mat;
         shp->name = name;
-        tie(shp->quads, shp->pos, shp->norm, shp->texcoord) = make_uvquad(0);
+        make_uvquad(shp->quads, shp->pos, shp->norm, shp->texcoord, 0);
         for (auto& p : shp->pos) p *= scale;
         sgr->shapes.push_back(shp);
         return sgr;
     };
 
-    auto make_box = [](string name, material* mat, vec3f scale) {
+    auto make_box = [](std::string name, material* mat, vec3f scale) {
         auto sgr = new shape_group();
         sgr->name = name;
         auto shp = new shape();
         shp->mat = mat;
         shp->name = name;
-        tie(shp->quads, shp->pos, shp->norm, shp->texcoord) = make_uvcube(0);
+        make_uvcube(shp->quads, shp->pos, shp->norm, shp->texcoord, 0);
         for (auto& p : shp->pos) p *= scale;
         sgr->shapes.push_back(shp);
         return sgr;
     };
 
-    auto make_material = [](string name, vec3f kd, vec3f ke = {0, 0, 0}) {
+    auto make_material = [](std::string name, vec3f kd, vec3f ke = {0, 0, 0}) {
         auto mat = new material();
         mat->type = material_type::specular_roughness;
         mat->name = name;
@@ -10115,121 +9776,75 @@ scene* make_cornell_box_scene() {
     return scn;
 }
 
-//
-// Make standard shape. Public API described above.
-//
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvhollowcutsphere(int tesselation, float radius) {
-    auto quads = vector<vec4i>();
-    auto pos = vector<vec3f>();
-    auto norm = vector<vec3f>();
-    auto texcoord = vector<vec2f>();
-
-    vector<vec3f> mpos, mnorm;
-    vector<vec2f> mtexcoord;
-    vector<vec4i> mquads;
-    vector<vec2i> _aux1;
-    vector<vec3i> _aux2;
-
-    tie(mquads, mpos, mnorm, mtexcoord) = make_uvcutsphere(tesselation, radius);
+// Make standard shape.
+void make_uvhollowcutsphere(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation,
+    float radius) {
+    std::vector<vec3f> mpos, mnorm;
+    std::vector<vec2f> mtexcoord;
+    std::vector<vec4i> mquads;
+    make_uvcutsphere(mquads, mpos, mnorm, mtexcoord, tesselation, radius);
     for (auto& uv : mtexcoord) uv.y *= radius;
-    tie(_aux1, _aux2, quads) =
-        merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    append(pos, mpos);
-    append(norm, mnorm);
-    append(texcoord, mtexcoord);
+    merge_quads(quads, pos, norm, texcoord, mquads, mpos, mnorm, mtexcoord);
 
-    tie(mquads, mpos, mnorm, mtexcoord) =
-        make_uvcutsphere(tesselation, radius, true);
+    make_uvcutsphere(mquads, mpos, mnorm, mtexcoord, tesselation, radius, true);
     for (auto& p : mpos) p *= radius;
-    tie(_aux1, _aux2, quads) =
-        merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    append(pos, mpos);
-    append(norm, mnorm);
-    append(texcoord, mtexcoord);
+    merge_quads(quads, pos, norm, texcoord, mquads, mpos, mnorm, mtexcoord);
 
     // dpdu = [- s r s0 s1, s r c0 s1, 0] === [- s0, c0, 0]
     // dpdv = [s c0 s1, s s0 s1, s c1] === [c0 s1, s0 s1, c1]
     // n = [c0 c1, - s0 c1, s1]
-    tie(mquads, mtexcoord) =
-        make_uvquads(pow2(tesselation + 2), pow2(tesselation + 1));
-    mpos.resize(mtexcoord.size());
-    mnorm.resize(mtexcoord.size());
-    for (auto i = 0; i < mtexcoord.size(); i++) {
-        auto uv = mtexcoord[i];
-        auto a = vec2f{2 * pif * uv[0], pif * (1 - radius)};
-        auto r = (1 - uv[1]) + uv[1] * radius;
-        mpos[i] = {r * cos(a[0]) * sin(a[1]), r * sin(a[0]) * sin(a[1]),
-            r * cos(a[1])};
-        mnorm[i] = {-cos(a[0]) * cos(a[1]), -sin(a[0]) * cos(a[1]), sin(a[1])};
-        mtexcoord[i] = {uv[0], radius + (1 - radius) * uv[1]};
-    }
-    tie(_aux1, _aux2, quads) =
-        merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    append(pos, mpos);
-    append(norm, mnorm);
-    append(texcoord, mtexcoord);
-    return {quads, pos, norm, texcoord};
+    make_quads(mquads, mpos, mnorm, mtexcoord, pow2(tesselation + 2),
+        pow2(tesselation + 1),
+        [=](auto uv, auto& pos, auto& norm, auto& texcoord) {
+            auto a = vec2f{2 * pif * uv[0], pif * (1 - radius)};
+            auto r = (1 - uv[1]) + uv[1] * radius;
+            pos = {r * cos(a[0]) * sin(a[1]), r * sin(a[0]) * sin(a[1]),
+                r * cos(a[1])};
+            norm = {-cos(a[0]) * cos(a[1]), -sin(a[0]) * cos(a[1]), sin(a[1])};
+            texcoord = vec2f{uv[0], radius + (1 - radius) * uv[1]};
+        });
+    merge_quads(quads, pos, norm, texcoord, mquads, mpos, mnorm, mtexcoord);
 }
 
-//
-// Make standard shape. Public API described above.
-//
-tuple<vector<vec4i>, vector<vec3f>, vector<vec3f>, vector<vec2f>>
-make_uvhollowcutsphere1(int tesselation, float radius) {
-    auto quads = vector<vec4i>();
-    auto pos = vector<vec3f>();
-    auto norm = vector<vec3f>();
-    auto texcoord = vector<vec2f>();
+// Make standard shape.
+void make_uvhollowcutsphere1(std::vector<vec4i>& quads, std::vector<vec3f>& pos,
+    std::vector<vec3f>& norm, std::vector<vec2f>& texcoord, int tesselation,
+    float radius) {
+    std::vector<vec3f> mpos, mnorm;
+    std::vector<vec2f> mtexcoord;
+    std::vector<vec4i> mquads;
+    std::vector<vec2i> _aux1;
+    std::vector<vec3i> _aux2;
 
-    vector<vec3f> mpos, mnorm;
-    vector<vec2f> mtexcoord;
-    vector<vec4i> mquads;
-    vector<vec2i> _aux1;
-    vector<vec3i> _aux2;
-
-    tie(mquads, mpos, mnorm, mtexcoord) = make_uvcutsphere(tesselation, radius);
+    make_uvcutsphere(mquads, mpos, mnorm, mtexcoord, tesselation, radius);
     for (auto& uv : mtexcoord) uv.y *= radius;
     for (auto i = (pow2(tesselation + 2) + 1) * pow2(tesselation + 1);
          i < mnorm.size(); i++)
         mnorm[i] = normalize(mnorm[i] + vec3f{0, 0, 1});
-    tie(_aux1, _aux2, quads) =
-        merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    append(pos, mpos);
-    append(norm, mnorm);
-    append(texcoord, mtexcoord);
+    merge_quads(quads, pos, norm, texcoord, mquads, mpos, mnorm, mtexcoord);
 
-    tie(mquads, mpos, mnorm, mtexcoord) =
-        make_uvcutsphere(tesselation, radius * 1.05f, true);
+    make_uvcutsphere(
+        mquads, mpos, mnorm, mtexcoord, tesselation, radius * 1.05f, true);
     for (auto& p : mpos) p *= 0.8f;
-    tie(_aux1, _aux2, quads) =
-        merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    append(pos, mpos);
-    append(norm, mnorm);
-    append(texcoord, mtexcoord);
+    merge_quads(quads, pos, norm, texcoord, mquads, mpos, mnorm, mtexcoord);
 
-    tie(mquads, mtexcoord) =
-        make_uvquads(pow2(tesselation + 2), pow2(tesselation + 1) / 4);
-    mpos.resize(mtexcoord.size());
-    mnorm.resize(mtexcoord.size());
-    for (auto i = 0; i < mtexcoord.size(); i++) {
-        auto uv = mtexcoord[i];
-        auto p = 1 - acos(radius) / pif;
-        auto v = p + uv[1] * (1 - p);
-        auto a = vec2f{2 * pif * uv[0], pif * (1 - v)};
-        mpos[i] = {cos(a[0]) * sin(a[1]), sin(a[0]) * sin(a[1]),
-            (2 * radius - cos(a[1]))};
-        mnorm[i] = {-cos(a[0]) * sin(a[1]), -sin(a[0]) * sin(a[1]), cos(a[1])};
-        mtexcoord[i] = {uv[0], radius + (1 - radius) * uv[1]};
-    }
+    make_quads(mquads, mpos, mnorm, mtexcoord, pow2(tesselation + 2),
+        pow2(tesselation + 1) / 4,
+        [=](auto uv, auto& pos, auto& norm, auto& texcoord) {
+            auto p = 1 - acos(radius) / pif;
+            auto v = p + uv[1] * (1 - p);
+            auto a = vec2f{2 * pif * uv[0], pif * (1 - v)};
+            pos = vec3f{cos(a[0]) * sin(a[1]), sin(a[0]) * sin(a[1]),
+                (2 * radius - cos(a[1]))};
+            norm = vec3f{
+                -cos(a[0]) * sin(a[1]), -sin(a[0]) * sin(a[1]), cos(a[1])};
+            texcoord = vec2f{uv[0], radius + (1 - radius) * uv[1]};
+        });
+
     for (auto i = 0; i < (pow2(tesselation + 2) + 1); i++)
         mnorm[i] = normalize(mnorm[i] + vec3f{0, 0, 1});
-    tie(_aux1, _aux2, quads) =
-        merge_elems((int)pos.size(), {}, {}, quads, {}, {}, mquads);
-    append(pos, mpos);
-    append(norm, mnorm);
-    append(texcoord, mtexcoord);
-    return {quads, pos, norm, texcoord};
+    merge_quads(quads, pos, norm, texcoord, mquads, mpos, mnorm, mtexcoord);
 }
 
 }  // namespace ygl
@@ -10239,133 +9854,151 @@ make_uvhollowcutsphere1(int tesselation, float radius) {
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-// Makes/updates a test texture
-void update_test_texture(
-    const scene* scn, texture* txt, const test_texture_params& ttxt) {
-    if (ttxt.name == "") throw runtime_error("cannot use empty name");
+// cleanup
+proc_shape::~proc_shape() {
+    if (hair_params) delete hair_params;
+}
 
-    txt->name = ttxt.name;
+// cleanup
+proc_scene::~proc_scene() {
+    for (auto v : cameras) delete v;
+    for (auto v : textures) delete v;
+    for (auto v : materials) delete v;
+    for (auto v : shapes) delete v;
+    for (auto v : instances) delete v;
+    for (auto v : environments) delete v;
+    for (auto v : nodes) delete v;
+    for (auto v : animations) delete v;
+}
+
+// Makes/updates a test texture
+void update_proc_elem(
+    const scene* scn, texture* txt, const proc_texture* ptxt) {
+    if (ptxt->name == "") throw std::runtime_error("cannot use empty name");
+
+    txt->name = ptxt->name;
     txt->path = "";
     txt->ldr = {};
     txt->hdr = {};
 
-    switch (ttxt.type) {
-        case test_texture_type::none: break;
-        case test_texture_type::grid: {
-            txt->ldr = make_grid_image(ttxt.resolution, ttxt.resolution);
+    switch (ptxt->type) {
+        case proc_texture_type::none: break;
+        case proc_texture_type::grid: {
+            txt->ldr = make_grid_image(ptxt->resolution, ptxt->resolution);
         } break;
-        case test_texture_type::checker: {
-            txt->ldr = make_checker_image(ttxt.resolution, ttxt.resolution);
+        case proc_texture_type::checker: {
+            txt->ldr = make_checker_image(ptxt->resolution, ptxt->resolution);
         } break;
-        case test_texture_type::colored: {
-            txt->ldr = make_uvgrid_image(ttxt.resolution, ttxt.resolution);
+        case proc_texture_type::colored: {
+            txt->ldr = make_uvgrid_image(ptxt->resolution, ptxt->resolution);
         } break;
-        case test_texture_type::rcolored: {
-            txt->ldr = make_recuvgrid_image(ttxt.resolution, ttxt.resolution);
+        case proc_texture_type::rcolored: {
+            txt->ldr = make_recuvgrid_image(ptxt->resolution, ptxt->resolution);
         } break;
-        case test_texture_type::bump: {
+        case proc_texture_type::bump: {
             txt->ldr = make_bumpdimple_image(
-                ttxt.resolution, ttxt.resolution, ttxt.tile_size);
+                ptxt->resolution, ptxt->resolution, ptxt->tile_size);
         } break;
-        case test_texture_type::uv: {
-            txt->ldr = make_uv_image(ttxt.resolution, ttxt.resolution);
+        case proc_texture_type::uv: {
+            txt->ldr = make_uv_image(ptxt->resolution, ptxt->resolution);
         } break;
-        case test_texture_type::gamma: {
-            txt->ldr = make_gammaramp_image(ttxt.resolution, ttxt.resolution);
+        case proc_texture_type::gamma: {
+            txt->ldr = make_gammaramp_image(ptxt->resolution, ptxt->resolution);
         } break;
-        case test_texture_type::noise: {
+        case proc_texture_type::noise: {
             txt->ldr = make_noise_image(
-                ttxt.resolution, ttxt.resolution, ttxt.noise_scale);
+                ptxt->resolution, ptxt->resolution, ptxt->noise_scale);
         } break;
-        case test_texture_type::ridge: {
+        case proc_texture_type::ridge: {
             txt->ldr = make_ridge_image(
-                ttxt.resolution, ttxt.resolution, ttxt.noise_scale);
+                ptxt->resolution, ptxt->resolution, ptxt->noise_scale);
         } break;
-        case test_texture_type::fbm: {
+        case proc_texture_type::fbm: {
             txt->ldr = make_fbm_image(
-                ttxt.resolution, ttxt.resolution, ttxt.noise_scale);
+                ptxt->resolution, ptxt->resolution, ptxt->noise_scale);
         } break;
-        case test_texture_type::turbulence: {
+        case proc_texture_type::turbulence: {
             txt->ldr = make_turbulence_image(
-                ttxt.resolution, ttxt.resolution, ttxt.noise_scale);
+                ptxt->resolution, ptxt->resolution, ptxt->noise_scale);
         } break;
-        case test_texture_type::gammaf: {
-            txt->hdr = make_gammaramp_imagef(ttxt.resolution, ttxt.resolution);
+        case proc_texture_type::gammaf: {
+            txt->hdr =
+                make_gammaramp_imagef(ptxt->resolution, ptxt->resolution);
         } break;
-        case test_texture_type::sky: {
-            txt->hdr = make_sunsky_image(ttxt.resolution, ttxt.sky_sunangle);
+        case proc_texture_type::sky: {
+            txt->hdr = make_sunsky_image(ptxt->resolution, ptxt->sky_sunangle);
         } break;
-        default: throw runtime_error("should not have gotten here");
+        default: throw std::runtime_error("should not have gotten here");
     }
 
-    if (ttxt.bump_to_normal) {
-        txt->ldr = bump_to_normal_map(txt->ldr, ttxt.bump_scale);
+    if (ptxt->bump_to_normal) {
+        txt->ldr = bump_to_normal_map(txt->ldr, ptxt->bump_scale);
     }
 
-    if (txt->ldr) txt->path = ttxt.name + ".png";
-    if (txt->hdr) txt->path = ttxt.name + ".hdr";
+    if (!txt->ldr.empty()) txt->path = ptxt->name + ".png";
+    if (!txt->hdr.empty()) txt->path = ptxt->name + ".hdr";
 }
 
 // Makes/updates a test material
-void update_test_material(
-    const scene* scn, material* mat, const test_material_params& tmat) {
-    if (tmat.name == "") throw runtime_error("cannot use empty name");
+void update_proc_elem(
+    const scene* scn, material* mat, const proc_material* pmat) {
+    if (pmat->name == "") throw std::runtime_error("cannot use empty name");
 
-    auto txt = find_named_elem(scn->textures, tmat.texture);
-    auto norm = find_named_elem(scn->textures, tmat.normal);
+    auto txt = find_named_elem(scn->textures, pmat->texture);
+    auto norm = find_named_elem(scn->textures, pmat->normal);
 
-    mat->name = tmat.name;
+    mat->name = pmat->name;
     mat->type = material_type::specular_roughness;
     mat->ke = zero3f;
     mat->kd = zero3f;
     mat->rs = 1;
     mat->kr = zero3f;
     mat->kt = zero3f;
-    mat->ke_txt.txt = nullptr;
-    mat->kd_txt.txt = nullptr;
-    mat->ks_txt.txt = nullptr;
-    mat->kr_txt.txt = nullptr;
-    mat->kt_txt.txt = nullptr;
+    mat->ke_txt = nullptr;
+    mat->kd_txt = nullptr;
+    mat->ks_txt = nullptr;
+    mat->kr_txt = nullptr;
+    mat->kt_txt = nullptr;
 
-    switch (tmat.type) {
-        case test_material_type::none: break;
-        case test_material_type::emission: {
-            mat->ke = tmat.emission * tmat.color;
-            mat->ke_txt.txt = txt;
+    switch (pmat->type) {
+        case proc_material_type::none: break;
+        case proc_material_type::emission: {
+            mat->ke = pmat->emission * pmat->color;
+            mat->ke_txt = txt;
         } break;
-        case test_material_type::matte: {
-            mat->kd = tmat.color;
-            mat->kd_txt.txt = txt;
+        case proc_material_type::matte: {
+            mat->kd = pmat->color;
+            mat->kd_txt = txt;
         } break;
-        case test_material_type::plastic: {
-            mat->kd = tmat.color;
+        case proc_material_type::plastic: {
+            mat->kd = pmat->color;
             mat->ks = {0.04f, 0.04f, 0.04f};
-            mat->rs = tmat.roughness;
-            mat->kd_txt.txt = txt;
+            mat->rs = pmat->roughness;
+            mat->kd_txt = txt;
         } break;
-        case test_material_type::metal: {
-            mat->ks = tmat.color;
-            mat->rs = tmat.roughness;
-            mat->ks_txt.txt = txt;
+        case proc_material_type::metal: {
+            mat->ks = pmat->color;
+            mat->rs = pmat->roughness;
+            mat->ks_txt = txt;
         } break;
-        case test_material_type::transparent: {
-            mat->kd = tmat.color;
-            mat->op = tmat.opacity;
-            mat->kd_txt.txt = txt;
+        case proc_material_type::transparent: {
+            mat->kd = pmat->color;
+            mat->op = pmat->opacity;
+            mat->kd_txt = txt;
         } break;
-        default: throw runtime_error("should not have gotten here");
+        default: throw std::runtime_error("should not have gotten here");
     }
 
-    mat->norm_txt.txt = norm;
+    mat->norm_txt = norm;
 }
 
 // Makes/updates a test shape
-void update_test_shape(
-    const scene* scn, shape_group* sgr, const test_shape_params& tshp) {
-    if (tshp.name == "") throw runtime_error("cannot use empty name");
+void update_proc_elem(
+    const scene* scn, shape_group* sgr, const proc_shape* pshp) {
+    if (pshp->name == "") throw std::runtime_error("cannot use empty name");
     auto nshapes = 1;
-    if (tshp.type == test_shape_type::matball ||
-        tshp.type == test_shape_type::hairball)
+    if (pshp->type == proc_shape_type::matball ||
+        pshp->type == proc_shape_type::hairball)
         nshapes = 2;
     if (sgr->shapes.size() != nshapes) {
         for (auto v : sgr->shapes) delete v;
@@ -10374,11 +10007,12 @@ void update_test_shape(
             sgr->shapes.push_back(new shape());
     }
 
-    sgr->name = tshp.name;
+    sgr->name = pshp->name;
     auto sid = 0;
     for (auto shp : sgr->shapes) {
-        shp->name = tshp.name + ((sid > 0) ? to_string(sid++) : string(""));
-        shp->mat = find_named_elem(scn->materials, tshp.material);
+        shp->name =
+            pshp->name + ((sid > 0) ? std::to_string(sid++) : std::string(""));
+        shp->mat = find_named_elem(scn->materials, pshp->material);
         shp->pos = {};
         shp->norm = {};
         shp->texcoord = {};
@@ -10396,84 +10030,80 @@ void update_test_shape(
     }
 
     auto shp = sgr->shapes.front();
-    switch (tshp.type) {
-        case test_shape_type::floor: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvquad((tshp.tesselation < 0) ? 5 : tshp.tesselation);
+    switch (pshp->type) {
+        case proc_shape_type::floor: {
+            make_uvquad(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 5 : pshp->tesselation);
             for (auto& p : shp->pos) p = {-p.x, p.z, p.y};
             for (auto& n : shp->norm) n = {n.x, n.z, n.y};
             for (auto& p : shp->pos) p *= 20;
             for (auto& uv : shp->texcoord) uv *= 20;
         } break;
-        case test_shape_type::quad: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvquad((tshp.tesselation < 0) ? 0 : tshp.tesselation);
+        case proc_shape_type::quad: {
+            make_uvquad(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 0 : pshp->tesselation);
         } break;
-        case test_shape_type::cube: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvcube((tshp.tesselation < 0) ? 0 : tshp.tesselation);
+        case proc_shape_type::cube: {
+            make_uvcube(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 0 : pshp->tesselation);
         } break;
-        case test_shape_type::sphere: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvsphere((tshp.tesselation < 0) ? 5 : tshp.tesselation);
+        case proc_shape_type::sphere: {
+            make_uvsphere(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 5 : pshp->tesselation);
         } break;
-        case test_shape_type::spherecube: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvspherecube(
-                    (tshp.tesselation < 0) ? 4 : tshp.tesselation);
+        case proc_shape_type::spherecube: {
+            make_uvspherecube(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 4 : pshp->tesselation);
         } break;
-        case test_shape_type::spherizedcube: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvspherizedcube(
-                    (tshp.tesselation < 0) ? 4 : tshp.tesselation, 0.75f);
+        case proc_shape_type::spherizedcube: {
+            make_uvspherizedcube(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 4 : pshp->tesselation, 0.75f);
         } break;
-        case test_shape_type::geosphere: {
-            tie(shp->triangles, shp->pos) = make_geodesicsphere(
-                (tshp.tesselation < 0) ? 5 : tshp.tesselation);
+        case proc_shape_type::geosphere: {
+            make_geodesicsphere(shp->triangles, shp->pos,
+                (pshp->tesselation < 0) ? 5 : pshp->tesselation);
             shp->norm = shp->pos;
         } break;
-        case test_shape_type::flipcapsphere: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvflipcapsphere(
-                    (tshp.tesselation < 0) ? 5 : tshp.tesselation, 0.75f);
+        case proc_shape_type::flipcapsphere: {
+            make_uvflipcapsphere(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 5 : pshp->tesselation, 0.75f);
         } break;
-        case test_shape_type::suzanne: {
-            tie(shp->quads, shp->pos) =
-                make_suzanne((tshp.tesselation < 0) ? 0 : tshp.tesselation);
+        case proc_shape_type::suzanne: {
+            make_suzanne(shp->quads, shp->pos,
+                (pshp->tesselation < 0) ? 0 : pshp->tesselation);
         } break;
-        case test_shape_type::cubep: {
-            tie(shp->quads, shp->pos) =
-                make_cube((tshp.tesselation < 0) ? 0 : tshp.tesselation);
+        case proc_shape_type::cubep: {
+            make_cube(shp->quads, shp->pos,
+                (pshp->tesselation < 0) ? 0 : pshp->tesselation);
         } break;
-        case test_shape_type::fvcube: {
-            tie(shp->quads_pos, shp->pos, shp->quads_norm, shp->norm,
-                shp->quads_texcoord, shp->texcoord) =
-                make_fvcube((tshp.tesselation < 0) ? 0 : tshp.tesselation);
+        case proc_shape_type::fvcube: {
+            make_fvcube(shp->quads_pos, shp->pos, shp->quads_norm, shp->norm,
+                shp->quads_texcoord, shp->texcoord,
+                (pshp->tesselation < 0) ? 0 : pshp->tesselation);
         } break;
-        case test_shape_type::fvsphere: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvsphere((tshp.tesselation < 0) ? 5 : tshp.tesselation);
+        case proc_shape_type::fvsphere: {
+            make_uvsphere(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 5 : pshp->tesselation);
         } break;
-        case test_shape_type::matball: {
-            tie(shp->quads, shp->pos, shp->norm, shp->texcoord) =
-                make_uvflipcapsphere(
-                    (tshp.tesselation < 0) ? 5 : tshp.tesselation, 0.75f);
+        case proc_shape_type::matball: {
+            make_uvflipcapsphere(shp->quads, shp->pos, shp->norm, shp->texcoord,
+                (pshp->tesselation < 0) ? 5 : pshp->tesselation, 0.75f);
             auto shp1 = sgr->shapes.at(1);
-            tie(shp1->quads, shp1->pos, shp1->norm, shp1->texcoord) =
-                make_uvsphere((tshp.tesselation < 0) ? 5 : tshp.tesselation);
+            make_uvsphere(shp1->quads, shp1->pos, shp1->norm, shp1->texcoord,
+                (pshp->tesselation < 0) ? 5 : pshp->tesselation);
             for (auto& p : shp1->pos) p *= 0.8f;
-            shp1->mat = find_named_elem(scn->materials, tshp.interior);
+            shp1->mat = find_named_elem(scn->materials, pshp->interior);
         } break;
-        case test_shape_type::point: {
+        case proc_shape_type::point: {
             shp->points.push_back(0);
             shp->pos.push_back({0, 0, 0});
             shp->norm.push_back({0, 0, 1});
             shp->radius.push_back(0.001f);
         } break;
-        case test_shape_type::pointscube: {
-            auto npoints = (tshp.num < 0) ? 64 * 64 * 16 : tshp.num;
-            auto radius = (tshp.radius < 0) ? 0.0025f : tshp.radius;
-            tie(shp->points, shp->texcoord) = make_uvpoints(npoints);
+        case proc_shape_type::pointscube: {
+            auto npoints = (pshp->num < 0) ? 64 * 64 * 16 : pshp->num;
+            auto radius = (pshp->radius < 0) ? 0.0025f : pshp->radius;
+            make_points_uv(shp->points, shp->texcoord, npoints);
             shp->pos.reserve(shp->texcoord.size());
             shp->norm.resize(shp->texcoord.size(), {0, 0, 1});
             shp->radius.resize(shp->texcoord.size(), radius);
@@ -10483,264 +10113,264 @@ void update_test_shape(
                     -1 + 2 * next_rand1f(rn), -1 + 2 * next_rand1f(rn)});
             }
         } break;
-        case test_shape_type::hairball: {
+        case proc_shape_type::hairball: {
             auto shp1 = sgr->shapes.at(1);
-            tie(shp1->quads, shp1->pos, shp1->norm, shp1->texcoord) =
-                make_uvspherecube(5);
-            shp1->mat = find_named_elem(scn->materials, tshp.interior);
-            auto nhairs = (tshp.num < 0) ? 65536 : tshp.num;
-            // auto radius = (tshp.radius < 0) ? vec2f{0.001f, 0.0001f} :
-            //                                   vec2f{tshp.radius, 0.0001f};
-            tie(shp->lines, shp->pos, shp->norm, shp->texcoord, shp->radius) =
-                make_hair(nhairs, 2, {}, shp1->quads, shp1->pos, shp1->norm,
-                    shp1->texcoord, tshp.hair_params);
+            make_uvspherecube(
+                shp1->quads, shp1->pos, shp1->norm, shp1->texcoord, 5);
+            shp1->mat = find_named_elem(scn->materials, pshp->interior);
+            auto nhairs = (pshp->num < 0) ? 65536 : pshp->num;
+            // auto radius = (pshp->radius < 0) ? vec2f{0.001f, 0.0001f}
+            // :
+            //                                   vec2f{pshp->radius,
+            //                                   0.0001f};
+            make_hair(shp->lines, shp->pos, shp->norm, shp->texcoord,
+                shp->radius, nhairs, 2, {}, shp1->quads, shp1->pos, shp1->norm,
+                shp1->texcoord,
+                (pshp->hair_params) ? *pshp->hair_params : make_hair_params());
         } break;
-        case test_shape_type::beziercircle: {
-            tie(shp->beziers, shp->pos) = make_bezier_circle();
-            shp->subdivision_level = 2;
+        case proc_shape_type::beziercircle: {
+            make_bezier_circle(shp->beziers, shp->pos);
+            shp->subdivision = 2;
         } break;
-        default: throw runtime_error("should not have gotten here");
+        default: throw std::runtime_error("should not have gotten here");
     }
 
-    if (tshp.scale != 1) {
-        for (auto& p : shp->pos) p *= tshp.scale;
+    if (pshp->scale != 1) {
+        for (auto& p : shp->pos) p *= pshp->scale;
     }
 
-    for (auto i = 0; i < tshp.subdivision; i++) {
+    for (auto i = 0; i < pshp->subdivision; i++) {
         subdivide_shape_once(shp, true);
     }
 
-    if (tshp.faceted) facet_shape(shp);
+    if (pshp->faceted) facet_shape(shp);
 }
 
 // Makes/updates a test shape.
-void update_test_instance(
-    const scene* scn, instance* ist, const test_instance_params& tist) {
-    if (tist.name == "") throw runtime_error("cannot use empty name");
-    ist->name = tist.name;
-    ist->frame = tist.frame;
-    if (tist.rotation != zero3f) {
-        auto rot = rotation_mat3(vec3f{0, 0, 1}, tist.rotation.z * pif / 180) *
-                   rotation_mat3(vec3f{0, 1, 0}, tist.rotation.y * pif / 180) *
-                   rotation_mat3(vec3f{1, 0, 0}, tist.rotation.x * pif / 180);
-        ist->frame.rot() = ist->frame.rot() * rot;
+void update_proc_elem(
+    const scene* scn, instance* ist, const proc_instance* pist) {
+    if (pist->name == "") throw std::runtime_error("cannot use empty name");
+    ist->name = pist->name;
+    ist->frame = pist->frame;
+    if (pist->rotation != zero3f) {
+        ist->frame =
+            pist->frame *
+            rotation_frame(vec3f{0, 0, 1}, pist->rotation.z * pif / 180) *
+            rotation_frame(vec3f{0, 1, 0}, pist->rotation.y * pif / 180) *
+            rotation_frame(vec3f{1, 0, 0}, pist->rotation.x * pif / 180);
     }
-    ist->shp = find_named_elem(scn->shapes, tist.shape);
+    ist->shp = find_named_elem(scn->shapes, pist->shape);
 }
 
 // Makes/updates a test shape
-void update_test_camera(
-    const scene* scn, camera* cam, const test_camera_params& tcam) {
-    if (tcam.name == "") throw runtime_error("cannot use empty name");
-    cam->name = tcam.name;
-    cam->frame = lookat_frame3(tcam.from, tcam.to, vec3f{0, 1, 0});
-    cam->yfov = tcam.yfov;
-    cam->aspect = tcam.aspect;
+void update_proc_elem(const scene* scn, camera* cam, const proc_camera* pcam) {
+    if (pcam->name == "") throw std::runtime_error("cannot use empty name");
+    cam->name = pcam->name;
+    cam->frame = lookat_frame(pcam->from, pcam->to, vec3f{0, 1, 0});
+    cam->yfov = pcam->yfov;
+    cam->aspect = pcam->aspect;
     cam->near = 0.01f;
     cam->far = 10000;
     cam->aperture = 0;
-    cam->focus = length(tcam.from - tcam.to);
+    cam->focus = length(pcam->from - pcam->to);
 }
 
 // Makes/updates a test shape
-void update_test_environment(
-    const scene* scn, environment* env, const test_environment_params& tenv) {
-    if (tenv.name == "") throw runtime_error("cannot use empty name");
-    env->name = tenv.name;
+void update_proc_elem(
+    const scene* scn, environment* env, const proc_environment* penv) {
+    if (penv->name == "") throw std::runtime_error("cannot use empty name");
+    env->name = penv->name;
     env->frame = identity_frame3f;
-    if (tenv.rotation) {
-        env->frame = rotation_frame3({0, 1, 0}, tenv.rotation);
+    if (penv->rotation) {
+        env->frame = rotation_frame(vec3f{0, 1, 0}, penv->rotation);
     }
-    env->ke = tenv.emission * tenv.color;
-    env->ke_txt.txt = find_named_elem(scn->textures, tenv.texture);
+    env->ke = penv->emission * penv->color;
+    env->ke_txt = find_named_elem(scn->textures, penv->texture);
 }
 
 // Makes/updates a test shape
-void update_test_node(
-    const scene* scn, node* nde, const test_node_params& tnde) {
-    if (tnde.name == "") throw runtime_error("cannot use empty name");
-    nde->name = tnde.name;
-    nde->frame = tnde.frame;
-    nde->translation = tnde.translation;
-    nde->rotation = tnde.rotation;
-    nde->scaling = tnde.scaling;
-    nde->cam = find_named_elem(scn->cameras, tnde.camera);
-    nde->ist = find_named_elem(scn->instances, tnde.instance);
-    nde->env = find_named_elem(scn->environments, tnde.environment);
+void update_proc_elem(const scene* scn, node* nde, const proc_node* pnde) {
+    if (pnde->name == "") throw std::runtime_error("cannot use empty name");
+    nde->name = pnde->name;
+    nde->frame = pnde->frame;
+    nde->translation = pnde->translation;
+    nde->rotation = pnde->rotation;
+    nde->scaling = pnde->scaling;
+    nde->cam = find_named_elem(scn->cameras, pnde->camera);
+    nde->ist = find_named_elem(scn->instances, pnde->instance);
+    nde->env = find_named_elem(scn->environments, pnde->environment);
 }
 
 // Makes/updates a test animation
-void update_test_animation(
-    const scene* scn, animation_group* agr, const test_animation_params& tanm) {
-    if (tanm.name == "") throw runtime_error("cannot use empty name");
+void update_proc_elem(
+    const scene* scn, animation_group* agr, const proc_animation* panm) {
+    if (panm->name == "") throw std::runtime_error("cannot use empty name");
     if (agr->animations.size() != 1) {
         for (auto v : agr->animations) delete v;
         agr->animations.clear();
         agr->animations.push_back(new animation());
     }
-    agr->name = tanm.name;
+    agr->name = panm->name;
     auto anm = agr->animations.front();
-    anm->name = tanm.name;
-    anm->type = (!tanm.bezier) ? keyframe_type::linear : keyframe_type::bezier;
-    anm->times = tanm.times;
-    for (auto& v : anm->times) v *= tanm.speed;
-    anm->translation = tanm.translation;
-    anm->rotation = tanm.rotation;
-    anm->scaling = tanm.scaling;
-    for (auto& v : anm->translation) v *= tanm.scale;
-    for (auto& v : anm->scaling) v *= tanm.scale;
+    anm->name = panm->name;
+    anm->type = (!panm->bezier) ? keyframe_type::linear : keyframe_type::bezier;
+    anm->times = panm->times;
+    for (auto& v : anm->times) v *= panm->speed;
+    anm->translation = panm->translation;
+    anm->rotation = panm->rotation;
+    anm->scaling = panm->scaling;
+    for (auto& v : anm->translation) v *= panm->scale;
+    for (auto& v : anm->scaling) v *= panm->scale;
     agr->targets.clear();
-    for (auto& nde : tanm.nodes)
+    for (auto& nde : panm->nodes)
         agr->targets.push_back({anm, find_named_elem(scn->nodes, nde)});
 }
 
 // Update test elements
 template <typename T, typename T1>
-void update_test_scene_elem(scene* scn, vector<T*>& elems,
-    const vector<T1>& telems, void (*update)(const scene*, T*, const T1&),
-    const unordered_set<void*>& refresh) {
-    auto emap = unordered_map<string, T*>();
+void update_proc_scene_elem(scene* scn, std::vector<T*>& elems,
+    const std::vector<T1*>& telems, const std::unordered_set<void*>& refresh) {
+    auto emap = std::unordered_map<std::string, T*>();
     for (auto elem : elems) emap[elem->name] = elem;
-    for (auto& telem : telems) {
-        if (!contains(emap, telem.name)) {
+    for (auto telem : telems) {
+        if (!contains(emap, telem->name)) {
             elems.push_back(new T());
-            update(scn, elems.back(), telem);
+            update_proc_elem(scn, elems.back(), telem);
         } else {
-            auto elem = emap.at(telem.name);
-            if (contains(refresh, elem)) update(scn, elem, telem);
+            auto elem = emap.at(telem->name);
+            if (contains(refresh, elem)) update_proc_elem(scn, elem, telem);
         }
     }
 }
 
 // Makes/updates a test scene
-void update_test_scene(scene* scn, const test_scene_params& params,
-    const unordered_set<void*>& refresh) {
-    update_test_scene_elem(
-        scn, scn->cameras, params.cameras, update_test_camera, refresh);
-    update_test_scene_elem(
-        scn, scn->textures, params.textures, update_test_texture, refresh);
-    update_test_scene_elem(
-        scn, scn->materials, params.materials, update_test_material, refresh);
-    update_test_scene_elem(
-        scn, scn->shapes, params.shapes, update_test_shape, refresh);
-    update_test_scene_elem(
-        scn, scn->instances, params.instances, update_test_instance, refresh);
-    update_test_scene_elem(scn, scn->environments, params.environments,
-        update_test_environment, refresh);
-    update_test_scene_elem(
-        scn, scn->nodes, params.nodes, update_test_node, refresh);
-    update_test_scene_elem(scn, scn->animations, params.animations,
-        update_test_animation, refresh);
+void update_proc_elems(scene* scn, const proc_scene* pscn,
+    const std::unordered_set<void*>& refresh) {
+    update_proc_scene_elem(scn, scn->cameras, pscn->cameras, refresh);
+    update_proc_scene_elem(scn, scn->textures, pscn->textures, refresh);
+    update_proc_scene_elem(scn, scn->materials, pscn->materials, refresh);
+    update_proc_scene_elem(scn, scn->shapes, pscn->shapes, refresh);
+    update_proc_scene_elem(scn, scn->instances, pscn->instances, refresh);
+    update_proc_scene_elem(scn, scn->environments, pscn->environments, refresh);
+    update_proc_scene_elem(scn, scn->nodes, pscn->nodes, refresh);
+    update_proc_scene_elem(scn, scn->animations, pscn->animations, refresh);
 }
 
 // remove duplicate elems
 template <typename T>
-void remove_duplicate_elems(vector<T>& telems) {
-    auto names = unordered_set<string>();
-    for (auto& elem : telems) names.insert(elem.name);
+void remove_duplicate_elems(std::vector<T*>& telems) {
+    auto names = std::unordered_set<std::string>();
+    for (auto elem : telems) names.insert(elem->name);
     if (names.size() == telems.size()) return;
     names.clear();
-    auto ntelems = vector<T>();
-    ntelems.reserve(names.size());
-    for (auto& elem : telems) {
-        if (contains(names, elem.name)) continue;
-        ntelems.push_back(elem);
-        names.insert(elem.name);
+    auto ntelems = std::vector<T*>();
+    auto tdel = std::vector<T*>();
+    for (auto elem : telems) {
+        if (contains(names, elem->name)) {
+            tdel.push_back(elem);
+        } else {
+            ntelems.push_back(elem);
+            names.insert(elem->name);
+        }
     }
+    for (auto e : tdel) delete e;
     telems = ntelems;
 }
 
 // remove duplicates
-void remove_duplicates(test_scene_params& scn) {
-    remove_duplicate_elems(scn.cameras);
-    remove_duplicate_elems(scn.textures);
-    remove_duplicate_elems(scn.materials);
-    remove_duplicate_elems(scn.shapes);
-    remove_duplicate_elems(scn.instances);
-    remove_duplicate_elems(scn.environments);
+void remove_duplicates(proc_scene* scn) {
+    remove_duplicate_elems(scn->cameras);
+    remove_duplicate_elems(scn->textures);
+    remove_duplicate_elems(scn->materials);
+    remove_duplicate_elems(scn->shapes);
+    remove_duplicate_elems(scn->instances);
+    remove_duplicate_elems(scn->environments);
 }
 
-unordered_map<string, test_texture_params>& test_texture_presets() {
-    static auto presets = unordered_map<string, test_texture_params>();
+std::unordered_map<std::string, proc_texture*>& proc_texture_presets() {
+    static auto presets = std::unordered_map<std::string, proc_texture*>();
     if (!presets.empty()) return presets;
 
-    auto make_test_texture = [](const string& name, test_texture_type type) {
-        auto params = test_texture_params();
-        params.name = name;
-        params.type = type;
+    auto make_test_texture = [](const std::string& name,
+                                 proc_texture_type type) {
+        auto params = new proc_texture();
+        params->name = name;
+        params->type = type;
         return params;
     };
 
-    presets["grid"] = make_test_texture("grid", test_texture_type::grid);
+    presets["grid"] = make_test_texture("grid", proc_texture_type::grid);
     presets["checker"] =
-        make_test_texture("checker", test_texture_type::checker);
+        make_test_texture("checker", proc_texture_type::checker);
     presets["colored"] =
-        make_test_texture("colored", test_texture_type::colored);
+        make_test_texture("colored", proc_texture_type::colored);
     presets["rcolored"] =
-        make_test_texture("rcolored", test_texture_type::rcolored);
-    presets["bump"] = make_test_texture("bump", test_texture_type::bump);
-    presets["bump"].tile_size = 32;
-    presets["tgrid"] = make_test_texture("tgrid", test_texture_type::bump);
-    presets["tgrid"].tile_size = 32;
-    presets["uv"] = make_test_texture("uv", test_texture_type::uv);
-    presets["gamma"] = make_test_texture("gamma", test_texture_type::gamma);
-    presets["gridn"] = make_test_texture("gridn", test_texture_type::grid);
-    presets["gridn"].bump_to_normal = true;
-    presets["gridn"].bump_to_normal = true;
-    presets["gridn"].bump_scale = 4;
-    presets["tgridn"] = make_test_texture("tgridn", test_texture_type::grid);
-    presets["tgridn"].tile_size = 32;
-    presets["tgridn"].bump_to_normal = true;
-    presets["tgridn"].bump_to_normal = true;
-    presets["tgridn"].bump_scale = 4;
-    presets["bumpn"] = make_test_texture("bumpn", test_texture_type::bump);
-    presets["bumpn"].tile_size = 32;
-    presets["bumpn"].bump_to_normal = true;
-    presets["bumpn"].bump_scale = 4;
-    presets["noise"] = make_test_texture("noise", test_texture_type::noise);
-    presets["ridge"] = make_test_texture("ridge", test_texture_type::ridge);
-    presets["fbm"] = make_test_texture("fbm", test_texture_type::fbm);
+        make_test_texture("rcolored", proc_texture_type::rcolored);
+    presets["bump"] = make_test_texture("bump", proc_texture_type::bump);
+    presets["bump"]->tile_size = 32;
+    presets["tgrid"] = make_test_texture("tgrid", proc_texture_type::bump);
+    presets["tgrid"]->tile_size = 32;
+    presets["uv"] = make_test_texture("uv", proc_texture_type::uv);
+    presets["gamma"] = make_test_texture("gamma", proc_texture_type::gamma);
+    presets["gridn"] = make_test_texture("gridn", proc_texture_type::grid);
+    presets["gridn"]->bump_to_normal = true;
+    presets["gridn"]->bump_to_normal = true;
+    presets["gridn"]->bump_scale = 4;
+    presets["tgridn"] = make_test_texture("tgridn", proc_texture_type::grid);
+    presets["tgridn"]->tile_size = 32;
+    presets["tgridn"]->bump_to_normal = true;
+    presets["tgridn"]->bump_to_normal = true;
+    presets["tgridn"]->bump_scale = 4;
+    presets["bumpn"] = make_test_texture("bumpn", proc_texture_type::bump);
+    presets["bumpn"]->tile_size = 32;
+    presets["bumpn"]->bump_to_normal = true;
+    presets["bumpn"]->bump_scale = 4;
+    presets["noise"] = make_test_texture("noise", proc_texture_type::noise);
+    presets["ridge"] = make_test_texture("ridge", proc_texture_type::ridge);
+    presets["fbm"] = make_test_texture("fbm", proc_texture_type::fbm);
     presets["turbulence"] =
-        make_test_texture("turbulence", test_texture_type::turbulence);
+        make_test_texture("turbulence", proc_texture_type::turbulence);
 
-    presets["gammaf"] = make_test_texture("gammaf", test_texture_type::gammaf);
-    presets["sky1"] = make_test_texture("sky1", test_texture_type::sky);
-    presets["sky1"].sky_sunangle = pif / 4;
-    presets["sky2"] = make_test_texture("sky2", test_texture_type::sky);
-    presets["sky2"].sky_sunangle = pif / 2;
+    presets["gammaf"] = make_test_texture("gammaf", proc_texture_type::gammaf);
+    presets["sky1"] = make_test_texture("sky1", proc_texture_type::sky);
+    presets["sky1"]->sky_sunangle = pif / 4;
+    presets["sky2"] = make_test_texture("sky2", proc_texture_type::sky);
+    presets["sky2"]->sky_sunangle = pif / 2;
 
     return presets;
 }
 
-unordered_map<string, test_material_params>& test_material_presets() {
-    static auto presets = unordered_map<string, test_material_params>();
+std::unordered_map<std::string, proc_material*>& proc_material_presets() {
+    static auto presets = std::unordered_map<std::string, proc_material*>();
     if (!presets.empty()) return presets;
 
-    auto make_test_material = [](const string& name, test_material_type type,
-                                  const vec3f& color, float roughness = 1) {
-        auto params = test_material_params();
-        params.name = name;
-        params.type = type;
-        params.color = color;
-        params.roughness = roughness;
+    auto make_test_material = [](const std::string& name,
+                                  proc_material_type type, const vec3f& color,
+                                  float roughness = 1) {
+        auto params = new proc_material();
+        params->name = name;
+        params->type = type;
+        params->color = color;
+        params->roughness = roughness;
         return params;
     };
-    auto make_test_materialt = [](const string& name, test_material_type type,
-                                   const string& txt, float roughness = 1) {
-        auto params = test_material_params();
-        params.name = name;
-        params.type = type;
-        params.color = {1, 1, 1};
-        params.roughness = roughness;
-        params.texture = txt;
-        return params;
-    };
+    auto make_test_materialt =
+        [](const std::string& name, proc_material_type type,
+            const std::string& txt, float roughness = 1) {
+            auto params = new proc_material();
+            params->name = name;
+            params->type = type;
+            params->color = {1, 1, 1};
+            params->roughness = roughness;
+            params->texture = txt;
+            return params;
+        };
 
-    auto emission = test_material_type::emission;
-    auto matte = test_material_type::matte;
-    auto plastic = test_material_type::plastic;
-    auto metal = test_material_type::metal;
-    auto transparent = test_material_type::transparent;
+    auto emission = proc_material_type::emission;
+    auto matte = proc_material_type::matte;
+    auto plastic = proc_material_type::plastic;
+    auto metal = proc_material_type::metal;
+    auto transparent = proc_material_type::transparent;
 
     auto gray = vec3f{0.2f, 0.2f, 0.2f};
     auto lgray = vec3f{0.5f, 0.5f, 0.5f};
@@ -10754,7 +10384,7 @@ unordered_map<string, test_material_params>& test_material_presets() {
     auto rough = 0.25f;
     auto sharp = 0.05f;
 
-    auto params = vector<test_material_params>();
+    auto params = std::vector<proc_material>();
 
     presets["matte_floor"] = make_test_materialt("matte_floor", matte, "grid");
 
@@ -10777,10 +10407,10 @@ unordered_map<string, test_material_params>& test_material_presets() {
         make_test_materialt("plastic_colored", plastic, "colored", rough);
     presets["plastic_blue_bumped"] =
         make_test_material("plastic_blue_bumped", plastic, blue, sharp);
-    presets["plastic_blue_bumped"].normal = "bumpn";
+    presets["plastic_blue_bumped"]->normal = "bumpn";
     presets["plastic_colored_bumped"] = make_test_materialt(
         "plastic_colored_bumped", plastic, "colored", rough);
-    presets["plastic_colored_bumped"].normal = "bumpn";
+    presets["plastic_colored_bumped"]->normal = "bumpn";
 
     presets["silver_sharp"] =
         make_test_material("silver_sharp", metal, lgray, sharp);
@@ -10793,102 +10423,106 @@ unordered_map<string, test_material_params>& test_material_presets() {
 
     presets["transparent_red"] =
         make_test_material("transparent_red", transparent, red);
-    presets["transparent_red"].opacity = 0.9f;
+    presets["transparent_red"]->opacity = 0.9f;
     presets["transparent_green"] =
         make_test_material("transparent_green", transparent, green);
-    presets["transparent_green"].opacity = 0.5f;
+    presets["transparent_green"]->opacity = 0.5f;
     presets["transparent_blue"] =
         make_test_material("transparent_blue", transparent, blue);
-    presets["transparent_blue"].opacity = 0.2f;
+    presets["transparent_blue"]->opacity = 0.2f;
 
     presets["pointlight"] = make_test_material("pointlight", emission, white);
-    presets["pointlight"].emission = 80;
+    presets["pointlight"]->emission = 80;
     presets["arealight"] = make_test_material("arealight", emission, white);
-    presets["arealight"].emission = 80;
+    presets["arealight"]->emission = 80;
 
     return presets;
 }
 
-unordered_map<string, test_shape_params>& test_shape_presets() {
-    static auto presets = unordered_map<string, test_shape_params>();
+std::unordered_map<std::string, proc_shape*>& proc_shape_presets() {
+    static auto presets = std::unordered_map<std::string, proc_shape*>();
     if (!presets.empty()) return presets;
 
-    auto make_test_shape = [](const string& name, test_shape_type type,
+    auto make_test_shape = [](const std::string& name, proc_shape_type type,
                                int tesselation = -1, int subdivision = 0,
                                bool faceted = false) {
-        auto params = test_shape_params();
-        params.name = name;
-        params.type = type;
-        params.tesselation = tesselation;
-        params.subdivision = subdivision;
-        params.faceted = faceted;
+        auto params = new proc_shape();
+        params->name = name;
+        params->type = type;
+        params->tesselation = tesselation;
+        params->subdivision = subdivision;
+        params->faceted = faceted;
         return params;
     };
 
-    presets["floor"] = make_test_shape("floor", test_shape_type::floor);
-    presets["quad"] = make_test_shape("quad", test_shape_type::quad);
-    presets["cube"] = make_test_shape("cube", test_shape_type::cube);
-    presets["sphere"] = make_test_shape("sphere", test_shape_type::sphere);
+    presets["floor"] = make_test_shape("floor", proc_shape_type::floor);
+    presets["quad"] = make_test_shape("quad", proc_shape_type::quad);
+    presets["cube"] = make_test_shape("cube", proc_shape_type::cube);
+    presets["sphere"] = make_test_shape("sphere", proc_shape_type::sphere);
     presets["spherecube"] =
-        make_test_shape("spherecube", test_shape_type::spherecube);
+        make_test_shape("spherecube", proc_shape_type::spherecube);
     presets["spherizedcube"] =
-        make_test_shape("spherizedcube", test_shape_type::spherizedcube);
+        make_test_shape("spherizedcube", proc_shape_type::spherizedcube);
     presets["flipcapsphere"] =
-        make_test_shape("flipcapsphere", test_shape_type::flipcapsphere);
+        make_test_shape("flipcapsphere", proc_shape_type::flipcapsphere);
     presets["geosphere"] =
-        make_test_shape("geosphere", test_shape_type::geosphere, 5);
+        make_test_shape("geosphere", proc_shape_type::geosphere, 5);
     presets["geospheref"] =
-        make_test_shape("geospheref", test_shape_type::geosphere, 5, 0, true);
+        make_test_shape("geospheref", proc_shape_type::geosphere, 5, 0, true);
     presets["geospherel"] =
-        make_test_shape("geospherel", test_shape_type::geosphere, 4, 0, true);
-    presets["cubep"] = make_test_shape("cubep", test_shape_type::cubep);
-    presets["cubes"] = make_test_shape("cubes", test_shape_type::cubep, 0, 4);
-    presets["suzanne"] = make_test_shape("suzanne", test_shape_type::suzanne);
+        make_test_shape("geospherel", proc_shape_type::geosphere, 4, 0, true);
+    presets["cubep"] = make_test_shape("cubep", proc_shape_type::cubep);
+    presets["cubes"] = make_test_shape("cubes", proc_shape_type::cubep, 0, 4);
+    presets["suzanne"] = make_test_shape("suzanne", proc_shape_type::suzanne);
     presets["suzannes"] =
-        make_test_shape("suzannes", test_shape_type::suzanne, 0, 2);
-    presets["cubefv"] = make_test_shape("cubefv", test_shape_type::fvcube);
+        make_test_shape("suzannes", proc_shape_type::suzanne, 0, 2);
+    presets["cubefv"] = make_test_shape("cubefv", proc_shape_type::fvcube);
     presets["cubefvs"] =
-        make_test_shape("cubefvs", test_shape_type::fvcube, 0, 4);
+        make_test_shape("cubefvs", proc_shape_type::fvcube, 0, 4);
     presets["spherefv"] =
-        make_test_shape("spherefv", test_shape_type::fvsphere);
-    presets["matball"] = make_test_shape("matball", test_shape_type::matball);
-    presets["matballi"] = make_test_shape("matballi", test_shape_type::sphere);
-    presets["matballi"].scale = 0.8f;
+        make_test_shape("spherefv", proc_shape_type::fvsphere);
+    presets["matball"] = make_test_shape("matball", proc_shape_type::matball);
+    presets["matballi"] = make_test_shape("matballi", proc_shape_type::sphere);
+    presets["matballi"]->scale = 0.8f;
     presets["pointscube"] =
-        make_test_shape("pointscube", test_shape_type::pointscube);
+        make_test_shape("pointscube", proc_shape_type::pointscube);
     presets["hairball1"] =
-        make_test_shape("hairball1", test_shape_type::hairball);
-    presets["hairball1"].hair_params.radius = {0.001f, 0.0001f};
-    presets["hairball1"].hair_params.length = {0.1f, 0.1f};
-    presets["hairball1"].hair_params.noise = {0.5f, 8};
+        make_test_shape("hairball1", proc_shape_type::hairball);
+    presets["hairball1"]->hair_params = new make_hair_params();
+    presets["hairball1"]->hair_params->radius = {0.001f, 0.0001f};
+    presets["hairball1"]->hair_params->length = {0.1f, 0.1f};
+    presets["hairball1"]->hair_params->noise = {0.5f, 8};
     presets["hairball2"] =
-        make_test_shape("hairball2", test_shape_type::hairball);
-    presets["hairball2"].hair_params.radius = {0.001f, 0.0001f};
-    presets["hairball2"].hair_params.length = {0.1f, 0.1f};
-    presets["hairball2"].hair_params.clump = {0.5f, 128};
+        make_test_shape("hairball2", proc_shape_type::hairball);
+    presets["hairball2"]->hair_params = new make_hair_params();
+    presets["hairball2"]->hair_params->radius = {0.001f, 0.0001f};
+    presets["hairball2"]->hair_params->length = {0.1f, 0.1f};
+    presets["hairball2"]->hair_params->clump = {0.5f, 128};
     presets["hairball3"] =
-        make_test_shape("hairball3", test_shape_type::hairball);
-    presets["hairball3"].hair_params.radius = {0.001f, 0.0001f};
-    presets["hairball3"].hair_params.length = {0.1f, 0.1f};
+        make_test_shape("hairball3", proc_shape_type::hairball);
+    presets["hairball3"]->hair_params = new make_hair_params();
+    presets["hairball3"]->hair_params->radius = {0.001f, 0.0001f};
+    presets["hairball3"]->hair_params->length = {0.1f, 0.1f};
     presets["hairballi"] =
-        make_test_shape("hairballi", test_shape_type::sphere);
-    presets["hairballi"].scale = 0.8f;
+        make_test_shape("hairballi", proc_shape_type::sphere);
+    presets["hairballi"]->scale = 0.8f;
     presets["beziercircle"] =
-        make_test_shape("beziercircle", test_shape_type::beziercircle);
-    presets["point"] = make_test_shape("point", test_shape_type::point);
+        make_test_shape("beziercircle", proc_shape_type::beziercircle);
+    presets["point"] = make_test_shape("point", proc_shape_type::point);
 
     return presets;
 }
 
-unordered_map<string, test_environment_params>& test_environment_presets() {
-    static auto presets = unordered_map<string, test_environment_params>();
+std::unordered_map<std::string, proc_environment*>& proc_environment_presets() {
+    static auto presets = std::unordered_map<std::string, proc_environment*>();
     if (!presets.empty()) return presets;
 
-    auto make_test_environment = [](const string& name, const string& texture) {
-        auto params = test_environment_params();
-        params.name = name;
-        params.color = {1, 1, 1};
-        params.texture = texture;
+    auto make_test_environment = [](const std::string& name,
+                                     const std::string& texture) {
+        auto params = new proc_environment();
+        params->name = name;
+        params->color = {1, 1, 1};
+        params->texture = texture;
         return params;
     };
 
@@ -10899,48 +10533,52 @@ unordered_map<string, test_environment_params>& test_environment_presets() {
     return presets;
 }
 
-unordered_map<string, test_animation_params>& test_animation_presets() {
-    static auto presets = unordered_map<string, test_animation_params>();
+std::unordered_map<std::string, proc_animation*>& proc_animation_presets() {
+    static auto presets = std::unordered_map<std::string, proc_animation*>();
     if (!presets.empty()) return presets;
 
-    auto make_test_animation =
-        [](const string& name, bool bezier, const vector<float>& times,
-            const vector<vec3f>& translation, const vector<quat4f>& rotation,
-            const vector<vec3f>& scaling) {
-            auto params = test_animation_params();
-            params.name = name;
-            params.speed = 1;
-            params.scale = 1;
-            params.bezier = bezier;
-            params.times = times;
-            params.translation = translation;
-            params.rotation = rotation;
-            params.scaling = scaling;
-            return params;
-        };
+    auto make_test_animation = [](const std::string& name, bool bezier,
+                                   const std::vector<float>& times,
+                                   const std::vector<vec3f>& translation,
+                                   const std::vector<quat4f>& rotation,
+                                   const std::vector<vec3f>& scaling) {
+        auto params = new proc_animation();
+        params->name = name;
+        params->speed = 1;
+        params->scale = 1;
+        params->bezier = bezier;
+        params->times = times;
+        params->translation = translation;
+        params->rotation = rotation;
+        params->scaling = scaling;
+        return params;
+    };
 
     presets["bounce"] = make_test_animation(
         "bounce", false, {0, 1, 2}, {{0, 0, 0}, {0, 1, 0}, {0, 0, 0}}, {}, {});
     presets["scale"] = make_test_animation("scale", false, {0, 1, 2}, {}, {},
         {{1, 1, 1}, {0.1f, 0.1f, 0.1f}, {1, 1, 1}});
     presets["rotation"] = make_test_animation("rotation", false, {0, 1, 2}, {},
-        {{{0, 1, 0}, 0}, {{0, 1, 0}, pif}, {{0, 1, 0}, 0}}, {});
+        {rotation_quat<float>({0, 1, 0}, 0),
+            rotation_quat<float>({0, 1, 0}, pif),
+            rotation_quat<float>({0, 1, 0}, 0)},
+        {});
 
     return presets;
 }
 
-unordered_map<string, test_camera_params>& test_camera_presets() {
-    static auto presets = unordered_map<string, test_camera_params>();
+std::unordered_map<std::string, proc_camera*>& proc_camera_presets() {
+    static auto presets = std::unordered_map<std::string, proc_camera*>();
     if (!presets.empty()) return presets;
 
-    auto make_test_camera = [](const string& name, const vec3f& from,
+    auto make_test_camera = [](const std::string& name, const vec3f& from,
                                 const vec3f& to, float yfov, float aspect) {
-        auto params = test_camera_params();
-        params.name = name;
-        params.from = from;
-        params.to = to;
-        params.yfov = yfov;
-        params.aspect = aspect;
+        auto params = new proc_camera();
+        params->name = name;
+        params->from = from;
+        params->to = to;
+        params->yfov = yfov;
+        params->aspect = aspect;
         return params;
     };
 
@@ -10954,73 +10592,98 @@ unordered_map<string, test_camera_params>& test_camera_presets() {
     return presets;
 }
 
-unordered_map<string, test_scene_params>& test_scene_presets() {
-    static auto presets = unordered_map<string, test_scene_params>();
+std::unordered_map<std::string, proc_scene*>& proc_scene_presets() {
+    static auto presets = std::unordered_map<std::string, proc_scene*>();
     if (!presets.empty()) return presets;
 
-    auto make_test_scene = [](const string& name) {
-        auto params = test_scene_params();
-        params.name = name;
+    auto make_test_scene = [](const std::string& name) {
+        auto params = new proc_scene();
+        params->name = name;
         return params;
     };
-    auto make_test_instance = [](const string& name, const string& shape,
+    auto make_test_instance = [](const std::string& name,
+                                  const std::string& shape,
                                   const vec3f& pos = {0, 0, 0}) {
-        auto params = test_instance_params();
-        params.name = name;
-        params.shape = shape;
-        params.frame.o = pos;
+        auto params = new proc_instance();
+        params->name = name;
+        params->shape = shape;
+        params->frame.o = pos;
         return params;
+    };
+    auto make_texture_preset = [](const std::string& name) {
+        return new proc_texture(*proc_texture_presets().at(name));
+    };
+    auto make_shape_preset = [](const std::string& name) {
+        auto npshp = new proc_shape(*proc_shape_presets().at(name));
+        if (npshp->hair_params)
+            npshp->hair_params = new make_hair_params(*npshp->hair_params);
+        return npshp;
+    };
+    auto make_environment_preset = [](const std::string& name) {
+        return new proc_environment(*proc_environment_presets().at(name));
+    };
+    auto make_camera_preset = [](const std::string& name) {
+        return new proc_camera(*proc_camera_presets().at(name));
+    };
+    auto make_material_preset = [](const std::string& name) {
+        return new proc_material(*proc_material_presets().at(name));
+    };
+    auto make_animation_preset = [](const std::string& name) {
+        return new proc_animation(*proc_animation_presets().at(name));
     };
 
     // textures
     presets["textures"] = make_test_scene("textures");
-    for (auto& txt_kv : test_texture_presets())
-        presets["textures"].textures.push_back(txt_kv.second);
+    for (auto& txt_kv : proc_texture_presets())
+        presets["textures"]->textures.push_back(
+            make_texture_preset(txt_kv.first));
 
     // shapes
     presets["shapes"] = make_test_scene("shapes");
-    for (auto& shp_kv : test_shape_presets())
-        presets["shapes"].shapes.push_back(shp_kv.second);
+    for (auto& shp_kv : proc_shape_presets())
+        presets["shapes"]->shapes.push_back(make_shape_preset(shp_kv.first));
 
     // envmap
     presets["environments"] = make_test_scene("envmaps");
-    for (auto& env_kv : test_environment_presets())
-        presets["environments"].environments.push_back(env_kv.second);
+    for (auto& env_kv : proc_environment_presets())
+        presets["environments"]->environments.push_back(
+            make_environment_preset(env_kv.first));
 
     // simple scenes shared functions
-    auto make_simple_scene = [&](const string& name,
-                                 const vector<string>& shapes,
-                                 const vector<string>& mats,
-                                 const string& lights, bool nodes = false,
-                                 const vector<string>& animations = {}) {
-        auto pos = vector<vec3f>{{-2.50f, 1, 0}, {0, 1, 0}, {+2.50f, 1, 0}};
+    auto make_simple_scene = [&](const std::string& name,
+                                 const std::vector<std::string>& shapes,
+                                 const std::vector<std::string>& mats,
+                                 const std::string& lights, bool nodes = false,
+                                 const std::vector<std::string>& animations =
+                                     {}) {
+        auto pos =
+            std::vector<vec3f>{{-2.50f, 1, 0}, {0, 1, 0}, {+2.50f, 1, 0}};
         auto params = make_test_scene(name);
-        params.cameras.push_back(test_camera_presets().at("cam3"));
-        params.materials.push_back(test_material_presets().at("matte_floor"));
-        if (params.materials.back().texture != "")
-            params.textures.push_back(
-                test_texture_presets().at(params.materials.back().texture));
-        params.shapes.push_back(test_shape_presets().at("floor"));
-        params.shapes.back().material = params.materials.back().name;
-        params.instances.push_back(
+        params->cameras.push_back(make_camera_preset("cam3"));
+        params->materials.push_back(make_material_preset("matte_floor"));
+        if (params->materials.back()->texture != "")
+            params->textures.push_back(
+                make_texture_preset(params->materials.back()->texture));
+        params->shapes.push_back(make_shape_preset("floor"));
+        params->shapes.back()->material = params->materials.back()->name;
+        params->instances.push_back(
             make_test_instance("floor", "floor", {0, 0, 0}));
         for (auto i = 0; i < shapes.size(); i++) {
-            auto name = "obj" + to_string(i + 1);
-            params.materials.push_back(test_material_presets().at(mats[i]));
-            params.shapes.push_back(test_shape_presets().at(shapes[i]));
-            params.shapes.back().name = name;
-            params.shapes.back().material = mats[i];
-            if (params.shapes.back().type == test_shape_type::hairball ||
-                params.shapes.back().type == test_shape_type::matball) {
-                params.materials.push_back(
-                    test_material_presets().at("matte_gray"));
-                params.shapes.back().interior = "matte_gray";
+            auto name = "obj" + std::to_string(i + 1);
+            params->materials.push_back(make_material_preset(mats[i]));
+            params->shapes.push_back(make_shape_preset(shapes[i]));
+            params->shapes.back()->name = name;
+            params->shapes.back()->material = mats[i];
+            if (params->shapes.back()->type == proc_shape_type::hairball ||
+                params->shapes.back()->type == proc_shape_type::matball) {
+                params->materials.push_back(make_material_preset("matte_gray"));
+                params->shapes.back()->interior = "matte_gray";
             }
-            params.instances.push_back(make_test_instance(name, name, pos[i]));
+            params->instances.push_back(make_test_instance(name, name, pos[i]));
             if (!animations.empty()) {
-                params.animations.push_back(
-                    test_animation_presets().at(animations[i]));
-                params.animations.back().nodes.push_back(name);
+                params->animations.push_back(
+                    make_animation_preset(animations[i]));
+                params->animations.back()->nodes.push_back(name);
             }
         }
         if (lights == "pointlights" || lights == "arealights" ||
@@ -11028,7 +10691,7 @@ unordered_map<string, test_scene_params>& test_scene_presets() {
             auto emission = 120;
             auto shp = "point";
             auto mat = "pointlight";
-            auto pos = vector<vec3f>{{-2, 10, 8}, {+2, 10, 8}};
+            auto pos = std::vector<vec3f>{{-2, 10, 8}, {+2, 10, 8}};
             auto scale = 1.0f;
             if (lights == "arealights") {
                 emission = 8;
@@ -11045,49 +10708,48 @@ unordered_map<string, test_scene_params>& test_scene_presets() {
                 scale = 2;
             }
             for (auto i = 0; i < 2; i++) {
-                auto name = "light" + to_string(i + 1);
-                params.materials.push_back(test_material_presets().at(mat));
-                params.materials.back().name = name;
-                params.materials.back().emission = emission;
-                params.shapes.push_back(test_shape_presets().at(shp));
-                params.shapes.back().name = name;
-                params.shapes.back().material = name;
-                params.shapes.back().scale = scale;
-                params.instances.push_back(
+                auto name = "light" + std::to_string(i + 1);
+                params->materials.push_back(make_material_preset(mat));
+                params->materials.back()->name = name;
+                params->materials.back()->emission = emission;
+                params->shapes.push_back(make_shape_preset(shp));
+                params->shapes.back()->name = name;
+                params->shapes.back()->material = name;
+                params->shapes.back()->scale = scale;
+                params->instances.push_back(
                     make_test_instance(name, name, pos[i]));
                 if (lights == "arealights" || lights == "arealights1")
-                    params.instances.back().frame =
-                        lookat_frame3(pos[i], {0, 1, 0}, {0, 0, 1}, true);
+                    params->instances.back()->frame =
+                        lookat_frame(pos[i], {0, 1, 0}, {0, 0, 1}, true);
             }
         }
         if (lights == "envlights") {
-            params.environments.push_back(
-                test_environment_presets().at("sky1"));
-            params.environments.back().frame =
-                lookat_frame3(pos[1], pos[1] + vec3f{0, 0, 1}, {0, 1, 0}, true);
-            params.textures.push_back(test_texture_presets().at("sky1"));
+            params->environments.push_back(make_environment_preset("sky1"));
+            params->environments.back()->frame =
+                lookat_frame(pos[1], pos[1] + vec3f{0, 0, 1}, {0, 1, 0}, true);
+            params->textures.push_back(make_texture_preset("sky1"));
         }
         if (!animations.empty() || nodes) {
-            for (auto& cam : params.cameras) {
-                auto nde = test_node_params();
-                nde.name = cam.name;
-                nde.frame = lookat_frame3(cam.from, cam.to, vec3f{0, 1, 0});
-                nde.camera = cam.name;
-                params.nodes.push_back(nde);
+            for (auto cam : params->cameras) {
+                auto nde = new proc_node();
+                nde->name = cam->name;
+                nde->frame = lookat_frame(cam->from, cam->to, vec3f{0, 1, 0});
+                nde->camera = cam->name;
+                params->nodes.push_back(nde);
             }
-            for (auto& ist : params.instances) {
-                auto nde = test_node_params();
-                nde.name = ist.name;
-                nde.frame = ist.frame;
-                nde.instance = ist.name;
-                params.nodes.push_back(nde);
+            for (auto ist : params->instances) {
+                auto nde = new proc_node();
+                nde->name = ist->name;
+                nde->frame = ist->frame;
+                nde->instance = ist->name;
+                params->nodes.push_back(nde);
             }
-            for (auto& env : params.environments) {
-                auto nde = test_node_params();
-                nde.name = env.name;
-                nde.frame = env.frame;
-                nde.environment = env.name;
-                params.nodes.push_back(nde);
+            for (auto env : params->environments) {
+                auto nde = new proc_node();
+                nde->name = env->name;
+                nde->frame = env->frame;
+                nde->environment = env->name;
+                params->nodes.push_back(nde);
             }
         }
         return params;
@@ -11176,28 +10838,28 @@ unordered_map<string, test_scene_params>& test_scene_presets() {
         "pointlights", true, {"bounce", "scale", "rotation"});
 
     // instances shared functions
-    auto make_random_scene = [&](const string& name, const vec2i& num,
+    auto make_random_scene = [&](const std::string& name, const vec2i& num,
                                  const bbox2f& bbox, uint32_t seed = 13) {
         auto rscale = 0.9f * 0.25f *
                       min((bbox.max.x - bbox.min.x) / num.x,
                           (bbox.max.x - bbox.min.x) / num.y);
 
         auto params = make_test_scene(name);
-        params.cameras.push_back(test_camera_presets().at("cam3"));
-        params.materials.push_back(test_material_presets().at("matte_floor"));
-        params.shapes.push_back(test_shape_presets().at("floor"));
-        params.instances.push_back(
+        params->cameras.push_back(proc_camera_presets().at("cam3"));
+        params->materials.push_back(proc_material_presets().at("matte_floor"));
+        params->shapes.push_back(make_shape_preset("floor"));
+        params->instances.push_back(
             make_test_instance("floor", "floor", {0, 0, 0}));
-        auto shapes = vector<string>();
+        auto shapes = std::vector<std::string>();
         for (auto mat : {"plastic_red", "plastic_green", "plastic_blue"})
-            params.materials.push_back(test_material_presets().at(mat));
+            params->materials.push_back(make_material_preset(mat));
         for (auto shp : {"sphere", "flipcapsphere", "cube"}) {
             for (auto mat : {"plastic_red", "plastic_green", "plastic_blue"}) {
-                params.shapes.push_back(test_shape_presets().at(shp));
-                params.shapes.back().name += "_"s + mat;
-                params.shapes.back().material = mat;
-                params.shapes.back().scale *= rscale;
-                shapes.push_back(params.shapes.back().name);
+                params->shapes.push_back(make_shape_preset(shp));
+                params->shapes.back()->name += "_"s + mat;
+                params->shapes.back()->material = mat;
+                params->shapes.back()->scale *= rscale;
+                shapes.push_back(params->shapes.back()->name);
             }
         }
 
@@ -11213,23 +10875,22 @@ unordered_map<string, test_scene_params>& test_scene_presets() {
                     bbox.min.y + (bbox.max.y - bbox.min.y) *
                                      (j + 0.45f + 0.1f * rpos.y) / num.y,
                 };
-                params.instances.push_back(
-                    make_test_instance("instance" + to_string(count++),
+                params->instances.push_back(
+                    make_test_instance("instance" + std::to_string(count++),
                         shapes[next_rand1i(rng, (int)shapes.size())], pos));
             }
         }
 
-        auto pos = vector<vec3f>{{-2, 10, 8}, {+2, 10, 8}};
+        auto pos = std::vector<vec3f>{{-2, 10, 8}, {+2, 10, 8}};
         for (auto i = 0; i < 2; i++) {
-            auto name = "light" + to_string(i + 1);
-            params.materials.push_back(
-                test_material_presets().at("pointlight"));
-            params.materials.back().name = name;
-            params.materials.back().emission = 80;
-            params.shapes.push_back(test_shape_presets().at("point"));
-            params.shapes.back().name = name;
-            params.shapes.back().material = name;
-            params.instances.push_back(make_test_instance(name, name, pos[i]));
+            auto name = "light" + std::to_string(i + 1);
+            params->materials.push_back(make_material_preset("pointlight"));
+            params->materials.back()->name = name;
+            params->materials.back()->emission = 80;
+            params->shapes.push_back(make_shape_preset("point"));
+            params->shapes.back()->name = name;
+            params->shapes.back()->material = name;
+            params->instances.push_back(make_test_instance(name, name, pos[i]));
         }
 
         return params;
@@ -11243,7 +10904,7 @@ unordered_map<string, test_scene_params>& test_scene_presets() {
 
 #if 0
         else if (otype == "normdisp") {
-            auto mat = vector<material*>{
+            auto mat = std::vector<material*>{
                 add_test_material(scn, test_material_type::plastic_bumped),
                 add_test_material(scn, test_material_type::plastic_bumped)};
             add_test_instance(scn, "obj01",
@@ -11254,16 +10915,16 @@ unordered_map<string, test_scene_params>& test_scene_presets() {
 #endif
 
     // add missing textures
-    for (auto& kv : presets) {
-        auto& preset = kv.second;
-        auto used = unordered_set<string>();
-        for (auto& mat : preset.materials) used.insert(mat.texture);
-        for (auto& mat : preset.materials) used.insert(mat.normal);
-        for (auto& env : preset.environments) used.insert(env.texture);
+    for (auto kv : presets) {
+        auto preset = kv.second;
+        auto used = std::unordered_set<std::string>();
+        for (auto mat : preset->materials) used.insert(mat->texture);
+        for (auto mat : preset->materials) used.insert(mat->normal);
+        for (auto env : preset->environments) used.insert(env->texture);
         used.erase("");
-        for (auto& txt : preset.textures) used.erase(txt.name);
-        for (auto& txt : used)
-            preset.textures.push_back(test_texture_presets().at(txt));
+        for (auto txt : preset->textures) used.erase(txt->name);
+        for (auto txt : used)
+            preset->textures.push_back(make_texture_preset(txt));
     }
 
     // remove duplicates
@@ -11273,8 +10934,8 @@ unordered_map<string, test_scene_params>& test_scene_presets() {
 }
 
 // Parses a test_camera object
-void serialize(test_camera_params& val, json& js, bool reading) {
-    static auto def = test_camera_params();
+void serialize(proc_camera& val, json& js, bool reading) {
+    static auto def = proc_camera();
     serialize_obj(js, reading);
     serialize_attr(val.name, js, "name", reading);
     serialize_attr(val.from, js, "from", reading);
@@ -11284,13 +10945,13 @@ void serialize(test_camera_params& val, json& js, bool reading) {
 }
 
 // Parses a test_camera object
-void serialize(test_texture_type& val, json& js, bool reading) {
-    serialize(val, js, reading, test_texture_names());
+void serialize(proc_texture_type& val, json& js, bool reading) {
+    serialize(val, js, reading, enum_names(val));
 }
 
 // Parses a test_camera object
-void serialize(test_texture_params& val, json& js, bool reading) {
-    static auto def = test_texture_params();
+void serialize(proc_texture& val, json& js, bool reading) {
+    static auto def = proc_texture();
     serialize_obj(js, reading);
     serialize_attr(val.name, js, "name", reading);
     serialize_attr(val.type, js, "type", reading);
@@ -11308,13 +10969,13 @@ void serialize(test_texture_params& val, json& js, bool reading) {
 }
 
 // Parses a test_camera object
-void serialize(test_material_type& val, json& js, bool reading) {
-    serialize(val, js, reading, test_material_names());
+void serialize(proc_material_type& val, json& js, bool reading) {
+    serialize(val, js, reading, enum_names(val));
 }
 
 // Parses a test_camera object
-void serialize(test_material_params& val, json& js, bool reading) {
-    static auto def = test_material_params();
+void serialize(proc_material& val, json& js, bool reading) {
+    static auto def = proc_material();
     serialize_obj(js, reading);
     serialize_attr(val.name, js, "name", reading);
     serialize_attr(val.type, js, "type", reading);
@@ -11328,13 +10989,13 @@ void serialize(test_material_params& val, json& js, bool reading) {
 }
 
 // Parses a test_camera object
-void serialize(test_shape_type& val, json& js, bool reading) {
-    serialize(val, js, reading, test_shape_names());
+void serialize(proc_shape_type& val, json& js, bool reading) {
+    serialize(val, js, reading, enum_names(val));
 }
 
 // Parses a test_camera object
-void serialize(test_shape_params& val, json& js, bool reading) {
-    static auto def = test_shape_params();
+void serialize(proc_shape& val, json& js, bool reading) {
+    static auto def = proc_shape();
     serialize_obj(js, reading);
     serialize_attr(val.name, js, "name", reading);
     serialize_attr(val.type, js, "type", reading);
@@ -11351,8 +11012,8 @@ void serialize(test_shape_params& val, json& js, bool reading) {
 }
 
 // Parses a test_camera object
-void serialize(test_instance_params& val, json& js, bool reading) {
-    static auto def = test_instance_params();
+void serialize(proc_instance& val, json& js, bool reading) {
+    static auto def = proc_instance();
     serialize_obj(js, reading);
     serialize_attr(val.name, js, "name", reading);
     serialize_attr(val.shape, js, "shape", reading);
@@ -11361,8 +11022,8 @@ void serialize(test_instance_params& val, json& js, bool reading) {
 }
 
 // Parses a test_camera object
-void serialize(test_environment_params& val, json& js, bool reading) {
-    static auto def = test_environment_params();
+void serialize(proc_environment& val, json& js, bool reading) {
+    static auto def = proc_environment();
     serialize_obj(js, reading);
     serialize_attr(val.name, js, "name", reading);
     serialize_attr(val.emission, js, "emission", reading, false, def.emission);
@@ -11373,8 +11034,8 @@ void serialize(test_environment_params& val, json& js, bool reading) {
 }
 
 // Parses a test_camera object
-void serialize(test_scene_params& val, json& js, bool reading) {
-    static auto def = test_scene_params();
+void serialize(proc_scene& val, json& js, bool reading) {
+    static auto def = proc_scene();
     serialize_obj(js, reading);
     serialize_attr(val.name, js, "name", reading, false, def.name);
     serialize_attr(val.cameras, js, "cameras", reading, false, def.cameras);
@@ -11387,24 +11048,25 @@ void serialize(test_scene_params& val, json& js, bool reading) {
 }
 
 // Load test scene
-test_scene_params load_test_scene(const string& filename) {
+proc_scene* load_proc_scene(const std::string& filename) {
     // load json
     std::ifstream stream(filename.c_str());
-    if (!stream) throw runtime_error("could not load json " + filename);
+    if (!stream) throw std::runtime_error("could not load json " + filename);
     auto js = json();
     try {
         stream >> js;
-    } catch (const exception& e) {
-        throw runtime_error(
-            string("could not load json with error ") + e.what());
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            std::string("could not load json with error ") + e.what());
     }
 
     // clear data
-    auto scn = test_scene_params();
+    auto scn = new proc_scene();
     try {
         serialize(scn, js, true);
-    } catch (const exception& e) {
-        throw runtime_error("error parsing test scene " + string(e.what()));
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            "error parsing test scene " + std::string(e.what()));
     }
 
     // done
@@ -11412,9 +11074,9 @@ test_scene_params load_test_scene(const string& filename) {
 }
 
 // Save test scene
-void save_test_scene(const string& filename, const test_scene_params& scn) {
+void save_proc_scene(const std::string& filename, const proc_scene* scn) {
     auto js = json();
-    serialize((test_scene_params&)scn, js, false);
+    serialize((proc_scene&)*scn, js, false);
     save_text(filename, js.dump(2));
 }
 
@@ -11494,20 +11156,6 @@ void gl_enable_wireframe(bool enabled) {
     assert(gl_check_error());
 }
 
-// Enable/disable edges. Attempts to avoid z-fighting but the method is not
-// robust.
-void gl_enable_edges(bool enabled, float tolerance) {
-    assert(gl_check_error());
-    if (enabled) {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glDepthRange(0, tolerance);
-    } else {
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glDepthRange(0, 1);
-    }
-    assert(gl_check_error());
-}
-
 // Enable/disable blending
 void gl_enable_blending(bool enabled) {
     assert(gl_check_error());
@@ -11565,17 +11213,17 @@ namespace ygl {
 // Implementation of update_texture.
 void _update_texture(gl_texture& txt, int w, int h, int nc, const void* pixels,
     bool floats, bool linear, bool mipmap, bool as_float, bool as_srgb) {
-    auto refresh = !txt._tid || txt._width != w || txt._height != h ||
-                   txt._ncomp != nc || txt._float != as_float ||
-                   txt._srgb != as_srgb || txt._mipmap != mipmap ||
-                   txt._linear != linear;
-    txt._width = w;
-    txt._height = h;
-    txt._ncomp = nc;
-    txt._float = as_float;
-    txt._srgb = as_srgb;
-    txt._mipmap = mipmap;
-    txt._linear = linear;
+    auto refresh = !txt.tid || txt.width != w || txt.height != h ||
+                   txt.ncomp != nc || txt.as_float != as_float ||
+                   txt.as_srgb != as_srgb || txt.mipmap != mipmap ||
+                   txt.linear != linear;
+    txt.width = w;
+    txt.height = h;
+    txt.ncomp = nc;
+    txt.as_float = as_float;
+    txt.as_srgb = as_srgb;
+    txt.mipmap = mipmap;
+    txt.linear = linear;
     assert(!as_srgb || !as_float);
     assert(gl_check_error());
     if (w * h) {
@@ -11585,8 +11233,8 @@ void _update_texture(gl_texture& txt, int w, int h, int nc, const void* pixels,
         int* formats =
             (as_float) ? formats_f : ((as_srgb) ? formats_sub : formats_ub);
         assert(gl_check_error());
-        if (!txt._tid) glGenTextures(1, &txt._tid);
-        glBindTexture(GL_TEXTURE_2D, txt._tid);
+        if (!txt.tid) glGenTextures(1, &txt.tid);
+        glBindTexture(GL_TEXTURE_2D, txt.tid);
         if (refresh) {
             glTexImage2D(GL_TEXTURE_2D, 0, formats[nc - 1], w, h, 0,
                 formats_ub[nc - 1], (floats) ? GL_FLOAT : GL_UNSIGNED_BYTE,
@@ -11607,10 +11255,10 @@ void _update_texture(gl_texture& txt, int w, int h, int nc, const void* pixels,
         }
         glBindTexture(GL_TEXTURE_2D, 0);
     } else {
-        if (txt._tid) {
-            glBindTexture(GL_TEXTURE_2D, txt._tid);
-            glDeleteTextures(1, &txt._tid);
-            txt._tid = 0;
+        if (txt.tid) {
+            glBindTexture(GL_TEXTURE_2D, txt.tid);
+            glDeleteTextures(1, &txt.tid);
+            txt.tid = 0;
             glBindTexture(GL_TEXTURE_2D, 0);
         }
     }
@@ -11620,7 +11268,7 @@ void _update_texture(gl_texture& txt, int w, int h, int nc, const void* pixels,
 // Binds a texture to a texture unit
 void bind_texture(const gl_texture& txt, uint unit) {
     glActiveTexture(GL_TEXTURE0 + unit);
-    glBindTexture(GL_TEXTURE_2D, txt._tid);
+    glBindTexture(GL_TEXTURE_2D, txt.tid);
 }
 
 // Unbinds
@@ -11632,8 +11280,8 @@ void unbind_texture(const gl_texture& txt, uint unit) {
 // Destroys the texture tid.
 void clear_texture(gl_texture& txt) {
     assert(gl_check_error());
-    glDeleteTextures(1, &txt._tid);
-    txt._tid = 0;
+    glDeleteTextures(1, &txt.tid);
+    txt.tid = 0;
     assert(gl_check_error());
 }
 
@@ -11648,31 +11296,31 @@ namespace ygl {
 void _update_vertex_buffer(gl_vertex_buffer& buf, int n, int nc,
     const void* values, bool as_float, bool dynamic) {
     auto resize =
-        !buf._bid || n * nc != buf._num * buf._ncomp || as_float != buf._float;
-    buf._num = n;
-    buf._ncomp = nc;
-    buf._float = as_float;
+        !buf.bid || n * nc != buf.num * buf.ncomp || as_float != buf.as_float;
+    buf.num = n;
+    buf.ncomp = nc;
+    buf.as_float = as_float;
     assert(gl_check_error());
     if (n) {
-        if (!buf._bid) glGenBuffers(1, &buf._bid);
-        glBindBuffer(GL_ARRAY_BUFFER, buf._bid);
+        if (!buf.bid) glGenBuffers(1, &buf.bid);
+        glBindBuffer(GL_ARRAY_BUFFER, buf.bid);
         if (resize) {
             glBufferData(GL_ARRAY_BUFFER,
-                buf._num * buf._ncomp *
+                buf.num * buf.ncomp *
                     ((as_float) ? sizeof(float) : sizeof(int)),
                 values, (dynamic) ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
         } else {
             glBufferSubData(GL_ARRAY_BUFFER, 0,
-                buf._num * buf._ncomp *
+                buf.num * buf.ncomp *
                     ((as_float) ? sizeof(float) : sizeof(int)),
                 values);
         }
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     } else {
-        if (buf._bid) {
-            glBindBuffer(GL_ARRAY_BUFFER, buf._bid);
-            glDeleteBuffers(1, &buf._bid);
-            buf._bid = 0;
+        if (buf.bid) {
+            glBindBuffer(GL_ARRAY_BUFFER, buf.bid);
+            glDeleteBuffers(1, &buf.bid);
+            buf.bid = 0;
             glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
     }
@@ -11682,8 +11330,8 @@ void _update_vertex_buffer(gl_vertex_buffer& buf, int n, int nc,
 // Bind the buffer at a particular attribute location
 void bind_vertex_buffer(const gl_vertex_buffer& buf, uint vattr) {
     glEnableVertexAttribArray(vattr);
-    glBindBuffer(GL_ARRAY_BUFFER, buf._bid);
-    glVertexAttribPointer(vattr, buf._ncomp, GL_FLOAT, false, 0, 0);
+    glBindBuffer(GL_ARRAY_BUFFER, buf.bid);
+    glVertexAttribPointer(vattr, buf.ncomp, GL_FLOAT, false, 0, 0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
@@ -11698,8 +11346,8 @@ void unbind_vertex_buffer(uint vattr) { glDisableVertexAttribArray(vattr); }
 // Destroys the buffer
 void clear_vertex_buffer(gl_vertex_buffer& buf) {
     assert(gl_check_error());
-    glDeleteBuffers(1, &buf._bid);
-    buf._bid = 0;
+    glDeleteBuffers(1, &buf.bid);
+    buf.bid = 0;
     assert(gl_check_error());
 }
 
@@ -11713,27 +11361,27 @@ namespace ygl {
 // Updates the buffer bid with new data.
 void _update_element_buffer(
     gl_element_buffer& buf, int n, int nc, const int* values, bool dynamic) {
-    auto resize = !buf._bid || n * nc != buf._num * buf._ncomp;
-    buf._num = n;
-    buf._ncomp = nc;
+    auto resize = !buf.bid || n * nc != buf.num * buf.ncomp;
+    buf.num = n;
+    buf.ncomp = nc;
     assert(gl_check_error());
     if (n) {
-        if (!buf._bid) glGenBuffers(1, &buf._bid);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf._bid);
+        if (!buf.bid) glGenBuffers(1, &buf.bid);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf.bid);
         if (resize) {
             glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                buf._num * buf._ncomp * sizeof(int), values,
+                buf.num * buf.ncomp * sizeof(int), values,
                 (dynamic) ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
         } else {
             glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0,
-                buf._num * buf._ncomp * sizeof(int), values);
+                buf.num * buf.ncomp * sizeof(int), values);
         }
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     } else {
-        if (buf._bid) {
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf._bid);
-            glDeleteBuffers(1, &buf._bid);
-            buf._bid = 0;
+        if (buf.bid) {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf.bid);
+            glDeleteBuffers(1, &buf.bid);
+            buf.bid = 0;
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
         }
     }
@@ -11742,18 +11390,18 @@ void _update_element_buffer(
 
 // Draws elements.
 void draw_elems(const gl_element_buffer& buf) {
-    if (!buf._bid) return;
+    if (!buf.bid) return;
     assert(gl_check_error());
     int mode = 0;
-    switch (buf._ncomp) {
+    switch (buf.ncomp) {
         case 1: mode = GL_POINTS; break;
         case 2: mode = GL_LINES; break;
         case 3: mode = GL_TRIANGLES; break;
         case 4: mode = GL_QUADS; break;
         default: assert(false);
     };
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf._bid);
-    glDrawElements(mode, buf._ncomp * buf._num, GL_UNSIGNED_INT, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf.bid);
+    glDrawElements(mode, buf.ncomp * buf.num, GL_UNSIGNED_INT, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     assert(gl_check_error());
 }
@@ -11761,8 +11409,8 @@ void draw_elems(const gl_element_buffer& buf) {
 // Destroys the buffer
 void clear_element_buffer(gl_element_buffer& buf) {
     assert(gl_check_error());
-    glDeleteBuffers(1, &buf._bid);
-    buf._bid = 0;
+    glDeleteBuffers(1, &buf.bid);
+    buf.bid = 0;
     assert(gl_check_error());
 }
 
@@ -11774,58 +11422,63 @@ void clear_element_buffer(gl_element_buffer& buf) {
 namespace ygl {
 
 // Creates and OpenGL program from vertex and fragment code. Returns the
-// program id. Optionally return vertex and fragment shader ids. A VAO is
-// created.
-gl_program make_program(const string& vertex, const string& fragment) {
+// program id. Optionally return vertex and fragment shader ids. A VAO
+// is created.
+gl_program make_program(
+    const std::string& vertex, const std::string& fragment) {
     auto prog = gl_program();
 
     assert(gl_check_error());
-    glGenVertexArrays(1, &prog._vao);
-    glBindVertexArray(prog._vao);
+    glGenVertexArrays(1, &prog.vao);
+    glBindVertexArray(prog.vao);
     assert(gl_check_error());
 
     int errflags;
     char errbuf[10000];
 
     // create vertex
-    prog._vid = glCreateShader(GL_VERTEX_SHADER);
+    prog.vid = glCreateShader(GL_VERTEX_SHADER);
     const char* vertex_str = vertex.c_str();
-    glShaderSource(prog._vid, 1, &vertex_str, NULL);
-    glCompileShader(prog._vid);
-    glGetShaderiv(prog._vid, GL_COMPILE_STATUS, &errflags);
+    glShaderSource(prog.vid, 1, &vertex_str, NULL);
+    glCompileShader(prog.vid);
+    glGetShaderiv(prog.vid, GL_COMPILE_STATUS, &errflags);
     if (!errflags) {
-        glGetShaderInfoLog(prog._vid, 10000, 0, errbuf);
-        throw runtime_error(string("shader not compiled\n\n") + errbuf);
+        glGetShaderInfoLog(prog.vid, 10000, 0, errbuf);
+        throw std::runtime_error(
+            std::string("shader not compiled\n\n") + errbuf);
     }
     assert(glGetError() == GL_NO_ERROR);
 
     // create fragment
-    prog._fid = glCreateShader(GL_FRAGMENT_SHADER);
+    prog.fid = glCreateShader(GL_FRAGMENT_SHADER);
     const char* fragment_str = fragment.c_str();
-    glShaderSource(prog._fid, 1, &fragment_str, NULL);
-    glCompileShader(prog._fid);
-    glGetShaderiv(prog._fid, GL_COMPILE_STATUS, &errflags);
+    glShaderSource(prog.fid, 1, &fragment_str, NULL);
+    glCompileShader(prog.fid);
+    glGetShaderiv(prog.fid, GL_COMPILE_STATUS, &errflags);
     if (!errflags) {
-        glGetShaderInfoLog(prog._fid, 10000, 0, errbuf);
-        throw runtime_error(string("shader not compiled\n\n") + errbuf);
+        glGetShaderInfoLog(prog.fid, 10000, 0, errbuf);
+        throw std::runtime_error(
+            std::string("shader not compiled\n\n") + errbuf);
     }
     assert(glGetError() == GL_NO_ERROR);
 
     // create program
-    prog._pid = glCreateProgram();
-    glAttachShader(prog._pid, prog._vid);
-    glAttachShader(prog._pid, prog._fid);
-    glLinkProgram(prog._pid);
-    glValidateProgram(prog._pid);
-    glGetProgramiv(prog._pid, GL_LINK_STATUS, &errflags);
+    prog.pid = glCreateProgram();
+    glAttachShader(prog.pid, prog.vid);
+    glAttachShader(prog.pid, prog.fid);
+    glLinkProgram(prog.pid);
+    glValidateProgram(prog.pid);
+    glGetProgramiv(prog.pid, GL_LINK_STATUS, &errflags);
     if (!errflags) {
-        glGetProgramInfoLog(prog._pid, 10000, 0, errbuf);
-        throw runtime_error(string("program not linked\n\n") + errbuf);
+        glGetProgramInfoLog(prog.pid, 10000, 0, errbuf);
+        throw std::runtime_error(
+            std::string("program not linked\n\n") + errbuf);
     }
-    glGetProgramiv(prog._pid, GL_VALIDATE_STATUS, &errflags);
+    glGetProgramiv(prog.pid, GL_VALIDATE_STATUS, &errflags);
     if (!errflags) {
-        glGetProgramInfoLog(prog._pid, 10000, 0, errbuf);
-        throw runtime_error(string("program not linked\n\n") + errbuf);
+        glGetProgramInfoLog(prog.pid, 10000, 0, errbuf);
+        throw std::runtime_error(
+            std::string("program not linked\n\n") + errbuf);
     }
     assert(gl_check_error());
 
@@ -11838,49 +11491,52 @@ gl_program make_program(const string& vertex, const string& fragment) {
 // Destroys the program pid and optionally the sahders vid and fid.
 void clear_program(gl_program& prog) {
     assert(gl_check_error());
-    glDetachShader(prog._pid, prog._vid);
-    glDeleteShader(prog._vid);
-    prog._vid = 0;
-    glDetachShader(prog._pid, prog._fid);
-    glDeleteShader(prog._fid);
-    prog._fid = 0;
-    glDeleteProgram(prog._pid);
-    prog._pid = 0;
-    glDeleteVertexArrays(1, &prog._vao);
-    prog._vao = 0;
+    glDetachShader(prog.pid, prog.vid);
+    glDeleteShader(prog.vid);
+    prog.vid = 0;
+    glDetachShader(prog.pid, prog.fid);
+    glDeleteShader(prog.fid);
+    prog.fid = 0;
+    glDeleteProgram(prog.pid);
+    prog.pid = 0;
+    glDeleteVertexArrays(1, &prog.vao);
+    prog.vao = 0;
     assert(gl_check_error());
 }
 
 // Get uniform location (simple GL wrapper that avoids GL includes)
-int get_program_uniform_location(const gl_program& prog, const string& name) {
+int get_program_uniform_location(
+    const gl_program& prog, const std::string& name) {
     assert(gl_check_error());
-    return glGetUniformLocation(prog._pid, name.c_str());
+    return glGetUniformLocation(prog.pid, name.c_str());
     assert(gl_check_error());
 }
 
 // Get uniform location (simple GL wrapper that avoids GL includes)
-int get_program_attrib_location(const gl_program& prog, const string& name) {
+int get_program_attrib_location(
+    const gl_program& prog, const std::string& name) {
     assert(gl_check_error());
-    return glGetAttribLocation(prog._pid, name.c_str());
+    return glGetAttribLocation(prog.pid, name.c_str());
     assert(gl_check_error());
 }
 
 // Get the names of all uniforms
-vector<pair<string, int>> get_program_uniforms_names(const gl_program& prog) {
+std::vector<std::pair<std::string, int>> get_program_uniforms_names(
+    const gl_program& prog) {
     auto num = 0;
     assert(gl_check_error());
-    glGetProgramiv(prog._pid, GL_ACTIVE_UNIFORMS, &num);
+    glGetProgramiv(prog.pid, GL_ACTIVE_UNIFORMS, &num);
     assert(gl_check_error());
-    auto names = vector<pair<string, int>>();
+    auto names = std::vector<std::pair<std::string, int>>();
     for (auto i = 0; i < num; i++) {
         char name[4096];
         auto size = 0, length = 0;
         GLenum type;
-        glGetActiveUniform(prog._pid, i, 4096, &length, &size, &type, name);
+        glGetActiveUniform(prog.pid, i, 4096, &length, &size, &type, name);
         if (length > 3 && name[length - 1] == ']' && name[length - 2] == '0' &&
             name[length - 3] == '[')
             name[length - 3] = 0;
-        auto loc = glGetUniformLocation(prog._pid, name);
+        auto loc = glGetUniformLocation(prog.pid, name);
         if (loc < 0) continue;
         names.push_back({name, loc});
         assert(gl_check_error());
@@ -11889,18 +11545,19 @@ vector<pair<string, int>> get_program_uniforms_names(const gl_program& prog) {
 }
 
 // Get the names of all attributes
-vector<pair<string, int>> get_program_attributes_names(const gl_program& prog) {
+std::vector<std::pair<std::string, int>> get_program_attributes_names(
+    const gl_program& prog) {
     auto num = 0;
     assert(gl_check_error());
-    glGetProgramiv(prog._pid, GL_ACTIVE_ATTRIBUTES, &num);
+    glGetProgramiv(prog.pid, GL_ACTIVE_ATTRIBUTES, &num);
     assert(gl_check_error());
-    auto names = vector<pair<string, int>>();
+    auto names = std::vector<std::pair<std::string, int>>();
     for (auto i = 0; i < num; i++) {
         char name[4096];
         auto size = 0;
         GLenum type;
-        glGetActiveAttrib(prog._pid, i, 4096, nullptr, &size, &type, name);
-        auto loc = glGetAttribLocation(prog._pid, name);
+        glGetActiveAttrib(prog.pid, i, 4096, nullptr, &size, &type, name);
+        auto loc = glGetAttribLocation(prog.pid, name);
         if (loc < 0) continue;
         names.push_back({name, loc});
         assert(gl_check_error());
@@ -11948,15 +11605,15 @@ bool set_program_uniform(
     return true;
 }
 
-// Set uniform texture id tid and unit tunit for program pid and variable
-// var.
+// Set uniform texture id tid and unit tunit for program pid and
+// variable var.
 bool set_program_uniform_texture(
     gl_program& prog, int pos, const gl_texture_info& tinfo, uint tunit) {
     static const auto wrap_mode_map =
-        map<gl_texture_wrap, uint>{{gl_texture_wrap::repeat, GL_REPEAT},
+        std::map<gl_texture_wrap, uint>{{gl_texture_wrap::repeat, GL_REPEAT},
             {gl_texture_wrap::clamp, GL_CLAMP_TO_EDGE},
             {gl_texture_wrap::mirror, GL_MIRRORED_REPEAT}};
-    static const auto filter_mode_map = map<gl_texture_filter, uint>{
+    static const auto filter_mode_map = std::map<gl_texture_filter, uint>{
         {gl_texture_filter::nearest, GL_NEAREST},
         {gl_texture_filter::linear, GL_LINEAR},
         {gl_texture_filter::nearest_mipmap_nearest, GL_NEAREST_MIPMAP_NEAREST},
@@ -12026,12 +11683,13 @@ bool set_program_vertattr(gl_program& prog, int pos, const int* value, int nc) {
     return true;
 }
 
-// Sets a vartex attribute for program pid and variable var to the buffer
-// bid. The attribute has nc components and per-vertex values values.
+// Sets a vartex attribute for program pid and variable var to the
+// buffer bid. The attribute has nc components and per-vertex values
+// values.
 bool set_program_vertattr(
-    gl_program& prog, const string& var, const gl_vertex_buffer& buf) {
+    gl_program& prog, const std::string& var, const gl_vertex_buffer& buf) {
     assert(gl_check_error());
-    int pos = glGetAttribLocation(prog._pid, var.c_str());
+    int pos = glGetAttribLocation(prog.pid, var.c_str());
     if (pos < 0) return false;
     if (is_vertex_buffer_valid(buf)) {
         glEnableVertexAttribArray(pos);
@@ -12044,9 +11702,9 @@ bool set_program_vertattr(
     return true;
 }
 
-// Sets a vartex attribute for program pid and variable var. The attribute
-// has nc components and either buffer bid or a single value def
-// (if bid is zero). Convenience wrapper to above functions.
+// Sets a vartex attribute for program pid and variable var. The
+// attribute has nc components and either buffer bid or a single value
+// def (if bid is zero). Convenience wrapper to above functions.
 bool set_program_vertattr(gl_program& prog, int pos,
     const gl_vertex_buffer& buf, int nc, const float* def) {
     assert(nc >= 1 && nc <= 4);
@@ -12078,9 +11736,9 @@ bool set_program_vertattr(gl_program& prog, int pos,
 // Binds a program
 void bind_program(const gl_program& prog) {
     assert(gl_check_error());
-    if (!prog._pid) return;
-    glBindVertexArray(prog._vao);
-    glUseProgram(prog._pid);
+    if (!prog.pid) return;
+    glBindVertexArray(prog.vao);
+    glUseProgram(prog.pid);
     assert(gl_check_error());
 }
 
@@ -12113,89 +11771,84 @@ void clear_shape(gl_shape& shp) {
     clear_element_buffer(shp.edges);
 }
 
+// Init shading
+void update_gl_texture(
+    std::unordered_map<texture*, gl_texture>& gtextures, const texture* txt) {
+    if (gtextures.find((texture*)txt) == gtextures.end())
+        gtextures[(texture*)txt] = gl_texture();
+    auto& gtxt = gtextures.at((texture*)txt);
+    if (!txt->hdr.empty()) {
+        update_texture(gtxt, txt->hdr, true, true, true);
+    } else if (!txt->ldr.empty()) {
+        update_texture(gtxt, txt->ldr, true, true, true);
+    } else
+        assert(false);
+}
+
+// Update shading
+std::unordered_map<texture*, gl_texture> make_gl_textures(const scene* scn) {
+    auto gtextures = std::unordered_map<texture*, gl_texture>();
+    for (auto txt : scn->textures) update_gl_texture(gtextures, txt);
+    return gtextures;
+}
+
+// Update shading
+void update_gl_shape(
+    std::unordered_map<shape*, gl_shape>& gshapes, const shape* shp) {
+    if (gshapes.find((shape*)shp) == gshapes.end())
+        gshapes[(shape*)shp] = gl_shape();
+    auto& gshp = gshapes.at((shape*)shp);
+    if (!shp->quads_pos.empty()) {
+        auto pos = std::vector<vec3f>();
+        auto norm = std::vector<vec3f>();
+        auto texcoord = std::vector<vec2f>();
+        auto quads = std::vector<vec4i>();
+        std::tie(quads, pos, norm, texcoord) =
+            convert_face_varying(shp->quads_pos, shp->quads_norm,
+                shp->quads_texcoord, shp->pos, shp->norm, shp->texcoord);
+        update_vertex_buffer(gshp.pos, pos);
+        update_vertex_buffer(gshp.norm, norm);
+        update_vertex_buffer(gshp.texcoord, texcoord);
+        update_element_buffer(gshp.quads, convert_quads_to_triangles(quads));
+        update_element_buffer(gshp.edges, get_edges({}, {}, shp->quads));
+        update_vertex_buffer(gshp.color, std::vector<vec4f>{});
+        update_vertex_buffer(gshp.tangsp, std::vector<vec4f>{});
+    } else {
+        update_vertex_buffer(gshp.pos, shp->pos);
+        update_vertex_buffer(gshp.norm, shp->norm);
+        update_vertex_buffer(gshp.texcoord, shp->texcoord);
+        update_vertex_buffer(gshp.color, shp->color);
+        update_vertex_buffer(gshp.tangsp, shp->tangsp);
+        update_element_buffer(gshp.points, shp->points);
+        update_element_buffer(gshp.lines, shp->lines);
+        update_element_buffer(gshp.triangles, shp->triangles);
+        update_element_buffer(
+            gshp.quads, convert_quads_to_triangles(shp->quads));
+        update_element_buffer(
+            gshp.beziers, convert_bezier_to_lines(shp->beziers));
+        update_element_buffer(
+            gshp.edges, get_edges({}, shp->triangles, shp->quads));
+    }
+}
+
+// Init shading
+std::unordered_map<shape*, gl_shape> make_gl_shapes(const scene* scn) {
+    auto gshapes = std::unordered_map<shape*, gl_shape>();
+    for (auto sgr : scn->shapes)
+        for (auto shp : sgr->shapes) update_gl_shape(gshapes, shp);
+    return gshapes;
+}
+
 // Clear scene textures on the GPU.
-void clear_textures(unordered_map<texture*, gl_texture>& gtextures) {
+void clear_gl_textures(std::unordered_map<texture*, gl_texture>& gtextures) {
     for (auto& kv : gtextures) clear_texture(kv.second);
     gtextures.clear();
 }
 
 // Clear scene shapes on the GPU.
-void clear_shapes(unordered_map<shape*, gl_shape>& gshapes) {
+void clear_gl_shapes(std::unordered_map<shape*, gl_shape>& gshapes) {
     for (auto& kv : gshapes) clear_shape(kv.second);
     gshapes.clear();
-}
-
-// Init shading
-void update_textures(const scene* scn,
-    unordered_map<texture*, gl_texture>& gtextures,
-    const unordered_set<texture*>& refresh, bool clear) {
-    if (clear) clear_textures(gtextures);
-    for (auto txt : scn->textures) {
-        if (gtextures.find(txt) == gtextures.end()) {
-            gtextures[txt] = gl_texture();
-        } else {
-            if (refresh.find(txt) == refresh.end()) continue;
-        }
-        auto& gtxt = gtextures.at(txt);
-        if (txt->hdr) {
-            update_texture(gtxt, txt->hdr, true, true, true);
-        } else if (txt->ldr) {
-            update_texture(gtxt, txt->ldr, true, true, true);
-        } else
-            assert(false);
-    }
-}
-
-// Init shading
-void update_shapes(const scene* scn, unordered_map<shape*, gl_shape>& gshapes,
-    const unordered_set<shape*>& refresh,
-    const unordered_set<shape_group*>& refreshg, bool clear) {
-    if (clear) clear_shapes(gshapes);
-    for (auto sgr : scn->shapes) {
-        for (auto shp : sgr->shapes) {
-            if (gshapes.find(shp) == gshapes.end()) {
-                gshapes[shp] = gl_shape();
-            } else {
-                if (refresh.find(shp) == refresh.end() &&
-                    refreshg.find(sgr) == refreshg.end())
-                    continue;
-            }
-            auto& gshp = gshapes.at(shp);
-            if (!shp->quads_pos.empty()) {
-                auto pos = vector<vec3f>();
-                auto norm = vector<vec3f>();
-                auto texcoord = vector<vec2f>();
-                auto quads = vector<vec4i>();
-                tie(quads, pos, norm, texcoord) = convert_face_varying(
-                    shp->quads_pos, shp->quads_norm, shp->quads_texcoord,
-                    shp->pos, shp->norm, shp->texcoord);
-                update_vertex_buffer(gshp.pos, pos);
-                update_vertex_buffer(gshp.norm, norm);
-                update_vertex_buffer(gshp.texcoord, texcoord);
-                update_element_buffer(
-                    gshp.quads, convert_quads_to_triangles(quads));
-                update_element_buffer(
-                    gshp.edges, get_edges({}, {}, shp->quads));
-                update_vertex_buffer(gshp.color, vector<vec4f>{});
-                update_vertex_buffer(gshp.tangsp, vector<vec4f>{});
-            } else {
-                update_vertex_buffer(gshp.pos, shp->pos);
-                update_vertex_buffer(gshp.norm, shp->norm);
-                update_vertex_buffer(gshp.texcoord, shp->texcoord);
-                update_vertex_buffer(gshp.color, shp->color);
-                update_vertex_buffer(gshp.tangsp, shp->tangsp);
-                update_element_buffer(gshp.points, shp->points);
-                update_element_buffer(gshp.lines, shp->lines);
-                update_element_buffer(gshp.triangles, shp->triangles);
-                update_element_buffer(
-                    gshp.quads, convert_quads_to_triangles(shp->quads));
-                update_element_buffer(
-                    gshp.beziers, convert_bezier_to_lines(shp->beziers));
-                update_element_buffer(
-                    gshp.edges, get_edges({}, shp->triangles, shp->quads));
-            }
-        }
-    }
 }
 
 // Initialize gl lights
@@ -12246,9 +11899,10 @@ gl_lights make_gl_lights(const scene* scn) {
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-// Initialize the program. Call with true only after the GL is initialized.
+// Initialize the program. Call with true only after the GL is
+// initialized.
 gl_stdimage_program make_stdimage_program() {
-    string _header =
+    std::string _header =
         R"(
         #version 330
 
@@ -12262,7 +11916,7 @@ gl_stdimage_program make_stdimage_program() {
 
         )";
 
-    string _vert =
+    std::string _vert =
         R"(
         layout(location = 0) in vec2 vert_texcoord;
 
@@ -12279,7 +11933,7 @@ gl_stdimage_program make_stdimage_program() {
 
         )";
 
-    string _frag_tonemap =
+    std::string _frag_tonemap =
         R"(
         struct Tonemap {
             bool filmic;
@@ -12310,7 +11964,7 @@ gl_stdimage_program make_stdimage_program() {
 
         )";
 
-    string _frag_main =
+    std::string _frag_main =
         R"(
         in vec2 texcoord;
         out vec4 color;
@@ -12323,13 +11977,45 @@ gl_stdimage_program make_stdimage_program() {
         )";
 
     auto prog = gl_stdimage_program();
-    prog._prog =
+    prog.prog =
         make_program(_header + _vert, _header + _frag_tonemap + _frag_main);
 
-    prog._vbo = make_vertex_buffer(
-        vector<vec2f>{{0, 0}, {0, 1}, {1, 1}, {1, 0}}, false);
-    prog._ebo = make_element_buffer(vector<vec3i>{{0, 1, 2}, {0, 2, 3}}, false);
+    prog.vbo = make_vertex_buffer(
+        std::vector<vec2f>{{0, 0}, {0, 1}, {1, 1}, {1, 0}}, false);
+    prog.ebo =
+        make_element_buffer(std::vector<vec3i>{{0, 1, 2}, {0, 2, 3}}, false);
     return prog;
+}
+
+// Draws the stdimage program.
+void draw_image(gl_stdimage_program& prog, const gl_texture& txt,
+    const vec2i& win_size, const vec2f& offset, float zoom, float exposure,
+    float gamma, bool filmic) {
+    assert(is_texture_valid(txt));
+
+    bind_program(prog.prog);
+
+    gl_enable_blending(true);
+    gl_set_blend_over();
+
+    bind_texture(txt, 0);
+    set_program_uniform(prog.prog, "zoom", zoom);
+    set_program_uniform(
+        prog.prog, "win_size", vec2f{(float)win_size.x, (float)win_size.y});
+    set_program_uniform(prog.prog, "offset", offset);
+    set_program_uniform(prog.prog, "tonemap.filmic", filmic);
+    set_program_uniform(prog.prog, "tonemap.exposure", exposure);
+    set_program_uniform(prog.prog, "tonemap.gamma", gamma);
+    set_program_uniform_texture(prog.prog, "img", txt, 0);
+
+    set_program_vertattr(prog.prog, "vert_texcoord", prog.vbo, vec2f{0, 0});
+    draw_elems(prog.ebo);
+
+    unbind_program(prog.prog);
+
+    gl_enable_blending(false);
+
+    assert(gl_check_error());
 }
 
 }  // namespace ygl
@@ -12346,13 +12032,13 @@ gl_stdsurface_program make_stdsurface_program() {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Woverlength-strings"
 #endif
-    string _vert_header =
+    std::string _vert_header =
         R"(
         #version 330
 
         )";
 
-    string _vert_skinning =
+    std::string _vert_skinning =
         R"(
         #define SKIN_NONE 0
         #define SKIN_STD 1
@@ -12399,7 +12085,7 @@ gl_stdsurface_program make_stdsurface_program() {
         }
         )";
 
-    string _vert_main =
+    std::string _vert_main =
         R"(
         layout(location = 0) in vec3 vert_pos;            // vertex position (in mesh coordinate frame)
         layout(location = 1) in vec3 vert_norm;           // vertex normal (in mesh coordinate frame)
@@ -12452,7 +12138,7 @@ gl_stdsurface_program make_stdsurface_program() {
         }
         )";
 
-    string _frag_header =
+    std::string _frag_header =
         R"(
         #version 330
 
@@ -12460,7 +12146,7 @@ gl_stdsurface_program make_stdsurface_program() {
 
         )";
 
-    string _frag_tonemap =
+    std::string _frag_tonemap =
         R"(
         struct Tonemap {
             bool filmic;       // tonemap type (TM_...)
@@ -12491,7 +12177,7 @@ gl_stdsurface_program make_stdsurface_program() {
 
         )";
 
-    string _frag_lighting =
+    std::string _frag_lighting =
         R"(
         struct Lighting {
             bool eyelight;        // eyelight shading
@@ -12522,7 +12208,7 @@ gl_stdsurface_program make_stdsurface_program() {
 
         )";
 
-    string _frag_brdf =
+    std::string _frag_brdf =
         R"(
         struct Brdf {
             int type;
@@ -12575,7 +12261,7 @@ gl_stdsurface_program make_stdsurface_program() {
 
         )";
 
-    string _frag_material =
+    std::string _frag_material =
         R"(
         struct Material {
             int type;         // material type
@@ -12674,7 +12360,7 @@ gl_stdsurface_program make_stdsurface_program() {
 
         )";
 
-    string _frag_main =
+    std::string _frag_main =
         R"(
         in vec3 pos;                   // [from vertex shader] position in world space
         in vec3 norm;                  // [from vertex shader] normal in world space (need normalization)
@@ -12760,50 +12446,50 @@ gl_stdsurface_program make_stdsurface_program() {
 
     assert(gl_check_error());
     auto prog = gl_stdsurface_program();
-    prog._prog = make_program(_vert_header + _vert_skinning + _vert_main,
+    prog.prog = make_program(_vert_header + _vert_skinning + _vert_main,
         _frag_header + _frag_tonemap + _frag_lighting + _frag_brdf +
             _frag_material + _frag_main);
     assert(gl_check_error());
     return prog;
 }
 
-// Starts a frame by setting exposure/gamma values, camera transforms and
-// projection. Sets also whether to use full shading or a quick eyelight
-// preview.
+// Starts a frame by setting exposure/gamma values, camera transforms
+// and projection. Sets also whether to use full shading or a quick
+// eyelight preview.
 void begin_stdsurface_frame(gl_stdsurface_program& prog, bool shade_eyelight,
     float tonemap_exposure, float tonemap_gamma, bool tonemap_filmic,
     const mat4f& camera_xform, const mat4f& camera_xform_inv,
     const mat4f& camera_proj) {
     static auto eyelight_id =
-        get_program_uniform_location(prog._prog, "lighting.eyelight");
+        get_program_uniform_location(prog.prog, "lighting.eyelight");
     static auto exposure_id =
-        get_program_uniform_location(prog._prog, "tonemap.exposure");
+        get_program_uniform_location(prog.prog, "tonemap.exposure");
     static auto gamma_id =
-        get_program_uniform_location(prog._prog, "tonemap.gamma");
+        get_program_uniform_location(prog.prog, "tonemap.gamma");
     static auto filmic_id =
-        get_program_uniform_location(prog._prog, "tonemap.filmic");
+        get_program_uniform_location(prog.prog, "tonemap.filmic");
     static auto xform_id =
-        get_program_uniform_location(prog._prog, "camera.xform");
+        get_program_uniform_location(prog.prog, "camera.xform");
     static auto xform_inv_id =
-        get_program_uniform_location(prog._prog, "camera.xform_inv");
+        get_program_uniform_location(prog.prog, "camera.xform_inv");
     static auto proj_id =
-        get_program_uniform_location(prog._prog, "camera.proj");
+        get_program_uniform_location(prog.prog, "camera.proj");
     assert(gl_check_error());
-    bind_program(prog._prog);
-    set_program_uniform(prog._prog, eyelight_id, shade_eyelight);
-    set_program_uniform(prog._prog, exposure_id, tonemap_exposure);
-    set_program_uniform(prog._prog, gamma_id, tonemap_gamma);
-    set_program_uniform(prog._prog, filmic_id, tonemap_filmic);
-    set_program_uniform(prog._prog, xform_id, camera_xform);
-    set_program_uniform(prog._prog, xform_inv_id, camera_xform_inv);
-    set_program_uniform(prog._prog, proj_id, camera_proj);
+    bind_program(prog.prog);
+    set_program_uniform(prog.prog, eyelight_id, shade_eyelight);
+    set_program_uniform(prog.prog, exposure_id, tonemap_exposure);
+    set_program_uniform(prog.prog, gamma_id, tonemap_gamma);
+    set_program_uniform(prog.prog, filmic_id, tonemap_filmic);
+    set_program_uniform(prog.prog, xform_id, camera_xform);
+    set_program_uniform(prog.prog, xform_inv_id, camera_xform_inv);
+    set_program_uniform(prog.prog, proj_id, camera_proj);
     assert(gl_check_error());
 }
 
 // Ends a frame.
 void end_stdsurface_frame(gl_stdsurface_program& prog) {
     assert(gl_check_error());
-    unbind_program(prog._prog);
+    unbind_program(prog.prog);
     //    glBindVertexArray(0);
     //    glUseProgram(0);
     assert(gl_check_error());
@@ -12814,24 +12500,24 @@ void end_stdsurface_frame(gl_stdsurface_program& prog) {
 void set_stdsurface_lights(
     gl_stdsurface_program& prog, const vec3f& amb, const gl_lights& lights) {
     static auto amb_id =
-        get_program_uniform_location(prog._prog, "lighting.amb");
+        get_program_uniform_location(prog.prog, "lighting.amb");
     static auto lnum_id =
-        get_program_uniform_location(prog._prog, "lighting.lnum");
+        get_program_uniform_location(prog.prog, "lighting.lnum");
     static auto lpos_id =
-        get_program_uniform_location(prog._prog, "lighting.lpos");
+        get_program_uniform_location(prog.prog, "lighting.lpos");
     static auto lke_id =
-        get_program_uniform_location(prog._prog, "lighting.lke");
+        get_program_uniform_location(prog.prog, "lighting.lke");
     static auto ltype_id =
-        get_program_uniform_location(prog._prog, "lighting.ltype");
+        get_program_uniform_location(prog.prog, "lighting.ltype");
     assert(gl_check_error());
-    set_program_uniform(prog._prog, amb_id, amb);
-    set_program_uniform(prog._prog, lnum_id, (int)lights.pos.size());
+    set_program_uniform(prog.prog, amb_id, amb);
+    set_program_uniform(prog.prog, lnum_id, (int)lights.pos.size());
     set_program_uniform(
-        prog._prog, lpos_id, lights.pos.data(), (int)lights.pos.size());
+        prog.prog, lpos_id, lights.pos.data(), (int)lights.pos.size());
     set_program_uniform(
-        prog._prog, lke_id, lights.ke.data(), (int)lights.pos.size());
+        prog.prog, lke_id, lights.ke.data(), (int)lights.pos.size());
     set_program_uniform(
-        prog._prog, ltype_id, (int*)lights.type.data(), (int)lights.pos.size());
+        prog.prog, ltype_id, (int*)lights.type.data(), (int)lights.pos.size());
     assert(gl_check_error());
 }
 
@@ -12839,12 +12525,12 @@ void set_stdsurface_lights(
 void begin_stdsurface_shape(
     gl_stdsurface_program& prog, const mat4f& xform, float normal_offset) {
     static auto xform_id =
-        get_program_uniform_location(prog._prog, "shape_xform");
+        get_program_uniform_location(prog.prog, "shape_xform");
     static auto normal_offset_id =
-        get_program_uniform_location(prog._prog, "shape_normal_offset");
+        get_program_uniform_location(prog.prog, "shape_normal_offset");
     assert(gl_check_error());
-    set_program_uniform(prog._prog, xform_id, xform);
-    set_program_uniform(prog._prog, normal_offset_id, normal_offset);
+    set_program_uniform(prog.prog, xform_id, xform);
+    set_program_uniform(prog.prog, normal_offset_id, normal_offset);
     assert(gl_check_error());
 }
 
@@ -12859,9 +12545,9 @@ void end_stdsurface_shape(gl_stdsurface_program& prog) {
 void set_stdsurface_normaloffset(
     gl_stdsurface_program& prog, float normal_offset) {
     static auto normal_offset_id =
-        get_program_uniform_location(prog._prog, "shape_normal_offset");
+        get_program_uniform_location(prog.prog, "shape_normal_offset");
     assert(gl_check_error());
-    set_program_uniform(prog._prog, normal_offset_id, normal_offset);
+    set_program_uniform(prog.prog, normal_offset_id, normal_offset);
     assert(gl_check_error());
 }
 
@@ -12869,8 +12555,8 @@ void set_stdsurface_normaloffset(
 void set_stdsurface_highlight(
     gl_stdsurface_program& prog, const vec4f& highlight) {
     static auto highlight_id =
-        get_program_uniform_location(prog._prog, "highlight");
-    set_program_uniform(prog._prog, highlight_id, highlight);
+        get_program_uniform_location(prog.prog, "highlight");
+    set_program_uniform(prog.prog, highlight_id, highlight);
 }
 
 // Set material values with emission ke, diffuse kd, specular ks and
@@ -12887,75 +12573,75 @@ void set_stdsurface_material(gl_stdsurface_program& prog, material_type type,
     const gl_texture_info& occ_txt, bool use_phong, bool double_sided,
     bool alpha_cutout) {
     static auto mtype_id =
-        get_program_uniform_location(prog._prog, "material.type");
+        get_program_uniform_location(prog.prog, "material.type");
     static auto etype_id =
-        get_program_uniform_location(prog._prog, "material.etype");
-    static auto ke_id = get_program_uniform_location(prog._prog, "material.ke");
-    static auto kd_id = get_program_uniform_location(prog._prog, "material.kd");
-    static auto ks_id = get_program_uniform_location(prog._prog, "material.ks");
-    static auto rs_id = get_program_uniform_location(prog._prog, "material.rs");
-    static auto op_id = get_program_uniform_location(prog._prog, "material.op");
+        get_program_uniform_location(prog.prog, "material.etype");
+    static auto ke_id = get_program_uniform_location(prog.prog, "material.ke");
+    static auto kd_id = get_program_uniform_location(prog.prog, "material.kd");
+    static auto ks_id = get_program_uniform_location(prog.prog, "material.ks");
+    static auto rs_id = get_program_uniform_location(prog.prog, "material.rs");
+    static auto op_id = get_program_uniform_location(prog.prog, "material.op");
     static auto ke_txt_id =
-        get_program_uniform_location(prog._prog, "material.txt_ke");
+        get_program_uniform_location(prog.prog, "material.txt_ke");
     static auto ke_txt_on_id =
-        get_program_uniform_location(prog._prog, "material.txt_ke_on");
+        get_program_uniform_location(prog.prog, "material.txt_ke_on");
     static auto kd_txt_id =
-        get_program_uniform_location(prog._prog, "material.txt_kd");
+        get_program_uniform_location(prog.prog, "material.txt_kd");
     static auto kd_txt_on_id =
-        get_program_uniform_location(prog._prog, "material.txt_kd_on");
+        get_program_uniform_location(prog.prog, "material.txt_kd_on");
     static auto ks_txt_id =
-        get_program_uniform_location(prog._prog, "material.txt_ks");
+        get_program_uniform_location(prog.prog, "material.txt_ks");
     static auto ks_txt_on_id =
-        get_program_uniform_location(prog._prog, "material.txt_ks_on");
+        get_program_uniform_location(prog.prog, "material.txt_ks_on");
     static auto rs_txt_id =
-        get_program_uniform_location(prog._prog, "material.txt_rs");
+        get_program_uniform_location(prog.prog, "material.txt_rs");
     static auto rs_txt_on_id =
-        get_program_uniform_location(prog._prog, "material.txt_rs_on");
+        get_program_uniform_location(prog.prog, "material.txt_rs_on");
     static auto norm_txt_id =
-        get_program_uniform_location(prog._prog, "material.txt_norm");
+        get_program_uniform_location(prog.prog, "material.txt_norm");
     static auto norm_txt_on_id =
-        get_program_uniform_location(prog._prog, "material.txt_norm_on");
+        get_program_uniform_location(prog.prog, "material.txt_norm_on");
     static auto occ_txt_id =
-        get_program_uniform_location(prog._prog, "material.txt_occ");
+        get_program_uniform_location(prog.prog, "material.txt_occ");
     static auto occ_txt_on_id =
-        get_program_uniform_location(prog._prog, "material.txt_occ_on");
+        get_program_uniform_location(prog.prog, "material.txt_occ_on");
     static auto norm_scale_id =
-        get_program_uniform_location(prog._prog, "material.norm_scale");
+        get_program_uniform_location(prog.prog, "material.norm_scale");
     static auto occ_scale_id =
-        get_program_uniform_location(prog._prog, "material.occ_scale");
+        get_program_uniform_location(prog.prog, "material.occ_scale");
     static auto use_phong_id =
-        get_program_uniform_location(prog._prog, "material.use_phong");
+        get_program_uniform_location(prog.prog, "material.use_phong");
     static auto double_sided_id =
-        get_program_uniform_location(prog._prog, "material.double_sided");
+        get_program_uniform_location(prog.prog, "material.double_sided");
     static auto alpha_cutout_id =
-        get_program_uniform_location(prog._prog, "material.alpha_cutout");
+        get_program_uniform_location(prog.prog, "material.alpha_cutout");
 
-    static auto mtypes = unordered_map<material_type, int>{
+    static auto mtypes = std::unordered_map<material_type, int>{
         {material_type::specular_roughness, 1},
         {material_type::metallic_roughness, 2},
         {material_type::specular_glossiness, 3}};
 
     assert(gl_check_error());
-    set_program_uniform(prog._prog, mtype_id, mtypes.at(type));
-    set_program_uniform(prog._prog, etype_id, (int)etype);
-    set_program_uniform(prog._prog, ke_id, ke);
-    set_program_uniform(prog._prog, kd_id, kd);
-    set_program_uniform(prog._prog, ks_id, ks);
-    set_program_uniform(prog._prog, rs_id, rs);
-    set_program_uniform(prog._prog, op_id, op);
-    set_program_uniform_texture(prog._prog, ke_txt_id, ke_txt_on_id, ke_txt, 0);
-    set_program_uniform_texture(prog._prog, kd_txt_id, kd_txt_on_id, kd_txt, 1);
-    set_program_uniform_texture(prog._prog, ks_txt_id, ks_txt_on_id, ks_txt, 2);
-    set_program_uniform_texture(prog._prog, rs_txt_id, rs_txt_on_id, rs_txt, 3);
+    set_program_uniform(prog.prog, mtype_id, mtypes.at(type));
+    set_program_uniform(prog.prog, etype_id, (int)etype);
+    set_program_uniform(prog.prog, ke_id, ke);
+    set_program_uniform(prog.prog, kd_id, kd);
+    set_program_uniform(prog.prog, ks_id, ks);
+    set_program_uniform(prog.prog, rs_id, rs);
+    set_program_uniform(prog.prog, op_id, op);
+    set_program_uniform_texture(prog.prog, ke_txt_id, ke_txt_on_id, ke_txt, 0);
+    set_program_uniform_texture(prog.prog, kd_txt_id, kd_txt_on_id, kd_txt, 1);
+    set_program_uniform_texture(prog.prog, ks_txt_id, ks_txt_on_id, ks_txt, 2);
+    set_program_uniform_texture(prog.prog, rs_txt_id, rs_txt_on_id, rs_txt, 3);
     set_program_uniform_texture(
-        prog._prog, norm_txt_id, norm_txt_on_id, norm_txt, 4);
+        prog.prog, norm_txt_id, norm_txt_on_id, norm_txt, 4);
     set_program_uniform_texture(
-        prog._prog, occ_txt_id, occ_txt_on_id, occ_txt, 5);
-    set_program_uniform(prog._prog, norm_scale_id, norm_txt.scale);
-    set_program_uniform(prog._prog, occ_scale_id, occ_txt.scale);
-    set_program_uniform(prog._prog, use_phong_id, use_phong);
-    set_program_uniform(prog._prog, double_sided_id, double_sided);
-    set_program_uniform(prog._prog, alpha_cutout_id, alpha_cutout);
+        prog.prog, occ_txt_id, occ_txt_on_id, occ_txt, 5);
+    set_program_uniform(prog.prog, norm_scale_id, norm_txt.scale);
+    set_program_uniform(prog.prog, occ_scale_id, occ_txt.scale);
+    set_program_uniform(prog.prog, use_phong_id, use_phong);
+    set_program_uniform(prog.prog, double_sided_id, double_sided);
+    set_program_uniform(prog.prog, alpha_cutout_id, alpha_cutout);
     assert(gl_check_error());
 }
 
@@ -12963,40 +12649,40 @@ void set_stdsurface_material(gl_stdsurface_program& prog, material_type type,
 void set_stdsurface_constmaterial(
     gl_stdsurface_program& prog, const vec3f& ke, float op) {
     static auto mtype_id =
-        get_program_uniform_location(prog._prog, "material.type");
+        get_program_uniform_location(prog.prog, "material.type");
     static auto etype_id =
-        get_program_uniform_location(prog._prog, "material.etype");
-    static auto ke_id = get_program_uniform_location(prog._prog, "material.ke");
-    static auto op_id = get_program_uniform_location(prog._prog, "material.op");
+        get_program_uniform_location(prog.prog, "material.etype");
+    static auto ke_id = get_program_uniform_location(prog.prog, "material.ke");
+    static auto op_id = get_program_uniform_location(prog.prog, "material.op");
 
     assert(gl_check_error());
-    set_program_uniform(prog._prog, mtype_id, 0);
-    set_program_uniform(prog._prog, etype_id, 0);
-    set_program_uniform(prog._prog, ke_id, ke);
-    set_program_uniform(prog._prog, op_id, op);
+    set_program_uniform(prog.prog, mtype_id, 0);
+    set_program_uniform(prog.prog, etype_id, 0);
+    set_program_uniform(prog.prog, ke_id, ke);
+    set_program_uniform(prog.prog, op_id, op);
     assert(gl_check_error());
 }
 
 // Set vertex data with buffers for position pos, normals norm, texture
-// coordinates texcoord, per-vertex color color and tangent space tangsp.
+// coordinates texcoord, per-vertex color color and tangent space
+// tangsp.
 void set_stdsurface_vert(gl_stdsurface_program& prog,
     const gl_vertex_buffer& pos, const gl_vertex_buffer& norm,
     const gl_vertex_buffer& texcoord, const gl_vertex_buffer& color,
     const gl_vertex_buffer& tangsp) {
-    static auto pos_id = get_program_attrib_location(prog._prog, "vert_pos");
-    static auto norm_id = get_program_attrib_location(prog._prog, "vert_norm");
+    static auto pos_id = get_program_attrib_location(prog.prog, "vert_pos");
+    static auto norm_id = get_program_attrib_location(prog.prog, "vert_norm");
     static auto texcoord_id =
-        get_program_attrib_location(prog._prog, "vert_texcoord");
-    static auto color_id =
-        get_program_attrib_location(prog._prog, "vert_color");
+        get_program_attrib_location(prog.prog, "vert_texcoord");
+    static auto color_id = get_program_attrib_location(prog.prog, "vert_color");
     static auto tangsp_id =
-        get_program_attrib_location(prog._prog, "vert_tangsp");
+        get_program_attrib_location(prog.prog, "vert_tangsp");
     assert(gl_check_error());
-    set_program_vertattr(prog._prog, pos_id, pos, zero3f);
-    set_program_vertattr(prog._prog, norm_id, norm, zero3f);
-    set_program_vertattr(prog._prog, texcoord_id, texcoord, zero2f);
-    set_program_vertattr(prog._prog, color_id, color, vec4f{1, 1, 1, 1});
-    set_program_vertattr(prog._prog, tangsp_id, tangsp, zero4f);
+    set_program_vertattr(prog.prog, pos_id, pos, zero3f);
+    set_program_vertattr(prog.prog, norm_id, norm, zero3f);
+    set_program_vertattr(prog.prog, texcoord_id, texcoord, zero2f);
+    set_program_vertattr(prog.prog, color_id, color, vec4f{1, 1, 1, 1});
+    set_program_vertattr(prog.prog, tangsp_id, tangsp, zero4f);
     assert(gl_check_error());
 }
 
@@ -13004,58 +12690,58 @@ void set_stdsurface_vert(gl_stdsurface_program& prog,
 void set_stdsurface_vert_skinning(gl_stdsurface_program& prog,
     const gl_vertex_buffer& weights, const gl_vertex_buffer& joints,
     int nxforms, const mat4f* xforms) {
-    static auto type_id = get_program_uniform_location(prog._prog, "skin_type");
+    static auto type_id = get_program_uniform_location(prog.prog, "skin_type");
     static auto xforms_id =
-        get_program_uniform_location(prog._prog, "skin_xforms");
+        get_program_uniform_location(prog.prog, "skin_xforms");
     static auto weights_id =
-        get_program_attrib_location(prog._prog, "vert_skin_weights");
+        get_program_attrib_location(prog.prog, "vert_skin_weights");
     static auto joints_id =
-        get_program_attrib_location(prog._prog, "vert_skin_joints");
+        get_program_attrib_location(prog.prog, "vert_skin_joints");
     int type = 1;
-    set_program_uniform(prog._prog, type_id, type);
-    set_program_uniform(prog._prog, xforms_id, xforms, min(nxforms, 32));
-    set_program_vertattr(prog._prog, weights_id, weights, zero4f);
-    set_program_vertattr(prog._prog, joints_id, joints, zero4f);
+    set_program_uniform(prog.prog, type_id, type);
+    set_program_uniform(prog.prog, xforms_id, xforms, min(nxforms, 32));
+    set_program_vertattr(prog.prog, weights_id, weights, zero4f);
+    set_program_vertattr(prog.prog, joints_id, joints, zero4f);
 }
 
 // Set vertex data with buffers for skinning.
 void set_stdsurface_vert_gltf_skinning(gl_stdsurface_program& prog,
     const gl_vertex_buffer& weights, const gl_vertex_buffer& joints,
     int nxforms, const mat4f* xforms) {
-    static auto type_id = get_program_uniform_location(prog._prog, "skin_type");
+    static auto type_id = get_program_uniform_location(prog.prog, "skin_type");
     static auto xforms_id =
-        get_program_uniform_location(prog._prog, "skin_xforms");
+        get_program_uniform_location(prog.prog, "skin_xforms");
     static auto weights_id =
-        get_program_attrib_location(prog._prog, "vert_skin_weights");
+        get_program_attrib_location(prog.prog, "vert_skin_weights");
     static auto joints_id =
-        get_program_attrib_location(prog._prog, "vert_skin_joints");
+        get_program_attrib_location(prog.prog, "vert_skin_joints");
     int type = 2;
-    set_program_uniform(prog._prog, type_id, type);
-    set_program_uniform(prog._prog, xforms_id, xforms, min(nxforms, 32));
-    set_program_vertattr(prog._prog, weights_id, weights, zero4f);
-    set_program_vertattr(prog._prog, joints_id, joints, zero4f);
+    set_program_uniform(prog.prog, type_id, type);
+    set_program_uniform(prog.prog, xforms_id, xforms, min(nxforms, 32));
+    set_program_vertattr(prog.prog, weights_id, weights, zero4f);
+    set_program_vertattr(prog.prog, joints_id, joints, zero4f);
 }
 
 // Disables vertex skinning.
 void set_stdsurface_vert_skinning_off(gl_stdsurface_program& prog) {
-    static auto type_id = get_program_uniform_location(prog._prog, "skin_type");
-    // static auto xforms_id = get_program_uniform_location(prog._prog,
+    static auto type_id = get_program_uniform_location(prog.prog, "skin_type");
+    // static auto xforms_id = get_program_uniform_location(prog.prog,
     // "skin_xforms");
     static auto weights_id =
-        get_program_attrib_location(prog._prog, "vert_skin_weights");
+        get_program_attrib_location(prog.prog, "vert_skin_weights");
     static auto joints_id =
-        get_program_attrib_location(prog._prog, "vert_skin_joints");
+        get_program_attrib_location(prog.prog, "vert_skin_joints");
     int type = 0;
-    set_program_uniform(prog._prog, type_id, type);
-    set_program_vertattr(prog._prog, weights_id, {}, zero4f);
-    set_program_vertattr(prog._prog, joints_id, {}, zero4f);
+    set_program_uniform(prog.prog, type_id, type);
+    set_program_vertattr(prog.prog, weights_id, {}, zero4f);
+    set_program_vertattr(prog.prog, joints_id, {}, zero4f);
 }
 
 // Draw a shape
 void draw_stdsurface_shape(const shape* shp, const mat4f& xform,
     bool highlighted, gl_stdsurface_program& prog,
-    unordered_map<shape*, gl_shape>& shapes,
-    unordered_map<texture*, gl_texture>& textures,
+    std::unordered_map<shape*, gl_shape>& shapes,
+    std::unordered_map<texture*, gl_texture>& textures,
     const gl_stdsurface_params& params) {
     static auto default_material = material();
     default_material.kd = {0.2f, 0.2f, 0.2f};
@@ -13066,9 +12752,9 @@ void draw_stdsurface_shape(const shape* shp, const mat4f& xform,
     if (!shp->lines.empty()) etype = gl_elem_type::line;
     if (!shp->points.empty()) etype = gl_elem_type::point;
 
-    auto txt = [&textures](texture_info& info) -> gl_texture_info {
-        if (!info.txt) return {};
-        return textures.at(info.txt);
+    auto txt = [&textures](texture* txt) -> gl_texture_info {
+        if (!txt) return {};
+        return textures.at(txt);
     };
 
     auto mat = (shp->mat) ? shp->mat : &default_material;
@@ -13111,35 +12797,35 @@ void draw_stdsurface_shape(const shape* shp, const mat4f& xform,
 }
 
 // Display a scene
-void draw_stdsurface_scene(const scene* scn, const camera* view,
-    gl_stdsurface_program& prog, unordered_map<shape*, gl_shape>& shapes,
-    unordered_map<texture*, gl_texture>& textures, const gl_lights& lights,
+void draw_stdsurface_scene(const scene* scn, const camera* cam,
+    gl_stdsurface_program& prog, std::unordered_map<shape*, gl_shape>& shapes,
+    std::unordered_map<texture*, gl_texture>& textures, const gl_lights& lights,
+    const vec2i& viewport_size, void* highlighted,
     const gl_stdsurface_params& params) {
     // begin frame
     gl_enable_depth_test(true);
     gl_enable_culling(params.cull_backface);
     gl_enable_wireframe(params.wireframe);
-    gl_set_viewport({params.width, params.height});
+    gl_set_viewport(viewport_size);
 
-    auto cam = (params.camera_id < 0) ? view : scn->cameras[params.camera_id];
-    auto camera_xform = to_mat(cam->frame);
-    auto camera_view = to_mat(inverse(cam->frame));
-    auto camera_proj = perspective_mat4(cam->yfov,
-        (float)params.width / (float)params.height, cam->near, cam->far);
+    auto camera_xform = frame_to_mat(cam->frame);
+    auto camera_view = frame_to_mat(inverse(cam->frame));
+    auto camera_proj = perspective_mat(cam->yfov,
+        (float)viewport_size.x / (float)viewport_size.y, cam->near, cam->far);
 
-    begin_stdsurface_frame(prog, params.camera_lights, params.exposure,
-        params.gamma, params.filmic, camera_xform, camera_view, camera_proj);
+    begin_stdsurface_frame(prog, params.eyelight, params.exposure, params.gamma,
+        params.filmic, camera_xform, camera_view, camera_proj);
 
-    if (!params.camera_lights) {
+    if (!params.eyelight) {
         set_stdsurface_lights(prog, params.ambient, lights);
     }
 
     if (!scn->instances.empty()) {
         for (auto ist : scn->instances) {
             for (auto shp : ist->shp->shapes) {
-                draw_stdsurface_shape(shp, to_mat(ist->frame),
-                    (ist == params.highlighted ||
-                        ist->shp == params.highlighted),
+                draw_stdsurface_shape(shp, frame_to_mat(ist->frame),
+                    ist == highlighted || ist->shp == highlighted ||
+                        shp == highlighted,
                     prog, shapes, textures, params);
             }
         }
@@ -13147,7 +12833,8 @@ void draw_stdsurface_scene(const scene* scn, const camera* view,
         for (auto sgr : scn->shapes) {
             for (auto shp : sgr->shapes) {
                 draw_stdsurface_shape(shp, identity_mat4f,
-                    shp == params.highlighted, prog, shapes, textures, params);
+                    sgr == highlighted || shp == highlighted, prog, shapes,
+                    textures, params);
             }
         }
     }
@@ -13164,53 +12851,51 @@ void _glfw_error_cb(int error, const char* description) {
 // Support
 void _glfw_text_cb(GLFWwindow* gwin, unsigned key) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
-    if (win->_widget_enabled) {
-        ImGui_ImplGlfwGL3_CharCallback(win->_gwin, key);
-    }
-    if (win->_text_cb) win->_text_cb(win, key);
+    if (win->widget_enabled) { ImGui_ImplGlfwGL3_CharCallback(win->gwin, key); }
+    if (win->text_cb) win->text_cb(win, key);
 }
 
 // Support
 void _glfw_key_cb(
     GLFWwindow* gwin, int key, int scancode, int action, int mods) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
-    if (win->_widget_enabled) {
-        ImGui_ImplGlfwGL3_KeyCallback(win->_gwin, key, scancode, action, mods);
+    if (win->widget_enabled) {
+        ImGui_ImplGlfwGL3_KeyCallback(win->gwin, key, scancode, action, mods);
     }
 }
 
 // Support
 void _glfw_mouse_cb(GLFWwindow* gwin, int button, int action, int mods) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
-    if (win->_widget_enabled) {
-        ImGui_ImplGlfwGL3_MouseButtonCallback(win->_gwin, button, action, mods);
+    if (win->widget_enabled) {
+        ImGui_ImplGlfwGL3_MouseButtonCallback(win->gwin, button, action, mods);
     }
-    if (win->_mouse_cb) win->_mouse_cb(win, button, action == GLFW_PRESS, mods);
+    if (win->mouse_cb) win->mouse_cb(win, button, action == GLFW_PRESS, mods);
 }
 
 // Support
 void _glfw_scroll_cb(GLFWwindow* gwin, double xoffset, double yoffset) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
-    if (win->_widget_enabled) {
-        ImGui_ImplGlfwGL3_ScrollCallback(win->_gwin, xoffset, yoffset);
+    if (win->widget_enabled) {
+        ImGui_ImplGlfwGL3_ScrollCallback(win->gwin, xoffset, yoffset);
     }
 }
 
 // Support
 void _glfw_refresh_cb(GLFWwindow* gwin) {
     auto win = (gl_window*)glfwGetWindowUserPointer(gwin);
-    if (win->_refresh_cb) win->_refresh_cb(win);
+    if (win->refresh_cb) win->refresh_cb(win);
 }
 
 // Initialize gl_window
 gl_window* make_window(
-    int width, int height, const string& title, void* user_pointer) {
+    int width, int height, const std::string& title, void* user_pointer) {
     auto win = new gl_window();
     // gl_window
-    win->_user_pointer = user_pointer;
+    win->user_pointer = user_pointer;
 
     // gl_window
-    if (!glfwInit()) throw runtime_error("cannot open gl_window");
+    if (!glfwInit()) throw std::runtime_error("cannot open gl_window");
 
     // profile creation
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -13220,18 +12905,18 @@ gl_window* make_window(
 #endif
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    win->_gwin = glfwCreateWindow(width, height, title.c_str(), 0, 0);
-    glfwMakeContextCurrent(win->_gwin);
-    glfwSetWindowUserPointer(win->_gwin, win);
+    win->gwin = glfwCreateWindow(width, height, title.c_str(), 0, 0);
+    glfwMakeContextCurrent(win->gwin);
+    glfwSetWindowUserPointer(win->gwin, win);
 
     glfwSetErrorCallback(_glfw_error_cb);
 
-    glfwSetCharCallback(win->_gwin, _glfw_text_cb);
-    glfwSetKeyCallback(win->_gwin, _glfw_key_cb);
-    glfwSetMouseButtonCallback(win->_gwin, _glfw_mouse_cb);
-    glfwSetScrollCallback(win->_gwin, _glfw_scroll_cb);
+    glfwSetCharCallback(win->gwin, _glfw_text_cb);
+    glfwSetKeyCallback(win->gwin, _glfw_key_cb);
+    glfwSetMouseButtonCallback(win->gwin, _glfw_mouse_cb);
+    glfwSetScrollCallback(win->gwin, _glfw_scroll_cb);
 
-    glfwSetWindowRefreshCallback(win->_gwin, _glfw_refresh_cb);
+    glfwSetWindowRefreshCallback(win->gwin, _glfw_refresh_cb);
 
 // init gl extensions
 #ifndef __APPLE__
@@ -13243,28 +12928,28 @@ gl_window* make_window(
 // Set gl_window callbacks
 void set_window_callbacks(gl_window* win, gl_text_callback text_cb,
     gl_mouse_callback mouse_cb, gl_refresh_callback refresh_cb) {
-    win->_text_cb = text_cb;
-    win->_mouse_cb = mouse_cb;
-    win->_refresh_cb = refresh_cb;
-    if (win->_text_cb) glfwSetCharCallback(win->_gwin, _glfw_text_cb);
+    win->text_cb = text_cb;
+    win->mouse_cb = mouse_cb;
+    win->refresh_cb = refresh_cb;
+    if (win->text_cb) glfwSetCharCallback(win->gwin, _glfw_text_cb);
 }
 
 // Clear gl_window
 void clear_window(gl_window* win) {
-    if (win->_gwin) {
-        glfwDestroyWindow(win->_gwin);
+    if (win->gwin) {
+        glfwDestroyWindow(win->gwin);
         glfwTerminate();
-        win->_gwin = nullptr;
+        win->gwin = nullptr;
     }
-    if (win->_widget_enabled) {
+    if (win->widget_enabled) {
         ImGui_ImplGlfwGL3_Shutdown();
-        win->_widget_enabled = false;
+        win->widget_enabled = false;
     }
 }
 
 // Set gl_window title
-void set_window_title(gl_window* win, const string& title) {
-    glfwSetWindowTitle(win->_gwin, title.c_str());
+void set_window_title(gl_window* win, const std::string& title) {
+    glfwSetWindowTitle(win->gwin, title.c_str());
 }
 
 // Wait events
@@ -13274,19 +12959,19 @@ void wait_events(gl_window* win) { glfwWaitEvents(); }
 void poll_events(gl_window* win) { glfwPollEvents(); }
 
 // Swap buffers
-void swap_buffers(gl_window* win) { glfwSwapBuffers(win->_gwin); }
+void swap_buffers(gl_window* win) { glfwSwapBuffers(win->gwin); }
 
 // Should close
-bool should_close(gl_window* win) { return glfwWindowShouldClose(win->_gwin); }
+bool should_close(gl_window* win) { return glfwWindowShouldClose(win->gwin); }
 
 // Mouse button
 int get_mouse_button(gl_window* win) {
     auto mouse1 =
-        glfwGetMouseButton(win->_gwin, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS;
+        glfwGetMouseButton(win->gwin, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS;
     auto mouse2 =
-        glfwGetMouseButton(win->_gwin, GLFW_MOUSE_BUTTON_2) == GLFW_PRESS;
+        glfwGetMouseButton(win->gwin, GLFW_MOUSE_BUTTON_2) == GLFW_PRESS;
     auto mouse3 =
-        glfwGetMouseButton(win->_gwin, GLFW_MOUSE_BUTTON_3) == GLFW_PRESS;
+        glfwGetMouseButton(win->gwin, GLFW_MOUSE_BUTTON_3) == GLFW_PRESS;
     if (mouse1) return 1;
     if (mouse2) return 2;
     if (mouse3) return 3;
@@ -13311,45 +12996,46 @@ int get_mouse_button(gl_window* win) {
 // Mouse position
 vec2i get_mouse_pos(gl_window* win) {
     double x, y;
-    glfwGetCursorPos(win->_gwin, &x, &y);
+    glfwGetCursorPos(win->gwin, &x, &y);
     return {(int)x, (int)y};
 }
 
 // Mouse position
 vec2f get_mouse_posf(gl_window* win) {
     double x, y;
-    glfwGetCursorPos(win->_gwin, &x, &y);
+    glfwGetCursorPos(win->gwin, &x, &y);
     return {(float)x, (float)y};
 }
 
 // Window size
 vec2i get_window_size(gl_window* win) {
     auto ret = vec2i{0, 0};
-    glfwGetWindowSize(win->_gwin, &ret.x, &ret.y);
+    glfwGetWindowSize(win->gwin, &ret.x, &ret.y);
     return ret;
 }
 
 // Check if a key is pressed (not all keys are supported)
 bool get_key(gl_window* win, int key) {
     key = std::toupper(key);
-    return glfwGetKey(win->_gwin, key) == GLFW_PRESS;
+    return glfwGetKey(win->gwin, key) == GLFW_PRESS;
 }
 
 // Framebuffer size
 vec2i get_framebuffer_size(gl_window* win) {
     auto ret = vec2i{0, 0};
-    glfwGetFramebufferSize(win->_gwin, &ret.x, &ret.y);
+    glfwGetFramebufferSize(win->gwin, &ret.x, &ret.y);
     return ret;
 }
 
 // Read pixels
-vector<vec4b> get_screenshot(gl_window* win, vec2i& wh, bool flipy, bool back) {
+std::vector<vec4b> get_screenshot(
+    gl_window* win, vec2i& wh, bool flipy, bool back) {
     wh = get_framebuffer_size(win);
-    auto pixels = vector<vec4b>(wh[0] * wh[1]);
+    auto pixels = std::vector<vec4b>(wh[0] * wh[1]);
     glReadBuffer((back) ? GL_BACK : GL_FRONT);
     glReadPixels(0, 0, wh[0], wh[1], GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     if (flipy) {
-        vector<vec4b> line(wh[0]);
+        std::vector<vec4b> line(wh[0]);
         for (int j = 0; j < wh[1] / 2; j++) {
             memcpy(line.data(), pixels.data() + j * wh[0] * 4, wh[0] * 4);
             memcpy(pixels.data() + j * wh[0] * 4,
@@ -13424,12 +13110,12 @@ bool handle_camera_navigation(
 
 // Initialize widgets
 void init_widgets(gl_window* win, bool light_style, bool alt_font) {
-    ImGui_ImplGlfwGL3_Init(win->_gwin, false);
+    ImGui_ImplGlfwGL3_Init(win->gwin, false);
     ImGui::GetStyle().WindowRounding = 0;
     ImGui::GetIO().IniFilename = nullptr;
-    ImGui::SetNextWindowPos({0, 0});
     auto size = get_window_size(win);
-    ImGui::SetNextWindowSize({(float)win->_widget_width, (float)size[1]});
+    ImGui::SetNextWindowPos({(float)size[0] - 320, 0});
+    ImGui::SetNextWindowSize({(float)320, (float)size[1]});
     if (light_style) ImGui::StyleColorsLight();
     if (alt_font) {
         ImGuiIO& io = ImGui::GetIO();
@@ -13440,22 +13126,17 @@ void init_widgets(gl_window* win, bool light_style, bool alt_font) {
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->AddFontDefault();
     }
-    win->_widget_enabled = true;
+    win->widget_enabled = true;
 }
 
 // Begin draw widget
-bool begin_widgets(gl_window* win, const string& title) {
+bool begin_widgets(gl_window* win, const std::string& title) {
     static bool first_time = true;
     ImGui_ImplGlfwGL3_NewFrame();
-    // ImGui::SetNextWindowSize({(float)win->_widget_width, (float)size[1]});
-    // ImGui::SetNextWindowPos({(float)(size[0] - win->_widget_width),
-    // (float)0});
-    // auto flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
-    // ImGui::Begin(title.c_str(), nullptr, flags);
     if (first_time) {
-        ImGui::SetNextWindowPos({0, 0});
         auto size = get_window_size(win);
-        ImGui::SetNextWindowSize({(float)win->_widget_width, (float)size[1]});
+        ImGui::SetNextWindowPos({(float)size[0] - 320, 0});
+        ImGui::SetNextWindowSize({(float)320, (float)size[1]});
         ImGui::SetNextWindowCollapsed(true);
         first_time = false;
     }
@@ -13473,7 +13154,7 @@ void end_widgets(gl_window* win) {
 
 // Whether widget are active
 bool get_widget_active(gl_window* win) {
-    if (!win->_widget_enabled) return false;
+    if (!win->widget_enabled) return false;
     auto io = &ImGui::GetIO();
     return io->WantTextInput || io->WantCaptureMouse || io->WantCaptureKeyboard;
 }
@@ -13491,14 +13172,16 @@ void draw_indent_widget_end(gl_window* win) { ImGui::Unindent(); }
 void draw_continue_widget(gl_window* win) { ImGui::SameLine(); }
 
 // Label widget
-void draw_label_widget(gl_window* win, const string& lbl, const string& msg) {
+void draw_label_widget(
+    gl_window* win, const std::string& lbl, const std::string& msg) {
     ImGui::LabelText(lbl.c_str(), "%s", msg.c_str());
 }
 
 // Value widget
-bool draw_value_widget(gl_window* win, const string& lbl, string& str) {
+bool draw_text_widget(
+    gl_window* win, const std::string& lbl, std::string& str) {
     char buf[4096];
-    if (str.length() >= 4096) throw runtime_error("bad memory");
+    if (str.length() >= 4096) throw std::runtime_error("bad memory");
     memcpy(buf, str.c_str(), str.size());
     buf[str.size()] = 0;
     auto ret = ImGui::InputText(lbl.c_str(), buf, 4096);
@@ -13507,41 +13190,84 @@ bool draw_value_widget(gl_window* win, const string& lbl, string& str) {
 }
 
 // Value widget
-bool draw_value_widget(gl_window* win, const string& lbl, int* val, int ncomp,
-    int min, int max, int incr) {
-    switch (ncomp) {
-        case 1: return ImGui::SliderInt(lbl.c_str(), val, min, max);
-        case 2: return ImGui::SliderInt2(lbl.c_str(), val, min, max);
-        case 3: return ImGui::SliderInt3(lbl.c_str(), val, min, max);
-        case 4: return ImGui::SliderInt4(lbl.c_str(), val, min, max);
-        default: throw runtime_error("bad number of components"); return false;
-    }
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, int& val, int min, int max) {
+    return ImGui::SliderInt(lbl.c_str(), &val, min, max);
+}
+// Value widget
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, vec2i& val, int min, int max) {
+    return ImGui::SliderInt2(lbl.c_str(), &val.x, min, max);
+}
+// Value widget
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, vec3i& val, int min, int max) {
+    return ImGui::SliderInt3(lbl.c_str(), &val.x, min, max);
+}
+// Value widget
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, vec4i& val, int min, int max) {
+    return ImGui::SliderInt4(lbl.c_str(), &val.x, min, max);
 }
 
 // Value widget
-bool draw_value_widget(gl_window* win, const string& lbl, float* val, int ncomp,
-    float min, float max, float incr) {
-    switch (ncomp) {
-        case 1: return ImGui::SliderFloat(lbl.c_str(), val, min, max);
-        case 2: return ImGui::SliderFloat2(lbl.c_str(), val, min, max);
-        case 3: return ImGui::SliderFloat3(lbl.c_str(), val, min, max);
-        case 4: return ImGui::SliderFloat4(lbl.c_str(), val, min, max);
-        default: throw runtime_error("bad number of components"); return false;
-    }
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, float& val, float min, float max) {
+    return ImGui::SliderFloat(lbl.c_str(), &val, min, max);
+}
+// Value widget
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, vec2f& val, float min, float max) {
+    return ImGui::SliderFloat2(lbl.c_str(), &val.x, min, max);
+}
+// Value widget
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, vec3f& val, float min, float max) {
+    return ImGui::SliderFloat3(lbl.c_str(), &val.x, min, max);
+}
+// Value widget
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, vec4f& val, float min, float max) {
+    return ImGui::SliderFloat4(lbl.c_str(), &val.x, min, max);
+}
+
+// Slider widget.
+bool draw_slider_widget(gl_window* win, const std::string& lbl,
+    mat<float, 4>& val, float min, float max) {
+    auto modx = draw_slider_widget(win, lbl + ".x", val.x, min, max);
+    auto mody = draw_slider_widget(win, lbl + ".y", val.y, min, max);
+    auto modz = draw_slider_widget(win, lbl + ".z", val.z, min, max);
+    auto modw = draw_slider_widget(win, lbl + ".w", val.w, min, max);
+    return modx || mody || modz || modw;
+}
+// Slider widget.
+bool draw_slider_widget(gl_window* win, const std::string& lbl,
+    frame<float, 3>& val, float min, float max) {
+    auto modx = draw_slider_widget(win, lbl + ".x", val.x, -1, 1);
+    auto mody = draw_slider_widget(win, lbl + ".y", val.y, -1, 1);
+    auto modz = draw_slider_widget(win, lbl + ".z", val.z, -1, 1);
+    auto modo = draw_slider_widget(win, lbl + ".o", val.o, min, max);
+    // TODO: orthonormalize
+    return modx || mody || modz || modo;
+}
+// Slider widget
+bool draw_slider_widget(
+    gl_window* win, const std::string& lbl, quat4f& val, float min, float max) {
+    auto mod = ImGui::SliderFloat4(lbl.c_str(), &val.x, min, max);
+    if (mod) val = normalize(val);
+    return mod;
 }
 
 // Color widget
-bool draw_color_widget(gl_window* win, const string& lbl, vec4f& val) {
+bool draw_color_widget(gl_window* win, const std::string& lbl, vec4f& val) {
     return ImGui::ColorEdit4(lbl.c_str(), (float*)&val.x);
 }
-
 // Color widget
-bool draw_color_widget(gl_window* win, const string& lbl, vec3f& val) {
+bool draw_color_widget(gl_window* win, const std::string& lbl, vec3f& val) {
     return ImGui::ColorEdit3(lbl.c_str(), (float*)&val.x);
 }
-
 // Color widget
-bool draw_color_widget(gl_window* win, const string& lbl, vec4b& val) {
+bool draw_color_widget(gl_window* win, const std::string& lbl, vec4b& val) {
     auto valf = ImGui::ColorConvertU32ToFloat4(*(uint32_t*)&val);
     if (ImGui::ColorEdit4(lbl.c_str(), &valf.x)) {
         auto valb = ImGui::ColorConvertFloat4ToU32(valf);
@@ -13552,19 +13278,19 @@ bool draw_color_widget(gl_window* win, const string& lbl, vec4b& val) {
 }
 
 // Bool widget
-bool draw_value_widget(gl_window* win, const string& lbl, bool& val) {
+bool draw_checkbox_widget(gl_window* win, const std::string& lbl, bool& val) {
     return ImGui::Checkbox(lbl.c_str(), &val);
 }
 
 // Combo widget
 bool draw_combo_widget_begin(
-    gl_window* win, const string& lbl, const string& label) {
+    gl_window* win, const std::string& lbl, const std::string& label) {
     return ImGui::BeginCombo(lbl.c_str(), label.c_str());
 }
 
 // Combo widget
 bool draw_combo_widget_item(
-    gl_window* win, const string& label, int idx, bool selected) {
+    gl_window* win, const std::string& label, int idx, bool selected) {
     ImGui::PushID((void*)(intptr_t)idx);
     auto clicked = ImGui::Selectable(label.c_str(), selected);
     if (selected) ImGui::SetItemDefaultFocus();
@@ -13576,17 +13302,17 @@ bool draw_combo_widget_item(
 void draw_combo_widget_end(gl_window* win) { ImGui::EndCombo(); }
 
 // Button widget
-bool draw_button_widget(gl_window* win, const string& lbl) {
+bool draw_button_widget(gl_window* win, const std::string& lbl) {
     return ImGui::Button(lbl.c_str());
 }
 
 // Collapsible header
-bool draw_header_widget(gl_window* win, const string& lbl) {
+bool draw_header_widget(gl_window* win, const std::string& lbl) {
     return ImGui::CollapsingHeader(lbl.c_str());
 }
 
 // Start tree node
-bool draw_tree_widget_begin(gl_window* win, const string& lbl) {
+bool draw_tree_widget_begin(gl_window* win, const std::string& lbl) {
     return ImGui::TreeNode(lbl.c_str());
 }
 
@@ -13595,7 +13321,7 @@ void draw_tree_widget_end(gl_window* win) { ImGui::TreePop(); }
 
 // Start selectable tree node
 bool draw_tree_widget_begin(
-    gl_window* win, const string& lbl, void*& selection, void* content) {
+    gl_window* win, const std::string& lbl, void*& selection, void* content) {
     ImGuiTreeNodeFlags node_flags =
         ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
     if (selection == content) node_flags |= ImGuiTreeNodeFlags_Selected;
@@ -13605,8 +13331,8 @@ bool draw_tree_widget_begin(
 }
 
 // Start selectable tree node
-bool draw_tree_widget_begin(gl_window* win, const string& lbl, void*& selection,
-    void* content, const vec4f& col) {
+bool draw_tree_widget_begin(gl_window* win, const std::string& lbl,
+    void*& selection, void* content, const vec4f& col) {
     ImGui::PushStyleColor(ImGuiCol_Text, {col.x, col.y, col.z, col.w});
     auto ret = draw_tree_widget_begin(win, lbl, selection, content);
     ImGui::PopStyleColor();
@@ -13618,7 +13344,7 @@ void draw_tree_widget_end(gl_window* win, void* content) { ImGui::TreePop(); }
 
 // Selectable tree leaf node
 void draw_tree_widget_leaf(
-    gl_window* win, const string& lbl, void*& selection, void* content) {
+    gl_window* win, const std::string& lbl, void*& selection, void* content) {
     ImGuiTreeNodeFlags node_flags =
         ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
     if (selection == content) node_flags |= ImGuiTreeNodeFlags_Selected;
@@ -13627,8 +13353,8 @@ void draw_tree_widget_leaf(
 }
 
 // Selectable tree leaf node
-void draw_tree_widget_leaf(gl_window* win, const string& lbl, void*& selection,
-    void* content, const vec4f& col) {
+void draw_tree_widget_leaf(gl_window* win, const std::string& lbl,
+    void*& selection, void* content, const vec4f& col) {
     ImGui::PushStyleColor(ImGuiCol_Text, {col.x, col.y, col.z, col.w});
     draw_tree_widget_leaf(win, lbl, selection, content);
     ImGui::PopStyleColor();
@@ -13662,26 +13388,31 @@ void draw_image_widget(
     ImGui::Image((void*)(size_t)tid, {s.x, s.y});
 }
 
-// Scroll region
-void draw_scroll_widget_begin(
-    gl_window* win, const string& lbl, int height, bool border) {
-    ImGui::BeginChild(lbl.c_str(), ImVec2(0, height), border);
+// Image widget
+void draw_image_widget(gl_window* win, gl_texture& txt, const vec2i& size) {
+    draw_image_widget(win, get_texture_id(txt), size, {txt.width, txt.height});
 }
 
 // Scroll region
+void draw_scroll_widget_begin(
+    gl_window* win, const std::string& lbl, int height, bool border) {
+    ImGui::BeginChild(lbl.c_str(), ImVec2(0, height), border);
+}
+// Scroll region
 void draw_scroll_widget_end(gl_window* win) { ImGui::EndChild(); }
-
 // Scroll region
 void draw_scroll_widget_here(gl_window* win) { ImGui::SetScrollHere(); }
 
 // Group ids
 void draw_groupid_widget_begin(gl_window* win, int gid) { ImGui::PushID(gid); }
-
 // Group ids
 void draw_groupid_widget_begin(gl_window* win, void* gid) {
     ImGui::PushID(gid);
 }
-
+// Group ids
+void draw_groupid_widget_begin(gl_window* win, const char* gid) {
+    ImGui::PushID(gid);
+}
 // Group ids
 void draw_groupid_widget_end(gl_window* win) { ImGui::PopID(); }
 
@@ -13694,6 +13425,37 @@ void draw_tree_widget_color_begin(gl_window* win, const vec4f& color) {
 // Text color
 void draw_tree_widget_color_end(gl_window* win) { ImGui::PopStyleColor(); }
 
+// Image inspection widgets.
+void draw_imageinspect_widgets(gl_window* win, const std::string& lbl,
+    const image4f& hdr, const image4b& ldr, const vec2f& mouse_pos,
+    const gl_stdimage_params& params) {
+    auto xy = (mouse_pos - params.offset) / params.zoom;
+    auto i = (int)round(xy.x), j = (int)round(xy.y);
+    auto v4f = zero4f;
+    auto v4b = zero4b;
+    if (!hdr.empty()) {
+        auto w = hdr.width(), h = hdr.height();
+        if (i >= 0 && i < w && j >= 0 && j < h) {
+            v4f = hdr.at(i, j);
+            v4b = linear_to_srgb(hdr.at(i, j));
+        }
+    } else if (!ldr.empty()) {
+        auto w = ldr.width(), h = ldr.height();
+        if (i >= 0 && i < w && j >= 0 && j < h) {
+            v4f = srgb_to_linear(ldr.at(i, j));
+            v4b = ldr.at(i, j);
+        }
+    }
+    char buf[1024];
+    sprintf(buf, "%5d %5d", i, j);
+    draw_label_widget(win, lbl + "mouse pos", buf);
+    sprintf(buf, "%4.4g %4.4g %4.4g %4.4g", v4f.x, v4f.y, v4f.z, v4f.w);
+    draw_label_widget(win, lbl + "hdr val", buf);
+    sprintf(
+        buf, "%3d %3d %3d %3d", (int)v4b.x, (int)v4b.y, (int)v4b.z, (int)v4b.w);
+    draw_label_widget(win, lbl + "ldr val", buf);
+}
+
 }  // namespace ygl
 
 // -----------------------------------------------------------------------------
@@ -13701,553 +13463,325 @@ void draw_tree_widget_color_end(gl_window* win) { ImGui::PopStyleColor(); }
 // -----------------------------------------------------------------------------
 namespace ygl {
 
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, camera* cam, void*& selection) {
-    draw_tree_widget_leaf(win, lbl + cam->name, selection, cam);
-}
+// Implementation of draw camera
+struct draw_camera_visitor {
+    gl_window* win = nullptr;
+    int edited = 0;
 
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, texture* txt, void*& selection) {
-    draw_tree_widget_leaf(win, lbl + txt->path, selection, txt);
-}
+    // constructor
+    draw_camera_visitor(gl_window* win_) : win(win_) {}
 
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, texture_info* info, void*& selection) {
-    draw_tree_widgets(win, lbl, info->txt, selection);
-}
+    template <typename T>
+    void operator()(T& val, const visit_var& var) {
+        edited += draw_value_widget(win, var.name, val, var.min, var.max,
+            var.type == visit_var_type::color);
+    }
 
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, material* mat, void*& selection) {
-    if (draw_tree_widget_begin(win, lbl + mat->name, selection, mat)) {
-        if (mat->ke_txt.txt)
-            draw_tree_widgets(win, "ke: ", mat->ke_txt.txt, selection);
-        if (mat->kd_txt.txt)
-            draw_tree_widgets(win, "kd: ", mat->kd_txt.txt, selection);
-        if (mat->ks_txt.txt)
-            draw_tree_widgets(win, "ks: ", mat->ks_txt.txt, selection);
-        if (mat->rs_txt.txt)
-            draw_tree_widgets(win, "rs: ", mat->rs_txt.txt, selection);
-        if (mat->norm_txt.txt)
-            draw_tree_widgets(win, "norm: ", mat->norm_txt.txt, selection);
-        if (mat->bump_txt.txt)
-            draw_tree_widgets(win, "bump: ", mat->bump_txt.txt, selection);
-        if (mat->disp_txt.txt)
-            draw_tree_widgets(win, "disp: ", mat->disp_txt.txt, selection);
-        draw_tree_widget_end(win);
+    template <typename T>
+    void operator()(
+        T* val, const visit_var& var = visit_var{"", visit_var_type::object}) {
+        if (!val) return;
+        // TODO: fix this separator
+        draw_separator_widget(win);
+        draw_groupid_widget_begin(win, val);
+        draw_separator_widget(win);
+        visit(*val, *this);
+        draw_groupid_widget_end(win);
+    }
+};
+
+// Implementation of camera selection
+bool draw_camera_widgets(gl_window* win, const std::string& lbl, camera* cam) {
+    if (!cam) return false;
+    if (draw_header_widget(win, lbl)) {
+        draw_groupid_widget_begin(win, cam);
+        auto visitor = draw_camera_visitor{win};
+        visitor(cam);
+        draw_groupid_widget_end(win);
+        return visitor.edited;
+    } else {
+        return false;
     }
 }
 
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, shape_group* sgr, void*& selection) {
-    if (draw_tree_widget_begin(win, lbl + sgr->name, selection, sgr)) {
-        for (auto shp : sgr->shapes) {
-            if (shp->mat) draw_tree_widgets(win, "mat: ", shp->mat, selection);
-        }
-        draw_tree_widget_end(win);
-    }
-}
-
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, instance* ist, void*& selection) {
-    if (draw_tree_widget_begin(win, lbl + ist->name, selection, ist)) {
-        if (ist->shp) draw_tree_widgets(win, "shp: ", ist->shp, selection);
-        draw_tree_widget_end(win);
-    }
-}
-
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, environment* env, void*& selection) {
-    if (draw_tree_widget_begin(win, lbl + env->name, selection, env)) {
-        if (env->ke_txt.txt)
-            draw_tree_widgets(win, "txt: ", env->ke_txt.txt, selection);
-        draw_tree_widget_end(win);
-    }
-}
-
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, node* nde, void*& selection) {
-    if (draw_tree_widget_begin(win, lbl + nde->name, selection, nde)) {
-        if (nde->cam) draw_tree_widgets(win, "cam: ", nde->cam, selection);
-        draw_tree_widgets(win, "ist: ", nde->ist, selection);
-        if (nde->env) draw_tree_widgets(win, "env: ", nde->env, selection);
-        if (nde->parent)
-            draw_tree_widgets(win, "parent", nde->parent, selection);
-        for (auto idx = 0; idx < nde->children_.size(); idx++) {
-            draw_tree_widgets(win, "", nde->children_[idx], selection);
-        }
-        draw_tree_widget_end(win);
-    }
-}
-
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, animation_group* agr, void*& selection) {
-    draw_tree_widget_leaf(win, lbl + agr->name, selection, agr);
-}
-
+// get typed selection
 template <typename T>
-void draw_scene_tree_widgets(gl_window* win, const string& lbl,
-    const vector<T*>& elems, void*& selection) {
-    if (draw_tree_widget_begin(win, lbl)) {
-        for (auto elem : elems) draw_tree_widgets(win, "", elem, selection);
-        draw_tree_widget_end(win);
-    }
+inline T*& get_typed_selection(scene_selection& sel) {
+    return nullptr;
+}
+template <>
+inline camera*& get_typed_selection<camera>(scene_selection& sel) {
+    return sel.cam;
+}
+template <>
+inline shape_group*& get_typed_selection<shape_group>(scene_selection& sel) {
+    return sel.sgr;
+}
+template <>
+inline shape*& get_typed_selection<shape>(scene_selection& sel) {
+    return sel.shp;
+}
+template <>
+inline material*& get_typed_selection<material>(scene_selection& sel) {
+    return sel.mat;
+}
+template <>
+inline texture*& get_typed_selection<texture>(scene_selection& sel) {
+    return sel.txt;
+}
+template <>
+inline instance*& get_typed_selection<instance>(scene_selection& sel) {
+    return sel.ist;
+}
+template <>
+inline environment*& get_typed_selection<environment>(scene_selection& sel) {
+    return sel.env;
+}
+template <>
+inline node*& get_typed_selection<node>(scene_selection& sel) {
+    return sel.nde;
+}
+template <>
+inline animation_group*& get_typed_selection<animation_group>(
+    scene_selection& sel) {
+    return sel.agr;
+}
+template <>
+inline animation*& get_typed_selection<animation>(scene_selection& sel) {
+    return sel.anm;
 }
 
-void draw_tree_widgets(
-    gl_window* win, const string& lbl, scene* scn, void*& selection) {
-    draw_scene_tree_widgets(win, lbl + "cameras", scn->cameras, selection);
-    draw_scene_tree_widgets(win, lbl + "textures", scn->textures, selection);
-    draw_scene_tree_widgets(win, lbl + "materials", scn->materials, selection);
-    draw_scene_tree_widgets(win, lbl + "shapes", scn->shapes, selection);
-    draw_scene_tree_widgets(win, lbl + "instances", scn->instances, selection);
-    draw_scene_tree_widgets(
-        win, lbl + "environments", scn->environments, selection);
-    draw_scene_tree_widgets(win, lbl + "nodes", scn->nodes, selection);
-    draw_scene_tree_widgets(
-        win, lbl + "animations", scn->animations, selection);
-}
+// Implementation of draw tree
+struct draw_tree_visitor {
+    gl_window* win = nullptr;
+    scene_selection& sel;
 
-bool draw_elem_widgets(gl_window* win, scene* scn, texture* txt,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    draw_separator_widget(win);
-    draw_label_widget(win, "path", txt->path);
-    auto size = format("{} x {} @ 4 {}", txt->width(), txt->height(),
-        (txt->ldr) ? "byte" : "float");
-    draw_label_widget(win, "size", size);
-    if (contains(gl_txt, txt)) {
-        draw_image_widget(win, get_texture_id(gl_txt.at(txt)), {128, 128},
-            {txt->width(), txt->height()});
-    }
-    return false;
-}
+    // constructor
+    draw_tree_visitor(gl_window* win_, scene_selection& sel_)
+        : win(win_), sel(sel_) {}
 
-bool draw_elem_widgets(gl_window* win, scene* scn, material* mat,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    draw_label_widget(win, "name", mat->name);
-    edited.push_back(
-        draw_value_widget(win, "type", mat->type, material_type_names()));
-    auto ke_l = max_element_value(mat->ke);
-    auto ke_c = (ke_l) ? mat->ke / ke_l : zero3f;
-    edited.push_back(draw_value_widget(win, "ke l", ke_l, 0, 100));
-    edited.push_back(draw_color_widget(win, "ke", ke_c));
-    mat->ke = ke_l * ke_c;
-    edited.push_back(draw_color_widget(win, "kd", mat->kd));
-    edited.push_back(draw_color_widget(win, "ks", mat->ks));
-    edited.push_back(draw_color_widget(win, "kt", mat->kt));
-    edited.push_back(draw_value_widget(win, "rs", mat->rs));
-
-    auto txt_widget = [scn](gl_window* win, const string& lbl,
-                          texture_info& info) {
-        auto edited = vector<bool>();
-        edited.push_back(draw_value_widget(win, lbl, info.txt, scn->textures));
-        if (info.txt) {
-            edited.push_back(
-                draw_value_widget(win, lbl + " wrap_s", info.wrap_s));
-            edited.push_back(
-                draw_value_widget(win, lbl + " wrap_t", info.wrap_t));
-            edited.push_back(
-                draw_value_widget(win, lbl + " linear", info.linear));
-            edited.push_back(
-                draw_value_widget(win, lbl + " mipmap", info.mipmap));
+    // generic callback
+    template <typename T>
+    void operator()(T& val, const visit_var&) {}
+    // callback for texture_info
+    void operator()(texture_info* val, const visit_var&) {}
+    // callback for array
+    template <typename T>
+    void operator()(std::vector<T*>& val, const visit_var& var) {
+        if (draw_tree_widget_begin(win, var.name)) {
+            for (auto v : val) (*this)(v, var);
+            draw_tree_widget_end(win);
         }
-        return std::any_of(
-            edited.begin(), edited.end(), [](auto x) { return x; });
-    };
-    edited.push_back(txt_widget(win, "ke_txt", mat->ke_txt));
-    edited.push_back(txt_widget(win, "kd_txt", mat->kd_txt));
-    edited.push_back(txt_widget(win, "ks_txt", mat->ks_txt));
-    edited.push_back(txt_widget(win, "kt_txt", mat->kt_txt));
-    edited.push_back(txt_widget(win, "norm_txt", mat->norm_txt));
-    edited.push_back(txt_widget(win, "bump_txt", mat->bump_txt));
-    edited.push_back(txt_widget(win, "disp_txt", mat->disp_txt));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
-
-bool draw_elem_widgets(gl_window* win, scene* scn, shape_group* sgr,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    draw_label_widget(win, "name", sgr->name);
-    auto sid = 0;
-    for (auto shp : sgr->shapes) {
-        auto ids = " " + to_string(sid);
-        draw_label_widget(win, "name" + ids, shp->name);
-        edited.push_back(
-            draw_value_widget(win, "material" + ids, shp->mat, scn->materials));
-        draw_label_widget(win, "pos" + ids, shp->pos, true);
-        draw_label_widget(win, "norm" + ids, shp->norm, true);
-        draw_label_widget(win, "texcoord" + ids, shp->texcoord, true);
-        draw_label_widget(win, "color" + ids, shp->color, true);
-        draw_label_widget(win, "tangsp" + ids, shp->tangsp, true);
-        draw_label_widget(win, "radius" + ids, shp->radius, true);
-        draw_label_widget(win, "triangles" + ids, shp->triangles, true);
-        draw_label_widget(win, "quads" + ids, shp->quads, true);
-        draw_label_widget(win, "quads_pos" + ids, shp->quads_pos, true);
-        draw_label_widget(win, "quads_norm" + ids, shp->quads_norm, true);
-        draw_label_widget(
-            win, "quads_texcoord" + ids, shp->quads_texcoord, true);
-        draw_label_widget(win, "lines" + ids, shp->lines, true);
-        draw_label_widget(win, "points" + ids, shp->points, true);
-        draw_label_widget(win, "beziers" + ids, shp->beziers, true);
     }
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
-
-bool draw_elem_widgets(gl_window* win, scene* scn, camera* cam,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    draw_label_widget(win, "name", cam->name);
-    edited.push_back(draw_value_widget(win, "frame", cam->frame, -10, 10));
-    edited.push_back(draw_value_widget(win, "yfov", cam->yfov, 0.1, 4));
-    edited.push_back(draw_value_widget(win, "aspect", cam->aspect, 0.1, 4));
-    edited.push_back(draw_value_widget(win, "focus", cam->focus, 0.01, 10));
-    edited.push_back(draw_value_widget(win, "aperture", cam->aperture));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
-
-bool draw_elem_widgets(gl_window* win, scene* scn, instance* ist,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    draw_label_widget(win, "name", ist->name);
-    edited.push_back(draw_value_widget(win, "frame", ist->frame, -10, 10));
-    edited.push_back(draw_value_widget(win, "shape", ist->shp, scn->shapes));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
-
-bool draw_elem_widgets(gl_window* win, scene* scn, environment* env,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto txt_widget = [scn](gl_window* win, const string& lbl,
-                          texture_info& info) {
-        auto edited = vector<bool>();
-        edited.push_back(draw_value_widget(win, lbl, info.txt, scn->textures));
-        if (info.txt) {
-            edited.push_back(
-                draw_value_widget(win, lbl + " wrap_s", info.wrap_s));
-            edited.push_back(
-                draw_value_widget(win, lbl + " wrap_t", info.wrap_t));
-            edited.push_back(
-                draw_value_widget(win, lbl + " linear", info.linear));
-            edited.push_back(
-                draw_value_widget(win, lbl + " mipmap", info.mipmap));
+    // callback for pointer
+    template <typename T>
+    void operator()(T* val, const visit_var& var) {
+        if (!val) return;
+        auto lbl = val->name;
+        if (!var.name.empty()) lbl = var.name + ": " + val->name;
+        void* selection = get_typed_selection<T>(sel);
+        auto open = draw_tree_widget_begin(win, lbl, selection, val);
+        if (selection == val) {
+            clear_selection(sel);
+            get_typed_selection<T>(sel) = val;
         }
-        return std::any_of(
-            edited.begin(), edited.end(), [](auto x) { return x; });
-    };
-
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    draw_label_widget(win, "name", env->name);
-    edited.push_back(draw_value_widget(win, "frame", env->frame, 0, 0));
-    auto ke_l = max_element_value(env->ke);
-    auto ke_c = (ke_l) ? env->ke / ke_l : zero3f;
-    edited.push_back(draw_value_widget(win, "ke l", ke_l, 0, 100));
-    edited.push_back(draw_color_widget(win, "ke", ke_c));
-    env->ke = ke_l * ke_c;
-    edited.push_back(txt_widget(win, "ke_txt", env->ke_txt));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
-
-bool draw_elem_widgets(gl_window* win, scene* scn, node* nde, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    draw_label_widget(win, "name", nde->name);
-    edited.push_back(draw_value_widget(win, "parent", nde->parent, scn->nodes));
-    edited.push_back(draw_value_widget(win, "frame", nde->frame, -10, 10));
-    edited.push_back(draw_value_widget(win, "camera", nde->cam, scn->cameras));
-    edited.push_back(
-        draw_value_widget(win, "instance", nde->ist, scn->instances));
-    edited.push_back(
-        draw_value_widget(win, "environment", nde->env, scn->environments));
-    for (auto idx = 0; idx < nde->children_.size(); idx++)
-        edited.push_back(draw_value_widget(
-            win, "child " + to_string(idx), nde->children_[idx], scn->nodes));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
-
-bool draw_elem_widgets(gl_window* win, scene* scn, animation_group* agr,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    draw_label_widget(win, "name", agr->name);
-    for (auto aid = 0; aid < agr->animations.size(); aid++) {
-        auto anm = agr->animations[aid];
-        auto ids = to_string(aid);
-        edited.push_back(draw_value_widget(win, "name " + ids, anm->name));
-        edited.push_back(draw_value_widget(
-            win, "type " + ids, anm->type, keyframe_type_names()));
-        draw_label_widget(win, "times " + ids, anm->times, true);
-        draw_label_widget(win, "translation " + ids, anm->translation, true);
-        draw_label_widget(win, "rotation " + ids, anm->rotation, true);
-        draw_label_widget(win, "scale " + ids, anm->scaling, true);
-    }
-    for (auto tid = 0; tid < agr->targets.size(); tid++) {
-        auto anm = agr->targets[tid].first;
-        auto nde = agr->targets[tid].second;
-        auto ids = to_string(tid);
-        draw_label_widget(win, "target " + ids, anm->name + " -> " + nde->name);
-    }
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
-
-bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
-    test_texture_params* txt, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    draw_separator_widget(win);
-    draw_label_widget(win, "name", txt->name);
-    draw_value_widget(win, "type", txt->type, test_texture_names());
-    draw_value_widget(win, "resolution", txt->resolution);
-    draw_value_widget(win, "tile size", txt->tile_size);
-    draw_value_widget(win, "noise size", txt->noise_scale);
-    draw_value_widget(win, "sky sun angle", txt->sky_sunangle);
-    draw_value_widget(win, "normal map", txt->bump_to_normal);
-    draw_value_widget(win, "bump scale", txt->bump_scale);
-#if 0
-        if (contains(gl_txt, txt)) {
-            draw_image_widget(win, get_texture_id(gl_txt.at(txt)), {128, 128},
-                              {txt->width(), txt->height()});
+        if (open) {
+            visit(val, *this);
+            draw_tree_widget_end(win);
         }
-#endif
-    return false;
-}
+    }
+    // callback for pointer
+    void operator()(scene* val, const visit_var& var) { visit(val, *this); }
+};
 
-bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
-    test_material_params* mat, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    edited.push_back(draw_value_widget(win, "name", mat->name));
-    edited.push_back(
-        draw_value_widget(win, "type", mat->type, test_material_names()));
-    edited.push_back(draw_value_widget(win, "emission", mat->emission, 0, 100));
-    edited.push_back(draw_color_widget(win, "color", mat->color));
-    edited.push_back(draw_value_widget(win, "roughness", mat->roughness));
-    edited.push_back(draw_value_widget(win, "texture", mat->texture));
-    edited.push_back(draw_value_widget(win, "normal", mat->normal));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
+// Implementation of draw elements
+struct draw_elem_visitor {
+    gl_window* win = nullptr;
+    scene* scn = nullptr;
+    scene_selection& sel;
+    const std::unordered_map<texture*, gl_texture>* gl_txt;
+    int edited = 0;
 
-bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
-    test_shape_params* shp, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    edited.push_back(draw_value_widget(win, "name", shp->name));
-    edited.push_back(
-        draw_value_widget(win, "type", shp->type, test_shape_names()));
-    edited.push_back(draw_value_widget(win, "material", shp->material));
-    edited.push_back(
-        draw_value_widget(win, "tesselation", shp->tesselation, -1, 8));
-    edited.push_back(
-        draw_value_widget(win, "subdivision", shp->subdivision, -1, 8));
-    edited.push_back(draw_value_widget(win, "scale", shp->scale, 0.01f, 10.0f));
-    edited.push_back(draw_value_widget(win, "faceted", shp->faceted));
-    edited.push_back(
-        draw_value_widget(win, "num lines/points", shp->num, -1, 100000));
-    edited.push_back(draw_value_widget(
-        win, "radius lines/points", shp->radius, 0.0001f, 0.01f));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
+    // constructor
+    draw_elem_visitor(gl_window* win_, scene* scn_, scene_selection& sel_,
+        const std::unordered_map<texture*, gl_texture>* gl_txt_)
+        : win(win_), scn(scn_), sel(sel_), gl_txt(gl_txt_) {}
 
-bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
-    test_camera_params* cam, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    edited.push_back(draw_value_widget(win, "name", cam->name));
-    edited.push_back(draw_value_widget(win, "from", cam->from, -10, 10));
-    edited.push_back(draw_value_widget(win, "to", cam->to, -10, 10));
-    edited.push_back(draw_value_widget(win, "yfov", cam->yfov, 0.1, 4));
-    edited.push_back(draw_value_widget(win, "aspect", cam->aspect, 0.1, 4));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
+    template <typename T>
+    void operator()(T& val, const visit_var& var) {
+        edited += draw_value_widget(win, var.name, val, var.min, var.max,
+            var.type == visit_var_type::color);
+    }
 
-bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
-    test_environment_params* env, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    edited.push_back(draw_value_widget(win, "name", env->name));
-    edited.push_back(
-        draw_value_widget(win, "rotation", env->rotation, -pif, pif));
-    edited.push_back(draw_value_widget(win, "emission", env->emission));
-    edited.push_back(draw_value_widget(win, "txt", env->texture));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
+    void operator()(texture_info* val, const visit_var& var) {}
+    void operator()(make_hair_params* val, const visit_var& var) {}
 
-bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
-    test_node_params* nde, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    edited.push_back(draw_value_widget(win, "name", nde->name));
-    edited.push_back(draw_value_widget(win, "frame", nde->frame));
-    edited.push_back(draw_value_widget(win, "camera", nde->camera));
-    edited.push_back(draw_value_widget(win, "parent", nde->parent));
-    edited.push_back(draw_value_widget(win, "instance", nde->instance));
-    edited.push_back(draw_value_widget(win, "environment", nde->environment));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
+    template <typename T>
+    void operator()(image<T>& val, const visit_var& var) {
+        if (empty(val)) return;
+        auto size = format("{} x {}", val.width(), val.height());
+        draw_label_widget(win, var.name, size);
+    }
 
-bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
-    test_animation_params* anm, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    edited.push_back(draw_value_widget(win, "name", anm->name));
-    edited.push_back(draw_value_widget(win, "bezier", anm->bezier));
-    edited.push_back(draw_value_widget(win, "speed", anm->speed));
-    edited.push_back(draw_value_widget(win, "scale", anm->scale));
-    for (auto idx = 0; idx < anm->times.size(); idx++)
-        edited.push_back(
-            draw_value_widget(win, "time " + to_string(idx), anm->times[idx]));
-    for (auto idx = 0; idx < anm->translation.size(); idx++)
-        edited.push_back(draw_value_widget(
-            win, "translation " + to_string(idx), anm->translation[idx]));
-    for (auto idx = 0; idx < anm->rotation.size(); idx++)
-        edited.push_back(draw_value_widget(
-            win, "rotation " + to_string(idx), anm->rotation[idx]));
-    for (auto idx = 0; idx < anm->scaling.size(); idx++)
-        edited.push_back(draw_value_widget(
-            win, "scaling " + to_string(idx), anm->scaling[idx]));
-    for (auto idx = 0; idx < anm->nodes.size(); idx++)
-        edited.push_back(
-            draw_value_widget(win, "node " + to_string(idx), anm->nodes[idx]));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
+    template <typename T>
+    void operator()(std::vector<T*>& val, const visit_var& var) {
+        if (var.type != visit_var_type::reference) {
+            for (auto idx = 0; idx < val.size(); idx++) visit(val[idx], *this);
+        }
+    }
+    template <typename T>
+    void operator()(std::vector<T>& val, const visit_var& var) {
+        if (val.empty()) return;
+        draw_label_widget(win, var.name, (int)val.size());
+    }
+    template <typename T1, typename T2>
+    void operator()(std::vector<std::pair<T1*, T2*>>& val, const visit_var&) {
+        // TODO
+    }
 
-bool draw_elem_widgets(gl_window* win, test_scene_params* scn,
-    test_instance_params* ist, void*& selection,
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto edited = vector<bool>();
-    draw_separator_widget(win);
-    edited.push_back(draw_value_widget(win, "name", ist->name));
-    edited.push_back(draw_value_widget(win, "frame", ist->frame, -10, 10));
-    edited.push_back(draw_value_widget(win, "shape", ist->shape));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
+    template <typename T>
+    void operator()(
+        T* val, const visit_var& var = visit_var{"", visit_var_type::object}) {
+        if (!val) return;
+        if (var.type == visit_var_type::reference) {
+            edited += draw_combo_widget(win, var.name, val, elems(val));
+        } else {
+            if (!val) return;
+            // TODO: fix this separator
+            draw_separator_widget(win);
+            draw_groupid_widget_begin(win, val);
+            draw_separator_widget(win);
+            visit(*val, *this);
+            preview(val);
+            draw_groupid_widget_end(win);
+        }
+    }
+
+    template <typename T, typename TT>
+    void operator()(T* elem, std::vector<TT*>& telems) {
+        if (!elem) return;
+        auto telem = (TT*)nullptr;
+        for (auto te : telems)
+            if (te->name == elem->name) telem = te;
+        if (telem) {
+            auto last = edited;
+            operator()(telem);
+            if (last != edited) update_proc_elem(scn, elem, telem);
+        }
+        operator()(elem);
+    }
+
+    template <typename T>
+    const std::vector<T*>& elems(T* aux) {
+        static auto v = std::vector<T*>();
+        return v;
+    }
+    const std::vector<texture*>& elems(texture* aux) { return scn->textures; }
+    const std::vector<shape_group*>& elems(shape_group* aux) {
+        return scn->shapes;
+    }
+    const std::vector<camera*> elems(camera* aux) { return scn->cameras; }
+    const std::vector<material*> elems(material* aux) { return scn->materials; }
+    const std::vector<instance*> elems(instance* aux) { return scn->instances; }
+    const std::vector<environment*> elems(environment* aux) {
+        return scn->environments;
+    }
+    const std::vector<node*> elems(node* aux) { return scn->nodes; }
+    const std::vector<animation_group*> elems(animation_group* aux) {
+        return scn->animations;
+    }
+
+    template <typename T>
+    void preview(T* val) {}
+    void preview(texture* txt) {
+        if (!gl_txt) return;
+        if (!contains(*gl_txt, txt)) return;
+        draw_image_widget(win, (gl_texture&)gl_txt->at(txt), {128, 128});
+    }
+};
 
 template <typename T, typename T1>
-bool draw_selected_elem_widgets(gl_window* win, scene* scn,
-    test_scene_params* test_scn, const vector<T*>& elems,
-    vector<T1>& test_elems, void*& selection,
-    void (*update_test_elem)(const scene*, T*, const T1&),
-    const unordered_map<texture*, gl_texture>& gl_txt) {
-    auto selected = (T*)nullptr;
-    for (auto elem : elems)
-        if (elem == selection) {
-            selected = elem;
-            break;
-        }
-    if (!selected) return false;
-    auto test_selected = (T1*)nullptr;
-    for (auto& test_elem : test_elems)
-        if (test_elem.name == selected->name) test_selected = &test_elem;
-    auto edited = vector<bool>();
-    if (test_selected) {
-        edited.push_back(
-            draw_elem_widgets(win, test_scn, test_selected, selection, gl_txt));
-        if (edited.back()) update_test_elem(scn, selected, *test_selected);
-    }
-    edited.push_back(draw_elem_widgets(win, scn, selected, selection, gl_txt));
-    return std::any_of(edited.begin(), edited.end(), [](auto x) { return x; });
-}
-
-template <typename T, typename T1>
-bool draw_add_elem_widgets(gl_window* win, scene* scn, const string& lbl,
-    vector<T*>& elems, vector<T1>& test_elems, void*& selection,
-    void (*update_test_elem)(const scene*, T*, const T1&)) {
+inline bool draw_add_elem_widgets(gl_window* win, scene* scn,
+    const std::string& lbl, std::vector<T*>& elems,
+    std::vector<T1*>& proc_elems, scene_selection& sel,
+    std::vector<ygl::scene_selection>& update_list) {
     static auto count = 0;
     if (draw_button_widget(win, "add " + lbl)) {
-        auto name = lbl + "_" + to_string(count++);
+        auto name = lbl + "_" + std::to_string(count++);
         elems.push_back(new T());
         elems.back()->name = name;
-        test_elems.push_back(T1());
-        test_elems.back().name = name;
-        selection = elems.back();
-        update_test_elem(scn, elems.back(), test_elems.back());
+        proc_elems.push_back(new T1());
+        proc_elems.back()->name = name;
+        clear_selection(sel);
+        get_typed_selection<T>(sel) = elems.back();
+        update_list.push_back(sel);
+        update_proc_elem(scn, elems.back(), proc_elems.back());
         return true;
     }
     draw_continue_widget(win);
     return false;
 }
 
-bool draw_scene_widgets(gl_window* win, const string& lbl, scene* scn,
-    void*& selection, const unordered_map<texture*, gl_texture>& gl_txt,
-    test_scene_params* test_scn) {
-    static auto test_scn_def = test_scene_params();
+bool draw_scene_widgets(gl_window* win, const std::string& lbl, scene* scn,
+    scene_selection& sel, std::vector<ygl::scene_selection>& update_list,
+    const std::unordered_map<texture*, gl_texture>& gl_txt,
+    proc_scene* test_scn) {
+    static auto test_scn_def = proc_scene();
 
-    if (draw_header_widget(win, lbl)) {
-        // draw_scroll_widget_begin(win, "model", 240, false);
-        draw_tree_widgets(win, "", scn, selection);
-        // draw_scroll_widget_end(win);
+    if (!scn) return false;
+    if (!lbl.empty() && !draw_header_widget(win, lbl)) return false;
+    draw_groupid_widget_begin(win, scn);
+    // draw_scroll_widget_begin(win, "model", 240, false);
+    auto tree_visitor = draw_tree_visitor{win, sel};
+    tree_visitor(scn, visit_var{"", visit_var_type::object});
+    // draw_scroll_widget_end(win);
 
-        auto edited = vector<bool>();
-
-        if (test_scn) {
-            edited.push_back(
-                draw_add_elem_widgets(win, scn, "cam", scn->cameras,
-                    test_scn->cameras, selection, update_test_camera));
-            edited.push_back(
-                draw_add_elem_widgets(win, scn, "txt", scn->textures,
-                    test_scn->textures, selection, update_test_texture));
-            edited.push_back(
-                draw_add_elem_widgets(win, scn, "mat", scn->materials,
-                    test_scn->materials, selection, update_test_material));
-            edited.push_back(draw_add_elem_widgets(win, scn, "shp", scn->shapes,
-                test_scn->shapes, selection, update_test_shape));
-            if (edited.back()) {
-                scn->instances.push_back(new instance());
-                scn->instances.back()->name = scn->shapes.back()->name;
-                scn->instances.back()->shp = scn->shapes.back();
-                test_scn->instances.push_back(test_instance_params());
-                test_scn->instances.back().name = scn->instances.back()->name;
-                test_scn->instances.back().shape =
-                    scn->instances.back()->shp->name;
-            }
-            edited.push_back(
-                draw_add_elem_widgets(win, scn, "ist", scn->instances,
-                    test_scn->instances, selection, update_test_instance));
-            edited.push_back(draw_add_elem_widgets(win, scn, "env",
-                scn->environments, test_scn->environments, selection,
-                update_test_environment));
-            edited.push_back(
-                draw_add_elem_widgets(win, scn, "anim", scn->animations,
-                    test_scn->animations, selection, update_test_animation));
+    auto update_len = update_list.size();
+    if (test_scn) {
+        draw_add_elem_widgets(
+            win, scn, "cam", scn->cameras, test_scn->cameras, sel, update_list);
+        draw_add_elem_widgets(win, scn, "txt", scn->textures,
+            test_scn->textures, sel, update_list);
+        draw_add_elem_widgets(win, scn, "mat", scn->materials,
+            test_scn->materials, sel, update_list);
+        auto shp_add = draw_add_elem_widgets(
+            win, scn, "shp", scn->shapes, test_scn->shapes, sel, update_list);
+        if (shp_add) {
+            scn->instances.push_back(new instance());
+            scn->instances.back()->name = scn->shapes.back()->name;
+            scn->instances.back()->shp = scn->shapes.back();
+            test_scn->instances.push_back(new proc_instance());
+            test_scn->instances.back()->name = scn->instances.back()->name;
+            test_scn->instances.back()->shape =
+                scn->instances.back()->shp->name;
+            update_list.push_back({});
+            update_list.back().ist = scn->instances.back();
         }
+        draw_add_elem_widgets(win, scn, "ist", scn->instances,
+            test_scn->instances, sel, update_list);
+        draw_add_elem_widgets(win, scn, "env", scn->environments,
+            test_scn->environments, sel, update_list);
+        draw_add_elem_widgets(win, scn, "anim", scn->animations,
+            test_scn->animations, sel, update_list);
+    }
 
-        auto test_scn_res = (test_scn) ? test_scn : &test_scn_def;
-        edited.push_back(
-            draw_selected_elem_widgets(win, scn, test_scn, scn->cameras,
-                test_scn_res->cameras, selection, update_test_camera, gl_txt));
-        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
-            scn->textures, test_scn_res->textures, selection,
-            update_test_texture, gl_txt));
-        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
-            scn->materials, test_scn_res->materials, selection,
-            update_test_material, gl_txt));
-        edited.push_back(
-            draw_selected_elem_widgets(win, scn, test_scn, scn->shapes,
-                test_scn_res->shapes, selection, update_test_shape, gl_txt));
-        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
-            scn->instances, test_scn_res->instances, selection,
-            update_test_instance, gl_txt));
-        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
-            scn->environments, test_scn->environments, selection,
-            update_test_environment, gl_txt));
-        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
-            scn->nodes, test_scn->nodes, selection, update_test_node, gl_txt));
-        edited.push_back(draw_selected_elem_widgets(win, scn, test_scn,
-            scn->animations, test_scn->animations, selection,
-            update_test_animation, gl_txt));
-        return std::any_of(
-            edited.begin(), edited.end(), [](auto x) { return x; });
-    } else
-        return false;
+    auto test_scn_res = (test_scn) ? test_scn : &test_scn_def;
+    auto elem_visitor = draw_elem_visitor{win, scn, sel, &gl_txt};
+    elem_visitor(sel.cam, test_scn_res->cameras);
+    elem_visitor(sel.shp);
+    elem_visitor(sel.sgr, test_scn_res->shapes);
+    elem_visitor(sel.sgr);
+    elem_visitor(sel.ist, test_scn_res->instances);
+    elem_visitor(sel.txt, test_scn_res->textures);
+    elem_visitor(sel.mat, test_scn_res->materials);
+    elem_visitor(sel.env, test_scn_res->environments);
+    elem_visitor(sel.nde, test_scn_res->nodes);
+    elem_visitor(sel.anm);
+    elem_visitor(sel.agr, test_scn_res->animations);
+    if (elem_visitor.edited) update_list.push_back(sel);
+
+    draw_groupid_widget_end(win);
+    return update_list.size() != update_len;
 }
 
 }  // namespace ygl
