@@ -691,7 +691,7 @@ class PBRTParser {
 	// one Object at time, using a single vector is fine.
 	std::vector<ygl::shape*> shapesInObject = {};
 
-	GraphicState gState{ ygl::identity_mat4f, {}, new ygl::material};
+	GraphicState gState{ ygl::identity_mat4f, {}, nullptr};
 
 	// PRIVATE METHODS
 	void advance();
@@ -739,11 +739,6 @@ class PBRTParser {
 	void parse_trianglemesh(ygl::shape *shp);
 	// DEBUG methods
 	void parse_cube(ygl::shape *shp);
-
-	// TODO: implement Inclode directive, note that it requires 
-	// to modify the stream of characters in input to the lexer 
-
-	void load_texture_from_file(std::string filename, ygl::texture_info &txtinfo);
 
 	void execute_ObjectBlock();
 	void execute_ObjectInstance();
@@ -1365,12 +1360,20 @@ void PBRTParser::execute_LookAt(){
 	up_z = atof(this->current_token().get_value().c_str());
 
 	const ygl::vec3f up{ up_x, up_y, up_z };
+	// compute lookup frame
+	auto dir = ygl::normalize(look - eye);
+	auto left = ygl::normalize(ygl::cross(ygl::normalize(up), dir));
+	auto newUp = ygl::cross(dir, left);
 
-	auto mm = ygl::frame_to_mat(ygl::lookat_frame(eye, look, up));
+	auto laf = ygl::lookat_frame(eye, look, up, false);
+	laf.x = -laf.x;
+	auto mm = ygl::frame_to_mat(laf);
 	this->defaultFocus = ygl::length(eye - look);
-	this->gState.CTM = this->gState.CTM * mm;
+	this->gState.CTM = this->gState.CTM * ygl::inverse(mm); // inverse here because pbrt boh
 	this->advance();
 }
+
+
 
 void PBRTParser::execute_Transform() {
 	std::vector<ygl::vec4f> vals;
@@ -1394,7 +1397,6 @@ void PBRTParser::execute_Transform() {
 	nCTM.y = vals[1];
 	nCTM.z = vals[2];
 	nCTM.w = vals[3];
-
 	gState.CTM = nCTM;
 }
 
@@ -1420,7 +1422,6 @@ void PBRTParser::execute_ConcatTransform() {
 	nCTM.y = vals[1];
 	nCTM.z = vals[2];
 	nCTM.w = vals[3];
-
 	gState.CTM = gState.CTM * nCTM;
 }
 
@@ -1440,10 +1441,11 @@ void PBRTParser::execute_Camera() {
 	cam->yfov = 90.0f * ygl::pif / 180;
 	cam->focus = defaultFocus;
 	cam->name = join_string_int("camera", scn->cameras.size());
-	// TODO: check if this is right
+	
 	// CTM defines world to camera transformation
-	cam->frame = ygl::mat_to_frame(this->gState.CTM);
-
+	// cam->frame = ygl::mat_to_frame(this->gState.CTM);
+	cam->frame = ygl::mat_to_frame(ygl::inverse(this->gState.CTM));
+	
 	// Parse the camera parameters
 	// First parameter is the type
 	this->advance();
@@ -1546,7 +1548,6 @@ void PBRTParser::execute_Film() {
 
 	if (xres && yres) {
 		this->defaultAspect = ((float)xres) / ((float)yres);
-
 		for (auto cam : scn->cameras)
 			cam->aspect = this->defaultAspect;
 	}
