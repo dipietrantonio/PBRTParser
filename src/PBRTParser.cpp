@@ -103,15 +103,18 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 	int n_vert_per_face = 0;
 	std::string last = "none";
 	std::getline(plyFile, line);
-	int count = 0;
+	bool is_asc = false;
 	while (true) {
-		if (count++ > 20)
-			break;
 		// skip comments
 		if (!line.compare("end_header"))
 			break;
+		if (ygl::startswith(line, "format") && ygl::contains(line, "ascii")) {
+			is_asc = true;
+			continue;
+		}
+
 		if (ygl::startswith(line, "element")) {
-			auto tokens = split(line);
+			auto tokens = split(line, " \r\n");
 			// get name
 			if (!tokens[1].compare("vertex")) {
 				last = "vertex";
@@ -119,7 +122,7 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 				// read properties
 				std::getline(plyFile, line);
 				while (ygl::startswith(line, "property")) {
-					auto v_tok = split(line);
+					auto v_tok = split(line, " \r\n");
 					if (v_tok[1].compare("float")) {
 						std::cerr << "Unexpected type for vertex property.\n";
 						return false;
@@ -135,7 +138,7 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 				// read properties
 				std::getline(plyFile, line);
 				while (ygl::startswith(line, "property")) {
-					auto v_tok = split(line);
+					auto v_tok = split(line, " \r\n");
 					if (v_tok[2].compare("uint8") && v_tok[2].compare("uchar")) {
 						std::cerr << "Expected type uint8 for list of vertex indexes' size, but got " << v_tok[2] << ".\n";
 						return false;
@@ -144,8 +147,8 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 						std::cerr << "Expected type int for vertex indexes\n";
 						return false;
 					}
-					if (v_tok[4].compare("vertex_indices")) {
-						std::cerr << "Expected vertex_indices property\n";
+					if (v_tok[4].compare("vertex_indices")) { // to do: trim for \r
+						std::cerr << "Expected vertex_indices property, got " << v_tok[4] <<" instead.\n";
 						return false;
 					}
 					std::getline(plyFile, line);
@@ -171,56 +174,92 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 		bool bnorm = false;
 		ygl::vec3f pos, norm;
 		ygl::vec2f uv;
-
-		for (auto prop : vertex_prop) {
-			if (!prop.second.compare("x")) {
-				char buff[4];
-				bpos = true;
-				plyFile.read(buff, 4);
-				pos.x = *((float *)buff);
-			} else if (!prop.second.compare("y")) {
-				char buff[4];
-				plyFile.read(buff, 4);
-				pos.y = *((float *)buff);
-			}
-			else if (!prop.second.compare("z")) {
-				char buff[4];
-				plyFile.read(buff, 4);
-				pos.z = *((float *)buff);
-			}
-			else if (!prop.second.compare("nx")) {
-				char buff[4];
-				bnorm = true;
-				plyFile.read(buff, 4);
-				norm.x = *((float *)buff);
-			}
-			else if (!prop.second.compare("ny")) {
-				char buff[4];
-				plyFile.read(buff, 4);
-				norm.y = *((float *)buff);
-			}
-			else if (!prop.second.compare("nz")) {
-				char buff[4];
-				plyFile.read(buff, 4);
-				norm.z = *((float *)buff);
-			}
-			else if (!prop.second.compare("u")) {
-				char buff[4];
-				buv = true;
-				plyFile.read(buff, 4);
-				uv.x = *((float *)buff);
-			}
-			else if (!prop.second.compare("v")) {
-				char buff[4];
-				plyFile.read(buff, 4);
-				uv.y = *((float *)buff);
-			}
-			else {
-				std::cerr << prop.second << " is not a recognized property of vertex.\n";
-				return false;
+		if (is_asc) {
+			std::getline(plyFile, line);
+			auto vals = split(line, " \r\n");
+			int count = 0;
+			for (auto prop : vertex_prop) {
+				if (!prop.second.compare("x")) {
+					pos.x = atof(vals[count++].c_str());
+				}
+				else if (!prop.second.compare("y")) {
+					pos.y = atof(vals[count++].c_str());
+				}
+				else if (!prop.second.compare("z")) {
+					pos.z = atof(vals[count++].c_str());
+				}
+				else if (!prop.second.compare("nx")) {
+					norm.x = atof(vals[count++].c_str());
+				}
+				else if (!prop.second.compare("ny")) {
+					norm.y = atof(vals[count++].c_str());
+				}
+				else if (!prop.second.compare("nz")) {
+					norm.z = atof(vals[count++].c_str());
+				}
+				else if (!prop.second.compare("u")) {
+					uv.x = atof(vals[count++].c_str());
+				}
+				else if (!prop.second.compare("v")) {
+					uv.y = atof(vals[count++].c_str());
+				}
+				else {
+					std::cerr << prop.second << " is not a recognized property of vertex.\n";
+					return false;
+				}
 			}
 		}
-		
+		else {
+			for (auto prop : vertex_prop) {
+				if (!prop.second.compare("x")) {
+					char buff[4];
+					bpos = true;
+					plyFile.read(buff, 4);
+					pos.x = *((float *)buff);
+				}
+				else if (!prop.second.compare("y")) {
+					char buff[4];
+					plyFile.read(buff, 4);
+					pos.y = *((float *)buff);
+				}
+				else if (!prop.second.compare("z")) {
+					char buff[4];
+					plyFile.read(buff, 4);
+					pos.z = *((float *)buff);
+				}
+				else if (!prop.second.compare("nx")) {
+					char buff[4];
+					bnorm = true;
+					plyFile.read(buff, 4);
+					norm.x = *((float *)buff);
+				}
+				else if (!prop.second.compare("ny")) {
+					char buff[4];
+					plyFile.read(buff, 4);
+					norm.y = *((float *)buff);
+				}
+				else if (!prop.second.compare("nz")) {
+					char buff[4];
+					plyFile.read(buff, 4);
+					norm.z = *((float *)buff);
+				}
+				else if (!prop.second.compare("u")) {
+					char buff[4];
+					buv = true;
+					plyFile.read(buff, 4);
+					uv.x = *((float *)buff);
+				}
+				else if (!prop.second.compare("v")) {
+					char buff[4];
+					plyFile.read(buff, 4);
+					uv.y = *((float *)buff);
+				}
+				else {
+					std::cerr << prop.second << " is not a recognized property of vertex.\n";
+					return false;
+				}
+			}
+		}
 		if (!bpos) {
 			std::cerr << "No vertex positions\n";
 			return false;
@@ -234,26 +273,39 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 	}
 
 	for (int f = 0; f < n_faces; f++) {
-		ygl::vec3i triangle;
-
-		char buff1[1];
-		plyFile.read(buff1, 1);
-		unsigned char n_v = (unsigned char)buff1[0];
-		if (n_v != 3) {
-			std::cerr << "There must be only three vertexes per face. Got " << n_v << " instead.\n";
-			return false;
+		if (is_asc) {
+			std::getline(plyFile, line);
+			auto vals = split(line, " \r\n");
+			if (vals[0].compare("3")) {
+				std::cerr << "There must be only three vertexes per face. Got " << vals[0] << " instead.\n";
+				return false;
+			}
+			ygl::vec3i triangle = { atoi(vals[1].c_str()), atoi(vals[2].c_str()), atoi(vals[3].c_str()) };
+			shp->triangles.push_back(triangle);
 		}
-		char buff[4];
-		plyFile.read(buff, 4);
-		triangle.x = *((int *)buff);
+		else {
+			ygl::vec3i triangle;
 
-		plyFile.read(buff, 4);
-		triangle.y = *((int *)buff);
+			char buff1[1];
+			plyFile.read(buff1, 1);
+			unsigned char n_v = (unsigned char)buff1[0];
+			if (n_v != 3) {
+				std::cerr << "There must be only three vertexes per face. Got " << n_v << " instead.\n";
+				return false;
+			}
+			char buff[4];
+			plyFile.read(buff, 4);
+			triangle.x = *((int *)buff);
 
-		plyFile.read(buff, 4);
-		triangle.z = *((int *)buff);
+			plyFile.read(buff, 4);
+			triangle.y = *((int *)buff);
 
-		shp->triangles.push_back(triangle);
+			plyFile.read(buff, 4);
+			triangle.z = *((int *)buff);
+
+			shp->triangles.push_back(triangle);
+		}
+		
 	}
 	(*shape) = shp;
 	return true;
