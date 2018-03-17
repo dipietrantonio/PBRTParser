@@ -136,7 +136,7 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 				std::getline(plyFile, line);
 				while (ygl::startswith(line, "property")) {
 					auto v_tok = split(line);
-					if (v_tok[2].compare("uint8")) {
+					if (v_tok[2].compare("uint8") && v_tok[2].compare("uchar")) {
 						std::cerr << "Expected type uint8 for list of vertex indexes' size, but got " << v_tok[2] << ".\n";
 						return false;
 					}
