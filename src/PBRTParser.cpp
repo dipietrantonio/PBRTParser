@@ -106,10 +106,11 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 	bool is_asc = false;
 	while (true) {
 		// skip comments
-		if (!line.compare("end_header"))
+		if (ygl::startswith(line, "end_header"))
 			break;
 		if (ygl::startswith(line, "format") && ygl::contains(line, "ascii")) {
 			is_asc = true;
+			std::getline(plyFile, line);
 			continue;
 		}
 
@@ -180,6 +181,7 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 			int count = 0;
 			for (auto prop : vertex_prop) {
 				if (!prop.second.compare("x")) {
+					bpos = true;
 					pos.x = atof(vals[count++].c_str());
 				}
 				else if (!prop.second.compare("y")) {
@@ -1787,6 +1789,9 @@ void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 			}
 			delete data;
 		}
+		else {
+			std::cout << "ignoring parameter '" << par.name << "' ..\n";
+		}
 
 		// TODO: materials parameters overriding
 	}
@@ -1808,7 +1813,15 @@ void PBRTParser::execute_Shape() {
 	ygl::shape *shp = new ygl::shape();
 	std::string shpName = join_string_int("shape", scn->shapes.size());
 	// add material to shape
-	shp->mat = gState.mat;
+	if (!gState.mat) {
+		std::cout << "New material..\n";
+		ygl::material *nM = new ygl::material();
+		shp->mat = nM;
+		scn->materials.push_back(nM);
+	}
+	else {
+		shp->mat = gState.mat;
+	}
 	shp->name = shpName;
 	// TODO: handle when shapes override some material properties
 
@@ -1844,6 +1857,9 @@ void PBRTParser::execute_Shape() {
 		std::cout << "Ignoring shape " << shapeName << "..\n";
 		return;
 	}
+
+	if (shp->norm.size() == 0)
+		ygl::compute_normals(shp);
 
 	// add shp in scene
 	ygl::shape_group *sg = new ygl::shape_group;

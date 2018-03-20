@@ -14,7 +14,7 @@ int main(int argc, char** argv){
 	ygl::trace_image(obj, obj->cameras[0], bvh, tp);
 	*/
 	auto parser = PBRTParser(argv[1]);
-	//auto parser = PBRTParser("C:\\Users\\cristian\\Documents\\Università\\Magistrale\\ComputerGraphics\\PBRTParser\\bin\\Release\\landscape\\view-0.pbrt");
+	//auto parser = PBRTParser("C:\\Users\\cristian\\Documents\\Università\\Magistrale\\ComputerGraphics\\PBRTParser\\bin\\Release\\simple\\prova.pbrt");
 	ygl::scene *scn;
 	try {
 		scn = parser.parse();
