@@ -1414,14 +1414,11 @@ void PBRTParser::execute_LookAt(){
 	up_z = atof(this->current_token().get_value().c_str());
 
 	const ygl::vec3f up{ up_x, up_y, up_z };
-	// compute lookup frame
-	auto dir = ygl::normalize(look - eye);
-	auto left = ygl::normalize(ygl::cross(ygl::normalize(up), dir));
-	auto newUp = ygl::cross(dir, left);
 
-	auto laf = ygl::lookat_frame(eye, look, up, false);
-	laf.x = -laf.x;
-	auto mm = ygl::frame_to_mat(laf);
+	auto fm = ygl::lookat_frame(eye, look, up);
+	fm.x = -fm.x;
+	fm.z = -fm.z;
+	auto mm = ygl::frame_to_mat(fm);
 	this->defaultFocus = ygl::length(eye - look);
 	this->gState.CTM = this->gState.CTM * ygl::inverse(mm); // inverse here because pbrt boh
 	this->advance();
@@ -1430,27 +1427,22 @@ void PBRTParser::execute_LookAt(){
 
 
 void PBRTParser::execute_Transform() {
-	std::vector<ygl::vec4f> vals;
+	std::vector<float> vals;
 	
 	// parse array of values, grouped by 4
 	auto check = [](Lexeme &lxm) {return lxm.get_type() == LexemeType::NUMBER; };
-	auto conversion2 = [](float *x, int g)->ygl::vec4f {
-		ygl::vec4f r;
-		for (int k = 0; k < g; k++)
-			r[k] = x[k];
-		return r; 
+	auto conversion2 = [](float *x, int g)->float {
+		return *x; 
 	};
 	auto conversion = [](std::string x) -> float { return atof(x.c_str()); };
-	this->parse_value_array<ygl::vec4f, float>(4, &vals, check, conversion2, conversion);
+	this->parse_value_array<float, float>(1, &vals, check, conversion2, conversion);
 
-	if (vals.size() != 4)
+	if (vals.size() != 16)
 		throw_syntax_error("Wrong number of parameters to Transform directive.");
 
 	ygl::mat4f nCTM;
-	nCTM.x = vals[0];
-	nCTM.y = vals[1];
-	nCTM.z = vals[2];
-	nCTM.w = vals[3];
+	for (int i = 0; i < 16; i++)
+		(&nCTM.x.x)[i] = vals[i];
 	gState.CTM = nCTM;
 }
 
@@ -1499,7 +1491,7 @@ void PBRTParser::execute_Camera() {
 	// CTM defines world to camera transformation
 	// cam->frame = ygl::mat_to_frame(this->gState.CTM);
 	cam->frame = ygl::mat_to_frame(ygl::inverse(this->gState.CTM));
-	
+	cam->frame.z = -cam->frame.z;
 	// Parse the camera parameters
 	// First parameter is the type
 	this->advance();
@@ -1730,6 +1722,18 @@ void PBRTParser::parse_curve(ygl::shape *shp) {
 	}
 }
 
+void my_compute_normals(const std::vector<ygl::vec3i>& triangles,
+	const std::vector<ygl::vec3f>& pos, std::vector<ygl::vec3f>& norm, bool weighted ) {
+	norm.resize(pos.size());
+	for (auto& n : norm) n = ygl::zero3f;
+	for (auto& t : triangles) {
+		auto n = cross(pos[t.y] - pos[t.z], pos[t.x] - pos[t.z]); // it is different here
+		if (!weighted) n = normalize(n);
+		for (auto vid : t) norm[vid] += n;
+	}
+	for (auto& n : norm) n = normalize(n);
+}
+
 void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 
 	bool indicesCheck = false;
@@ -1795,6 +1799,8 @@ void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 
 		// TODO: materials parameters overriding
 	}
+	if (shp->norm.size() == 0)
+		my_compute_normals(shp->triangles, shp->pos, shp->norm, true);
 
 	if (!(indicesCheck && PCheck))
 		throw_syntax_error("Missing indices or positions in triangle mesh specification.");
