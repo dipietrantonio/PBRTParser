@@ -1867,16 +1867,15 @@ void PBRTParser::execute_Shape() {
 	if (shp->norm.size() == 0)
 		ygl::compute_normals(shp);
 
-	// add shp in scene
-	ygl::shape_group *sg = new ygl::shape_group;
-	sg->shapes.push_back(shp);
-	sg->name = shpName;
-	scn->shapes.push_back(sg);
-
 	if (this->inObjectDefinition) {
 		shapesInObject.push_back(shp);
 	}
 	else {
+		// add shp in scene
+		ygl::shape_group *sg = new ygl::shape_group;
+		sg->shapes.push_back(shp);
+		sg->name = shpName;
+		scn->shapes.push_back(sg);
 		// add a single instance directly to the scene
 		ygl::instance *inst = new ygl::instance();
 		inst->shp = sg;
@@ -1911,12 +1910,14 @@ void PBRTParser::execute_ObjectBlock() {
 		this->parse_object_directive();
 	}
 	auto it = gState.nameToObject.find(objName);
-	if(it == gState.nameToObject.end())
-		gState.nameToObject.insert(std::make_pair(objName, std::make_pair(std::vector<ygl::shape*>(shapesInObject), this->gState.CTM)));
+	if (it == gState.nameToObject.end()) {
+		auto shapesInObjectCopy = shapesInObject;
+		gState.nameToObject.insert(std::make_pair(objName, std::make_pair(shapesInObjectCopy, this->gState.CTM)));
+	}		
 	else
 		it->second = std::make_pair(std::vector<ygl::shape*>(shapesInObject), this->gState.CTM);
 	this->inObjectDefinition = false;
-	this->shapesInObject.clear();
+	this->shapesInObject = std::vector<ygl::shape*>();
 	this->advance();
 }
 
@@ -1937,14 +1938,16 @@ void PBRTParser::execute_ObjectInstance() {
 	ygl::mat4f objectToInstanceCTM = (obj->second).second;
 	ygl::mat4f finalCTM = this->gState.CTM * objectToInstanceCTM;
 
-	ygl::shape_group *sg = new ygl::shape_group;
-	ygl::instance *inst = new ygl::instance;
+	ygl::shape_group *sg = new ygl::shape_group();
+	ygl::instance *inst = new ygl::instance();
 	inst->shp = sg;
+	sg->name = join_string_int("shape_", scn->shapes.size());
 	for (auto shp : shapes) {
 		sg->shapes.push_back(shp);
 	}
-	// TODO: check the correctness of this
+	scn->shapes.push_back(sg);
 	inst->frame = ygl::mat_to_frame(finalCTM);
+	inst->name = join_string_int("instance_", scn->instances.size());
 	scn->instances.push_back(inst);
 }
 
