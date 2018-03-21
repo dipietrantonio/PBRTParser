@@ -785,8 +785,8 @@ class PBRTParser {
 	// Attributes
 	void execute_AttributeBegin();
 	void execute_AttributeEnd();
-	void execute_TransformBegin();
-	void execute_TransformEnd();
+	void execute_TransformBegin(bool fictional = false);
+	void execute_TransformEnd(bool fictional = false);
 
 	void execute_Shape();
 	void parse_curve(ygl::shape *shp);
@@ -1427,22 +1427,28 @@ void PBRTParser::execute_LookAt(){
 
 
 void PBRTParser::execute_Transform() {
-	std::vector<float> vals;
+	std::vector<ygl::vec4f> vals;
 	
 	// parse array of values, grouped by 4
 	auto check = [](Lexeme &lxm) {return lxm.get_type() == LexemeType::NUMBER; };
-	auto conversion2 = [](float *x, int g)->float {
-		return *x; 
+	auto conversion2 = [](float *x, int g)->ygl::vec4f {
+		ygl::vec4f r;
+		for (int k = 0; k < g; k++)
+			r[k] = x[k];
+		return r;
 	};
 	auto conversion = [](std::string x) -> float { return atof(x.c_str()); };
-	this->parse_value_array<float, float>(1, &vals, check, conversion2, conversion);
+	this->parse_value_array<ygl::vec4f, float>(4, &vals, check, conversion2, conversion);
 
-	if (vals.size() != 16)
+	if (vals.size() != 4)
 		throw_syntax_error("Wrong number of parameters to Transform directive.");
 
 	ygl::mat4f nCTM;
-	for (int i = 0; i < 16; i++)
-		(&nCTM.x.x)[i] = vals[i];
+	nCTM.x = vals[0];
+	nCTM.y = vals[1];
+	nCTM.z = vals[2];
+	nCTM.w = vals[3];
+
 	gState.CTM = nCTM;
 }
 
@@ -1620,14 +1626,16 @@ void PBRTParser::execute_AttributeEnd() {
 	stateStack.pop_back();
 }
 
-void PBRTParser::execute_TransformBegin() {
-	this->advance();
+void PBRTParser::execute_TransformBegin(bool fictional) {
+	if(!fictional)
+		this->advance();
 	// save the current CTM
 	CTMStack.push_back(this->gState.CTM);
 }
 
-void PBRTParser::execute_TransformEnd() {
-	this->advance();
+void PBRTParser::execute_TransformEnd(bool fictional) {
+	if(!fictional)
+		this->advance();
 	// save the current CTM
 	this->gState.CTM = CTMStack.back();
 	CTMStack.pop_back();
@@ -1904,6 +1912,7 @@ void PBRTParser::execute_ObjectBlock() {
 		throw_syntax_error("There already exists an object with the specified name.");
 	*/
 	this->advance();
+	this->execute_TransformBegin(true);
 
 	while (!(this->current_token().get_type() == LexemeType::IDENTIFIER &&
 		!this->current_token().get_value().compare("ObjectEnd"))) {
@@ -1919,6 +1928,7 @@ void PBRTParser::execute_ObjectBlock() {
 	this->inObjectDefinition = false;
 	this->shapesInObject = std::vector<ygl::shape*>();
 	this->advance();
+	this->execute_TransformEnd(true);
 }
 
 void PBRTParser::execute_ObjectInstance() {
