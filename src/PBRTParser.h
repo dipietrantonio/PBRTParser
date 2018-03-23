@@ -103,6 +103,37 @@ struct ShapeData {
 	ShapeData(ygl::shape_group *s, ygl::mat4f ctm) : sg(s), CTM(ctm) {};
 };
 
+// This structure will simplify the code later, allowing to use
+// both HDR and LDR images.
+struct TextureSupport {
+
+	ygl::texture *txt;
+	int height;
+	int width;
+	bool is_hdr;
+
+	ygl::vec4f at(int i, int j) {
+		if(is_hdr)
+			return txt->hdr.at(i, j);
+		else
+			return ygl::byte_to_float(txt->ldr.at(i, j));
+	};
+
+	TextureSupport(ygl::texture *t) {
+		txt = t;
+		if (t->ldr.empty()) {
+			is_hdr = true;
+			height = t->hdr.height();
+			width = t->hdr.width();
+		}
+		else {
+			is_hdr = false;
+			height = t->ldr.height();
+			width = t->ldr.width();
+		}	
+	}
+};
+
 class PBRTParser {
 
     private:
@@ -146,6 +177,9 @@ class PBRTParser {
 	unsigned int shapeGroupCounter = 0;
 	unsigned int instanceCounter = 0;
 	unsigned int materialCounter = 0;
+	unsigned int textureCounter = 0;
+
+	enum CounterID {shape, shape_group, instance, material, texture};
 
 	// PRIVATE METHODS
 	
@@ -218,6 +252,12 @@ class PBRTParser {
 	void parse_material_mirror(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed = false);
 	void parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed = false);
 
+	// TEXTURES
+	void parse_imagemap_texture(ygl::texture *txt);
+	void parse_constant_texture(ygl::texture *txt);
+	void parse_checkerboard_texture(ygl::texture *txt);
+	void parse_fbm_texture(ygl::texture *txt);
+
 	void execute_Texture();
 
 	void execute_preworld_directives();
@@ -236,27 +276,21 @@ class PBRTParser {
         throw std::exception(ss.str().c_str());
     };
 
-	inline std::string get_unique_shape_id() {
-		return join_string_int("s_", shapeCounter++);
+	inline std::string get_unique_id(CounterID id) {
+		if(id == CounterID::shape)
+			return join_string_int("s_", shapeCounter++);
+		else if(id == CounterID::shape_group) 
+			return join_string_int("sg_", shapeGroupCounter++);
+		else if(id == CounterID::instance)
+			return join_string_int("i_", instanceCounter++);
+		else if(id == CounterID::material)
+			return join_string_int("m_", materialCounter++);
+		else
+			return join_string_int("t_", textureCounter++);
 	}
-
-	inline std::string get_unique_shapegroup_id() {
-		return join_string_int("sg_", shapeGroupCounter++);
-	}
-
-	inline std::string get_unique_inst_id() {
-		return join_string_int("i_", instanceCounter++);
-	}
-
-	inline std::string get_unique_mat_id() {
-		return join_string_int("m_", materialCounter++);
-	}
-
 
     public:
     
-	// public methods
-
 	// Build a parser for the scene pointed by "filename"
 	PBRTParser(std::string filename){
 		this->lexers.push_back(new PBRTLexer(filename));

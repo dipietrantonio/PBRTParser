@@ -1,10 +1,18 @@
 #include "PBRTParser.h"
 
+// TODOs
+//	- Fix memory leaks (use shared pointers?)
+//  - spectrum type support http://www.fourmilab.ch/documents/specrend/
+
+
 // =====================================================================================
 //                           HELPER FUNCTIONS
 // =====================================================================================
 
+//
+// check_synonym
 // some types are synonyms, transform them to default.
+//
 std::string check_synonym(std::string s) {
 	if (s == "point")
 		return std::string("point3");
@@ -18,6 +26,9 @@ std::string check_synonym(std::string s) {
 	return s;
 }
 
+//
+// check_type_existence
+//
 bool check_type_existence(std::string &val) {
 	std::vector<std::string> varTypes{ "integer", "float", "point2", "vector2", "point3", "vector3",\
 		"normal3", "spectrum", "bool", "string", "rgb", "color", "point", "vector", "normal", "texture" };
@@ -30,6 +41,17 @@ bool check_type_existence(std::string &val) {
 // =====================================================================================
 //                        PBRTParser IMPLEMENTATION
 // =====================================================================================
+
+//
+// parse
+//
+ygl::scene *PBRTParser::parse() {
+	ygl::mat4f CTM = ygl::identity_mat4f;
+	this->advance();
+	this->execute_preworld_directives();
+	this->execute_world_directives();
+	return scn;
+}
 
 //
 // advance
@@ -48,19 +70,7 @@ void PBRTParser::advance() {
 		// See execute_Include() for more info.
 		this->advance();
 	}
-	
 };
-
-//
-// parse
-//
-ygl::scene *PBRTParser::parse() {
-	ygl::mat4f CTM = ygl::identity_mat4f;
-	this->advance();
-	this->execute_preworld_directives();
-	this->execute_world_directives();
-	return scn;
-}
 
 //
 // Remove all the tokens till the next directive
@@ -71,44 +81,9 @@ void PBRTParser::ignore_current_directive() {
 		this->advance();
 }
 
-void PBRTParser::execute_Include() {
-	this->advance();
-	// now read the file to include
-	if (this->current_token().type != LexemeType::STRING)
-		throw_syntax_error("Expected the name of the file to be included.");
-
-	std::string fileToBeIncl = this->current_token().value;
-
-	// call advance here is dangerous. It could end the parsing too soon.
-	// better call it in advance() method, directly on the lexter after being
-	// restored.
-
-	if (fileToBeIncl.length() == 0)
-		throw_syntax_error("Empty filename.");
-
-	//distinguish if it is relative or absolute path
-	std::stringstream ss;
-	for (char ch : fileToBeIncl) {
-		if (ch == '\\')
-			ss << '/';
-		else
-			ss << ch;
-	}
-	fileToBeIncl = ss.str();
-
-	if (fileToBeIncl[0] == '/' || (fileToBeIncl.length() > 3 && fileToBeIncl[1] == ':' && fileToBeIncl[2] == '/')) {
-		// absolute path
-		this->lexers.insert(this->lexers.begin(), new PBRTLexer(fileToBeIncl));
-	}
-	else {
-		// relative path
-		std::stringstream builtPath;
-		builtPath << this->current_path() << "/" << fileToBeIncl;
-		this->lexers.insert(this->lexers.begin(), new PBRTLexer(builtPath.str()));
-	}
-	this->advance();
-}
-
+//
+// execute_preworld_directives
+//
 void PBRTParser::execute_preworld_directives() {
     // When this method starts executing, the first token must be an Identifier of
 	// a directive.
@@ -150,13 +125,16 @@ void PBRTParser::execute_preworld_directives() {
 			this->execute_LookAt();
 		}
 		else {
-			std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring " << this->current_token().value << " directive..\n";
+			std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring "\
+				<< this->current_token().value << " directive..\n";
 			this->ignore_current_directive();
 		}
 	}
 }
 
-
+//
+// execute_world_directives
+//
 void PBRTParser::execute_world_directives() {
 	this->gState.CTM = ygl::identity_mat4f;
 	this->advance();
@@ -167,6 +145,11 @@ void PBRTParser::execute_world_directives() {
 	}
 }
 
+//
+// execute_world_directive
+// NOTE: This has been separated from execute_world_directives because it will be called
+// also inside ObjectBlock.
+//
 void PBRTParser::execute_world_directive() {
 
 	if (this->current_token().type != LexemeType::IDENTIFIER)
@@ -233,11 +216,26 @@ void PBRTParser::execute_world_directive() {
 		this->execute_Texture();
 	}
 	else {
-		std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring " << this->current_token().value << " directive..\n";
+		std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring "\
+			<< this->current_token().value << " directive..\n";
 		this->ignore_current_directive();
 	}
 }
 
+// ----------------------------------------------------------------------------
+//                   DIRECTIVE PARAMETERS PARSING
+//
+// The following functions are used to parse a directive parameter, i.e.
+// "type name" <value>, where value can be a single value or array of values.
+// Type checking is also performed.
+// NOTE: to parse values of different types, i tried to use a template function
+// but the result was messy and less readable than the current solution.
+// ----------------------------------------------------------------------------
+
+//
+// parse_value_int
+// Parse a single value or array of integers.
+//
 void PBRTParser::parse_value_int(std::vector<int> *vals) {
 
 	bool isArray = false;
@@ -262,6 +260,10 @@ void PBRTParser::parse_value_int(std::vector<int> *vals) {
 		throw_syntax_error("The array parsed is empty.");
 }
 
+//
+// parse_value_float
+// Parse a single value or array of floats.
+//
 void PBRTParser::parse_value_float(std::vector<float> *vals) {
 
 	bool isArray = false;
@@ -286,6 +288,10 @@ void PBRTParser::parse_value_float(std::vector<float> *vals) {
 		throw_syntax_error("The array parsed is empty.");
 }
 
+//
+// parse_value_string
+// Parse a single value or array of strings.
+//
 void PBRTParser::parse_value_string(std::vector<std::string> *vals) {
 
 	bool isArray = false;
@@ -310,6 +316,12 @@ void PBRTParser::parse_value_string(std::vector<std::string> *vals) {
 		throw_syntax_error("The array parsed is empty.");
 }
 
+//
+// parse_parameter
+// Fills the PBRTParameter structure with type name and value of the
+// parameter. It is upon to the caller to convert "void * value" to
+// the correct pointer type (by reading the name and type).
+//
 void PBRTParser::parse_parameter(PBRTParameter &par){
 
 	if (this->current_token().type != LexemeType::STRING)
@@ -382,11 +394,56 @@ void PBRTParser::parse_parameter(PBRTParameter &par){
 	}
 }
 
+// ------------------ END PARAMETER PARSING --------------------------------
 
 //
-// TRANSFORMATIONS
+// execute_Include
 //
+void PBRTParser::execute_Include() {
+	this->advance();
+	// now read the file to include
+	if (this->current_token().type != LexemeType::STRING)
+		throw_syntax_error("Expected the name of the file to be included.");
 
+	std::string fileToBeIncl = this->current_token().value;
+
+	// call advance here is dangerous. It could end the parsing too soon.
+	// better call it in advance() method, directly on the lexter after being
+	// restored.
+
+	if (fileToBeIncl.length() == 0)
+		throw_syntax_error("Empty filename.");
+
+	//distinguish if it is relative or absolute path
+	std::stringstream ss;
+	for (char ch : fileToBeIncl) {
+		if (ch == '\\')
+			ss << '/';
+		else
+			ss << ch;
+	}
+	fileToBeIncl = ss.str();
+
+	if (fileToBeIncl[0] == '/' || (fileToBeIncl.length() > 3 && fileToBeIncl[1] == ':' && fileToBeIncl[2] == '/')) {
+		// absolute path
+		this->lexers.insert(this->lexers.begin(), new PBRTLexer(fileToBeIncl));
+	}
+	else {
+		// relative path
+		std::stringstream builtPath;
+		builtPath << this->current_path() << "/" << fileToBeIncl;
+		this->lexers.insert(this->lexers.begin(), new PBRTLexer(builtPath.str()));
+	}
+	this->advance();
+}
+
+// ------------------------------------------------------------------------------------
+//                               TRANSFORMATIONS
+// ------------------------------------------------------------------------------------
+
+//
+// execute_Translate()
+//
 void PBRTParser::execute_Translate() {
 	float x, y, z;
 
@@ -411,6 +468,9 @@ void PBRTParser::execute_Translate() {
 	this->advance();
 }
 
+//
+// execute_Scale()
+//
 void PBRTParser::execute_Scale(){
 	float x, y, z;
 
@@ -435,6 +495,10 @@ void PBRTParser::execute_Scale(){
 	this->gState.CTM =  this->gState.CTM * scale_mat;
 	this->advance();
 }
+
+//
+// execute_Rotate()
+//
 void PBRTParser::execute_Rotate() {
 	float angle, x, y, z;
 
@@ -465,6 +529,9 @@ void PBRTParser::execute_Rotate() {
 	this->advance();
 }
 
+//
+// execute_LookAt()
+//
 void PBRTParser::execute_LookAt(){
 	float eye_x, eye_y, eye_z, look_x, look_y, look_z, up_x, up_y, up_z;
 	
@@ -528,10 +595,11 @@ void PBRTParser::execute_LookAt(){
 	this->advance();
 }
 
-
+//
+// execute_Transform()
+//
 void PBRTParser::execute_Transform() {
 	this->advance();
-	auto convertToFloat = [](std::string &val)->float { return atof(val.c_str()); };
 	std::vector<float> *vals = new std::vector<float>();
 	this->parse_value_float(vals);
 	ygl::mat4f nCTM;
@@ -546,10 +614,11 @@ void PBRTParser::execute_Transform() {
 	gState.CTM = nCTM;
 }
 
+//
+// execute_ConcatTransform()
+//
 void PBRTParser::execute_ConcatTransform() {
 	this->advance();
-
-	auto convertToFloat = [](std::string &val)->float { return atof(val.c_str()); };
 	std::vector<float> *vals = new std::vector<float>();
 	this->parse_value_float(vals);
 	ygl::mat4f nCTM;
@@ -564,14 +633,14 @@ void PBRTParser::execute_ConcatTransform() {
 	gState.CTM = gState.CTM * nCTM;
 }
 
-//
-// SCENE-WIDE RENDERING OPTIONS
-//
+// --------------------------------------------------------------------------
+//                  SCENE-WIDE RENDERING OPTIONS
+// --------------------------------------------------------------------------
 
 //
 // execute_Camera
 // Parse camera information.
-// NOTE: only support perspective camera for now. And only one camera
+// NOTE: only support perspective camera for now.
 //
 void PBRTParser::execute_Camera() {
 	ygl::camera *cam = new ygl::camera;
@@ -582,9 +651,9 @@ void PBRTParser::execute_Camera() {
 	cam->name = join_string_int("camera", scn->cameras.size());
 	
 	// CTM defines world to camera transformation
-	// cam->frame = ygl::mat_to_frame(this->gState.CTM);
 	cam->frame = ygl::mat_to_frame(ygl::inverse(this->gState.CTM));
 	cam->frame.z = -cam->frame.z;
+	
 	// Parse the camera parameters
 	// First parameter is the type
 	this->advance();
@@ -596,14 +665,12 @@ void PBRTParser::execute_Camera() {
 	// RESTRICTION: only perspective camera is supported
 	if (camType != "perspective")
 		throw_syntax_error("Only perspective camera type supported.");
-	// END-RESTRICTION
 
 	// read parameters
 	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 
-		// get aspect ratio
 		if (par.name == "frameaspectratio") {
 			if (par.type != "float")
 				throw_syntax_error("'frameaspectratio' must have type float.");
@@ -685,20 +752,23 @@ void PBRTParser::execute_Film() {
 	}
 }
 
-//
-// DESCRIBING THE SCENE
-//
+// -----------------------------------------------------------------------------
+//                         DESCRIBING THE SCENE
+// -----------------------------------------------------------------------------
 
 //
-// Attributes
+// execute_AttributeBegin
+// Enter into a inner graphics scope
 //
-
 void PBRTParser::execute_AttributeBegin() {
 	this->advance();
 	// save the current state
 	stateStack.push_back(this->gState);
 }
 
+//
+// execute_AttributeEnd
+//
 void PBRTParser::execute_AttributeEnd() {
 	this->advance();
 	if (stateStack.size() == 0) {
@@ -708,12 +778,18 @@ void PBRTParser::execute_AttributeEnd() {
 	stateStack.pop_back();
 }
 
+//
+// execute_TransformBegin
+//
 void PBRTParser::execute_TransformBegin() {
 	this->advance();
 	// save the current CTM
 	CTMStack.push_back(this->gState.CTM);
 }
 
+//
+// execute_TransformEnd
+//
 void PBRTParser::execute_TransformEnd() {
 	this->advance();
 	// save the current CTM
@@ -724,6 +800,15 @@ void PBRTParser::execute_TransformEnd() {
 	CTMStack.pop_back();
 }
 
+// ---------------------------------------------------------------------------------
+//                                  SHAPES
+// TODO: curves
+// ---------------------------------------------------------------------------------
+
+//
+// parse_cube
+// DEBUG FUNCTION
+//
 void PBRTParser::parse_cube(ygl::shape *shp) {
 	// DEBUG: this is a debug function
 	while (this->current_token().type != LexemeType::IDENTIFIER)
@@ -731,6 +816,10 @@ void PBRTParser::parse_cube(ygl::shape *shp) {
 	    ygl::make_uvcube(shp->quads, shp->pos, shp->norm, shp->texcoord, 1);
 }
 
+//
+// parse_curve
+// TODO: implement this
+//
 void PBRTParser::parse_curve(ygl::shape *shp) {
 
 	std::vector<ygl::vec3f> *p = nullptr; // max 4 points
@@ -789,7 +878,10 @@ void PBRTParser::parse_curve(ygl::shape *shp) {
 	
 }
 
-// my_compute_normals, because pbrt computes it differently
+//
+// my_compute_normals
+// because pbrt computes it differently
+//
 void my_compute_normals(const std::vector<ygl::vec3i>& triangles,
 	const std::vector<ygl::vec3f>& pos, std::vector<ygl::vec3f>& norm, bool weighted ) {
 	norm.resize(pos.size());
@@ -802,7 +894,9 @@ void my_compute_normals(const std::vector<ygl::vec3i>& triangles,
 	for (auto& n : norm) n = normalize(n);
 }
 
-
+//
+// parse_triangle_mesh
+//
 void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 
 	bool indicesCheck = false;
@@ -851,7 +945,7 @@ void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 			}
 			delete data;
 		}
-		else if (par.name == "uv"){
+		else if (par.name == "uv" || par.name == "st"){
 			if (par.type != "float")
 				throw_syntax_error("'uv' parameter must be of float type.");
 			std::vector<float> *data = (std::vector<float> *)par.value;
@@ -877,6 +971,9 @@ void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 		throw_syntax_error("Missing indices or positions in triangle mesh specification.");
 }
 
+//
+// execute_Shape
+//
 void PBRTParser::execute_Shape() {
 	this->advance();
 
@@ -887,7 +984,7 @@ void PBRTParser::execute_Shape() {
 	this->advance();
 	
 	ygl::shape *shp = new ygl::shape();
-	std::string shpName = get_unique_shape_id();
+	std::string shpName = get_unique_id(CounterID::shape);
 	// add material to shape
 	if (!gState.mat) {
 		// since no material was defined, empty material is created
@@ -917,7 +1014,6 @@ void PBRTParser::execute_Shape() {
 		this->parse_cube(shp);
 
 	else if (shapeName == "plymesh"){
-		std::cout << "Loading PLY mesh..\n";
 		PBRTParameter par;
 		this->parse_parameter(par);
 		if (par.name != "filename")
@@ -941,9 +1037,6 @@ void PBRTParser::execute_Shape() {
 		return;
 	}
 
-	if (shp->norm.size() == 0)
-		ygl::compute_normals(shp);
-
 	if (this->inObjectDefinition) {
 		shapesInObject->shapes.push_back(shp);
 	}
@@ -951,7 +1044,7 @@ void PBRTParser::execute_Shape() {
 		// add shp in scene
 		ygl::shape_group *sg = new ygl::shape_group;
 		sg->shapes.push_back(shp);
-		sg->name = get_unique_shapegroup_id();
+		sg->name = get_unique_id(CounterID::shape_group);
 		scn->shapes.push_back(sg);
 		// add a single instance directly to the scene
 		ygl::instance *inst = new ygl::instance();
@@ -959,20 +1052,23 @@ void PBRTParser::execute_Shape() {
 		// TODO: check the correctness of this
 		// NOTE: current transformation matrix is used to set the object to world transformation for the shape.
 		inst->frame = ygl::mat_to_frame(this->gState.CTM);
-		inst->name = get_unique_inst_id();
+		inst->name = get_unique_id(CounterID::instance);
 		scn->instances.push_back(inst);
 	}
 }
 
+// ------------------- END SHAPES --------------------------------------------------
+
+//
+// execute_ObjectBlock
+//
 void PBRTParser::execute_ObjectBlock() {
 	if (this->inObjectDefinition)
 		throw_syntax_error("Cannot define an object inside another object.");
 	this->execute_AttributeBegin(); // it will execute advance() too
 	this->inObjectDefinition = true;
 	this->shapesInObject = new ygl::shape_group();
-	this->shapesInObject->name = get_unique_shapegroup_id();
-
-	// DEGUB
+	this->shapesInObject->name = get_unique_id(CounterID::shape_group);
 	int start = this->lexers[0]->get_line();
 
 	if (this->current_token().type != LexemeType::STRING)
@@ -980,13 +1076,14 @@ void PBRTParser::execute_ObjectBlock() {
 	//NOTE: the current transformation matrix defines the transformation from
 	//object space to instance's coordinate space
 	std::string objName = this->current_token().value;
-	
+	// DEGUB
 	this->advance();
 
 	while (!(this->current_token().type == LexemeType::IDENTIFIER &&
 		this->current_token().value == "ObjectEnd")){
 		this->execute_world_directive();
 	}
+
 	auto it = nameToObject.find(objName);
 	if (it == nameToObject.end()){
 		nameToObject.insert(std::make_pair(objName, ShapeData(shapesInObject, this->gState.CTM)));
@@ -1004,6 +1101,9 @@ void PBRTParser::execute_ObjectBlock() {
 	this->execute_AttributeEnd();
 }
 
+//
+// execute_ObjectInstance
+//
 void PBRTParser::execute_ObjectInstance() {
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
@@ -1018,18 +1118,27 @@ void PBRTParser::execute_ObjectInstance() {
 		throw_syntax_error("Object name not found.");
 
 	auto shapes = obj->second.sg;
-	ygl::mat4f finalCTM = this->gState.CTM * obj->second.CTM;
-	if (!obj->second.referenced) {
-		obj->second.referenced = true;
-		scn->shapes.push_back(shapes);
+	if (shapes->shapes.size() > 0) {
+		ygl::mat4f finalCTM = this->gState.CTM * obj->second.CTM;
+		if (!obj->second.referenced) {
+			obj->second.referenced = true;
+			scn->shapes.push_back(shapes);
+		}
+		ygl::instance *inst = new ygl::instance();
+		inst->shp = shapes;
+		inst->frame = ygl::mat_to_frame(finalCTM);
+		inst->name = get_unique_id(CounterID::instance);
+		scn->instances.push_back(inst);
 	}
-	ygl::instance *inst = new ygl::instance();
-	inst->shp = shapes;
-	inst->frame = ygl::mat_to_frame(finalCTM);
-	inst->name = get_unique_inst_id();
-	scn->instances.push_back(inst);
 }
 
+// --------------------------------------------------------------------------
+//                        LIGHTS
+// --------------------------------------------------------------------------
+
+//
+// execute_LightSource
+//
 void PBRTParser::execute_LightSource() {
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
@@ -1050,6 +1159,9 @@ void PBRTParser::execute_LightSource() {
 		throw_syntax_error("Light type " + lightType + " not supported.");
 }
 
+//
+// parse_InfiniteLight
+//
 void PBRTParser::parse_InfiniteLight() {
 	// TODO: conversion from spectrum to rgb
 	ygl::vec3f scale { 1, 1, 1 };
@@ -1107,7 +1219,9 @@ void PBRTParser::parse_InfiniteLight() {
 	scn->environments.push_back(env);
 }
 
-
+//
+// parse_PointLight
+//
 void PBRTParser::parse_PointLight() {
 	ygl::vec3f scale{ 1, 1, 1 };
 	ygl::vec3f I{ 1, 1, 1 };
@@ -1141,10 +1255,10 @@ void PBRTParser::parse_PointLight() {
 	}
 
 	ygl::shape_group *sg = new ygl::shape_group;
-	sg->name = get_unique_shapegroup_id();
+	sg->name = get_unique_id(CounterID::shape_group);
 
 	ygl::shape *lgtShape = new ygl::shape;
-	lgtShape->name = get_unique_shape_id();
+	lgtShape->name = get_unique_id(CounterID::shape);
 	lgtShape->pos.push_back(point);
 	lgtShape->points.push_back(0);
 	// default radius
@@ -1155,7 +1269,7 @@ void PBRTParser::parse_PointLight() {
 	ygl::material *lgtMat = new ygl::material;
 	lgtMat->ke = I * scale;
 	lgtShape->mat = lgtMat;
-	lgtMat->name = get_unique_mat_id();
+	lgtMat->name = get_unique_id(CounterID::material);
 	scn->materials.push_back(lgtMat);
 
 	scn->shapes.push_back(sg);
@@ -1163,10 +1277,13 @@ void PBRTParser::parse_PointLight() {
 	inst->shp = sg;
 	// TODO check validity of frame
 	inst->frame = ygl::mat_to_frame(gState.CTM);
-	inst->name = get_unique_inst_id();
+	inst->name = get_unique_id(CounterID::instance);
 	scn->instances.push_back(inst);
 }
 
+//
+// execute_AreaLightSource
+//
 void PBRTParser::execute_AreaLightSource() {
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
@@ -1211,7 +1328,15 @@ void PBRTParser::execute_AreaLightSource() {
 	this->gState.ALInfo.L = L;
 	this->gState.ALInfo.twosided = twosided;
 }
+// --------------------------- END LIGHTS ---------------------------------------
 
+// ------------------------------------------------------------------------------
+//                             MATERIALS
+// ------------------------------------------------------------------------------
+
+//
+// execute_Material
+//
 void PBRTParser::execute_Material() {
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
@@ -1224,7 +1349,7 @@ void PBRTParser::execute_Material() {
 	// NOTE: shapes can override material parameters
 	ygl::material *newMat = new ygl::material();
 	
-	newMat->name = get_unique_mat_id();
+	newMat->name = get_unique_id(CounterID::material);
 	newMat->type = ygl::material_type::specular_roughness;
 		
 	ParsedMaterialInfo pmi;
@@ -1253,6 +1378,9 @@ void PBRTParser::execute_Material() {
 		
 }
 
+//
+// parse_material_properties
+//
 void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 
 	while (this->current_token().type != LexemeType::IDENTIFIER) {
@@ -1474,6 +1602,9 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 	}
 }
 
+//
+// parse_material_matte
+//
 void PBRTParser::parse_material_matte(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
 	mat->kd = { 0.5f, 0.5f, 0.5f };
 	
@@ -1489,6 +1620,9 @@ void PBRTParser::parse_material_matte(ygl::material *mat, ParsedMaterialInfo &pm
 	}
 }
 
+//
+// parse_material_uber
+//
 void PBRTParser::parse_material_uber(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
 	mat->kd = { 0.25f, 0.25f, 0.25f };
 	mat->ks = { 0.25f, 0.25f, 0.25f };
@@ -1519,6 +1653,9 @@ void PBRTParser::parse_material_uber(ygl::material *mat, ParsedMaterialInfo &pmi
 	}
 }
 
+//
+// parse_material_translucent
+//
 void PBRTParser::parse_material_translucent(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
 	mat->kd = { 0.25f, 0.25f, 0.25f };
 	mat->ks = { 0.25f, 0.25f, 0.25f };
@@ -1554,6 +1691,9 @@ void PBRTParser::parse_material_translucent(ygl::material *mat, ParsedMaterialIn
 	}
 }
 
+//
+// parser_material_metal
+//
 void PBRTParser::parse_material_metal(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
 	// TODO: default values = copper
 	ygl::vec3f eta{ 0.5, 0.5, 0.5 };
@@ -1577,6 +1717,9 @@ void PBRTParser::parse_material_metal(ygl::material *mat, ParsedMaterialInfo &pm
 	mat->type = ygl::material_type::metallic_roughness;
 }
 
+//
+// parse_material_mirror
+//
 void PBRTParser::parse_material_mirror(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
 	mat->kr = { 0.9f, 0.9f, 0.9f };
 	if (!already_parsed)
@@ -1592,6 +1735,9 @@ void PBRTParser::parse_material_mirror(ygl::material *mat, ParsedMaterialInfo &p
 	}
 }
 
+//
+// parse_material_plastic
+//
 void PBRTParser::parse_material_plastic(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
 	mat->kd = { 0.25, 0.25, 0.25 };
 	mat->ks = { 0.25, 0.25, 0.25 };
@@ -1608,49 +1754,62 @@ void PBRTParser::parse_material_plastic(ygl::material *mat, ParsedMaterialInfo &
 	}
 }
 
-// ugly and maybe wrong
-inline ygl::vec4b scale_byte_vec(ygl::vec4b v, float a) {
-	ygl::vec4b r;
-	r.x = (ygl::byte)(v.x * a);
-	r.y = (ygl::byte)(v.y * a);
-	r.z = (ygl::byte)(v.z * a);
-	r.w = (ygl::byte)(v.w * a);
+// --------------------------------------------------------------------------------
+// The following functions are used to mix materials
+// TODO: test them. Actually I should check if PBRT implements this in a similar way
+// --------------------------------------------------------------------------------
+
+//
+// scale_vec
+// Multiply vector components by a scalar
+// NOTE: had to do this because yocto doent allow scaling byte vector (I know, it may
+// not be correct, but I just try)
+//
+template <typename T>
+inline ygl::vec<T, 4> scale_vec(ygl::vec<T, 4> v, float a) {
+	ygl::vec<T, 4> r;
+	r.x = (T)(v.x * a);
+	r.y = (T)(v.y * a);
+	r.z = (T)(v.z * a);
+	r.w = (T)(v.w * a);
 	return r;
 }
 
+//
+// blend_images
+//
+template <typename T>
+ygl::image<ygl::vec<T, 4>> blend_images(ygl::image<ygl::vec<T, 4>> img1, ygl::image<ygl::vec<T, 4>> img2, float amount) {
+	int width = img1.width() > img2.width() ? img1.width() : img2.width();
+	int height = img1.height() > img2.height() ? img1.height() : img2.height();
 
+	auto img = ygl::image<ygl::vec<T, 4>>(width, height);
+
+	for (int w = 0; w < width; w++) {
+		for (int h = 0; h < height; h++) {
+			int w1 = w % img1.width();
+			int h1 = h % img1.height();
+			int w2 = w % img2.width();
+			int h2 = h % img2.height();
+
+			auto a = scale_vec<T>(img1.at(w1, h1), amount);
+			auto b = scale_vec<T>(img2.at(w2, h2), (1 - amount));
+			img.at(w, h) = { (T) (a.x + b.x), (T) (a.y + b.y), (T)(a.z + b.z), (T)(a.w + b.w) };
+		}
+	}
+	return img;
+}
+
+//
+// blend_textures
+// Mix two textures
+//
 ygl::texture *blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount) {
 
-	
-	if (!txt1 && !txt2)
-		return nullptr;
-	else if (!txt1) {
-		ygl::texture *txt = new ygl::texture();
-		if (ygl::is_hdr_filename(txt2->name)) {
-			txt->hdr = ygl::image4f(txt2->hdr.width(), txt2->hdr.height());
-
-			for (int w = 0; w < txt2->hdr.width(); w++) {
-				for (int h = 0; h <  txt2->hdr.height(); h++) {
-					txt->hdr.at(w, h) =  txt2->hdr.at(w, h)*(1 - amount);
-				}
-			}
-		}
-		else {
-			txt->ldr = ygl::image4b(txt2->ldr.width(), txt2->ldr.height());
-
-			for (int w = 0; w <txt2->ldr.width(); w++) {
-				for (int h = 0; h < txt2->ldr.height(); h++) {
-					txt->ldr.at(w, h) = scale_byte_vec(txt2->ldr.at(w, h), (1 - amount));
-				}
-			}
-		}
-		return txt;
-	}
-	else if (!txt2) {
+	auto scale_single_texture = [&amount](ygl::texture *txt1)->ygl::texture* {
 		ygl::texture *txt = new ygl::texture();
 		if (ygl::is_hdr_filename(txt1->name)) {
 			txt->hdr = ygl::image4f(txt1->hdr.width(), txt1->hdr.height());
-
 			for (int w = 0; w < txt1->hdr.width(); w++) {
 				for (int h = 0; h < txt1->hdr.height(); h++) {
 					txt->hdr.at(w, h) = txt1->hdr.at(w, h)*(1 - amount);
@@ -1659,56 +1818,31 @@ ygl::texture *blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amoun
 		}
 		else {
 			txt->ldr = ygl::image4b(txt1->ldr.width(), txt1->ldr.height());
-
 			for (int w = 0; w <txt1->ldr.width(); w++) {
 				for (int h = 0; h < txt1->ldr.height(); h++) {
-					txt->ldr.at(w, h) = scale_byte_vec(txt1->ldr.at(w, h),(1 - amount));
+					txt->ldr.at(w, h) = scale_vec(txt1->ldr.at(w, h), (1 - amount));
 				}
 			}
 		}
 		return txt;
-
+	};
+	
+	if (!txt1 && !txt2)
+		return nullptr;
+	else if (!txt1) {
+		return scale_single_texture(txt2);
+	}
+	else if (!txt2) {
+		return scale_single_texture(txt1);
 	}
 	else {
 		ygl::texture *txt = new ygl::texture();
 
 		if (ygl::is_hdr_filename(txt1->name) && ygl::is_hdr_filename(txt2->name)) {
-			int width = txt1->hdr.width() > txt2->hdr.width() ? txt1->hdr.width() : txt2->hdr.width();
-			int height = txt1->hdr.height() > txt2->hdr.height() ? txt1->hdr.height() : txt2->hdr.height();
-
-			txt->hdr = ygl::image4f(width, height);
-
-			for (int w = 0; w < width; w++) {
-				for (int h = 0; h < height; h++) {
-					int w1 = w % txt1->hdr.width();
-					int h1 = h % txt1->hdr.height();
-					int w2 = w % txt2->hdr.width();
-					int h2 = h % txt2->hdr.height();
-
-					txt->hdr.at(w, h) = txt1->hdr.at(w1, h1) * amount + txt2->hdr.at(w2, h2)*(1 - amount);
-				}
-			}
+			blend_images<float>(txt1->hdr, txt2->hdr, amount);
 		}
 		else if (!ygl::is_hdr_filename(txt1->name) && !ygl::is_hdr_filename(txt2->name)) {
-			int width = txt1->ldr.width() > txt2->ldr.width() ? txt1->ldr.width() : txt2->ldr.width();
-			int height = txt1->ldr.height() > txt2->ldr.height() ? txt1->ldr.height() : txt2->ldr.height();
-			txt->ldr = ygl::image4b(width, height);
-
-			for (int w = 0; w < width; w++) {
-				for (int h = 0; h < height; h++) {
-					int w1 = w % txt1->ldr.width();
-					int h1 = h % txt1->ldr.height();
-					int w2 = w % txt2->ldr.width();
-					int h2 = h % txt2->ldr.height();
-
-					auto v1 = scale_byte_vec(txt1->ldr.at(w1, h1), amount);
-					auto v2 = scale_byte_vec(txt2->ldr.at(w2, h2), (1 - amount));
-					txt->ldr.at(w, h).x =(ygl::byte) v1.x + v2.x;
-					txt->ldr.at(w, h).y = (ygl::byte) v1.y + v2.y;
-					txt->ldr.at(w, h).z = (ygl::byte) v1.z + v2.z;
-					txt->ldr.at(w, h).w = (ygl::byte) v1.w + v2.w;
-				}
-			}
+			blend_images<ygl::byte>(txt1->ldr, txt2->ldr, amount);
 		}
 		else {
 			std::cerr << "Error while blending 2 textures: one is hdr, the other is ldr\n";
@@ -1718,8 +1852,11 @@ ygl::texture *blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amoun
 	}
 }
 
+//
+// parse_material_mix
+//
 void PBRTParser::parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
-	
+	std::cout << "Experimental: mixing material...\n";
 	if (!already_parsed)
 		this->parse_material_properties(pmi);
 
@@ -1743,13 +1880,13 @@ void PBRTParser::parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi,
 		throw_syntax_error("NamedMaterial2 " + pmi.namedMaterial2 + " was not declared.");
 	auto mat2 = i2->second;
 
-	// merge vectors
+	// blend vectors
 	mat->kd = (1 - amount)*mat2->kd + amount * mat1->kd;
 	mat->kr = (1 - amount)*mat2->kr + amount * mat1->kr;
 	mat->ks = (1 - amount)*mat2->ks + amount * mat1->ks;
 	mat->kt = (1 - amount)*mat2->kt + amount * mat1->kt;
 	mat->rs = (1 - amount)*mat2->rs + amount * mat1->rs;
-	// merge textures
+	// blend textures
 	mat->kd_txt = blend_textures(mat1->kd_txt, mat2->kd_txt, amount);
 	mat->kr_txt = blend_textures(mat1->kr_txt, mat2->kr_txt, amount);
 	mat->ks_txt = blend_textures(mat1->ks_txt, mat2->ks_txt, amount);
@@ -1761,7 +1898,11 @@ void PBRTParser::parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi,
 
 	mat->op = mat1->op * amount + mat2->op *(1 - amount);
 }
+// -------------- END MATERIAL MIX ----------------------------
 
+//
+// execute_MakeNamedMaterial
+//
 void PBRTParser::execute_MakeNamedMaterial() {
 	this->advance();
 
@@ -1777,7 +1918,7 @@ void PBRTParser::execute_MakeNamedMaterial() {
 	this->parse_material_properties(pmi);
 
 	ygl::material *mat = new ygl::material;
-	mat->name = get_unique_mat_id();
+	mat->name = get_unique_id(CounterID::material);
 
 	if (pmi.b_type == false)
 		throw_syntax_error("Expected material type.");
@@ -1802,6 +1943,9 @@ void PBRTParser::execute_MakeNamedMaterial() {
 	scn->materials.push_back(mat);
 }
 
+//
+// execute_NamedMaterial
+//
 void PBRTParser::execute_NamedMaterial() {
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
@@ -1815,11 +1959,186 @@ void PBRTParser::execute_NamedMaterial() {
 	this->gState.mat = mat;
 }
 
+// -----------------------------------------------------------------------------
+//                                TEXTURES
+// -----------------------------------------------------------------------------
+//
+// make_constant_image
+//
+ygl::image4f make_constant_image(float v) {
+	auto  x = ygl::image4f(1, 1);
+	x.at(0, 0) = { v, v, v, 1 };
+	return x;
+}
+
+//
+// make_constant_image
+//
+ygl::image4f make_constant_image(ygl::vec3f v) {
+	auto  x = ygl::image4f(1, 1);
+	x.at(0, 0) = { v.x, v.y, v.z, 1 };
+	return x;
+}
+
+void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
+	std::string filename = "";
+	
+	// read parameters
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (par.name == "filename") {
+			if (par.type != "string")
+				throw_syntax_error("'filename' parameter must have string type.");
+			auto data = (std::string *)par.value;
+			filename = this->current_path() + "/" + *data;
+			delete data;
+		}
+	}
+	if (filename == "")
+		throw_syntax_error("No texture filename provided.");
+
+	txt->path = filename;
+	if (ygl::endswith(filename, ".png")) {
+		txt->ldr = ygl::load_image4b(filename);
+	}
+	else if (ygl::endswith(filename, ".exr")) {
+		txt->hdr = ygl::load_image4f(filename);
+	}
+	else {
+		throw_syntax_error("Texture format not recognized.");
+	}
+}
+
+//
+// parse_constant_texture
+//
+void PBRTParser::parse_constant_texture(ygl::texture *txt) {
+	ygl::vec3f value { 1, 1, 1 };
+	// read parameters
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (par.name == "value") {
+			if (par.type == "float") {
+				auto data = (std::vector<float> *)par.value;
+				auto v = data->at(0);
+				value.x = v;
+				value.y = v;
+				value.z = v;
+				delete data;
+			}
+			else if (par.type == "spectrum" || par.type == "rgb") {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				value = data->at(0);
+				delete data;
+
+			}
+			else {
+				throw_syntax_error("'value' parameter must have float/spectrum type.");
+			}
+		}
+	}
+	txt->hdr = make_constant_image(value);
+	txt->path = txt->name + ".exr";
+}
+
+//
+// parse_checkerboard_texture
+//
+void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
+	float uscale = 1, vscale = 1;
+	ygl::vec4f tex1{ 0,0,0, 255 }, tex2{ 1,1,1, 255};
+
+	// read parameters
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
+		PBRTParameter par;
+		this->parse_parameter(par);
+
+		if (par.name == "uscale") {
+			if (par.type != "float")
+				throw_syntax_error("'uscale' parameter must have float type.");
+			auto data = (std::vector<float> *)par.value;
+			uscale = data->at(0);
+			delete data;
+		}else if(par.name == "vscale") {
+			if (par.type != "float")
+				throw_syntax_error("'vscale' parameter must have float type.");
+			auto data = (std::vector<float> *)par.value;
+			vscale = data->at(0);
+			delete data;
+		}
+		else if (par.name == "tex1") {
+			if (par.type == "float") {
+				auto data = (std::vector<float> *)par.value;
+				auto v = data->at(0);
+				delete data;
+				tex1.x = v;
+				tex1.y = v;
+				tex1.z = v;
+			}
+			else if (par.type == "spectrum" || par.type == "rgb") {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				auto v = data->at(0);
+				tex1.x = v.x;
+				tex1.y = v.y;
+				tex1.z = v.z;
+				delete data;
+			}
+			else {
+				throw_syntax_error("'vscale' parameter must have float/spectrum type.");
+			}
+		}
+		else if (par.name == "tex2") {
+			if (par.type == "float") {
+				auto data = (std::vector<float> *)par.value;
+				auto v = data->at(0);
+				delete data;
+				tex2.x = v;
+				tex2.y = v;
+				tex2.z = v;
+			}
+			else if (par.type == "spectrum" || par.type == "rgb") {
+				auto data = (std::vector<ygl::vec3f> *)par.value;
+				auto v = data->at(0);
+				tex2.x = v.x;
+				tex2.y = v.y;
+				tex2.z = v.z;
+				delete data;
+			}
+			else {
+				throw_syntax_error("'vscale' parameter must have float/spectrum type.");
+			}
+		}
+	}
+
+	if (uscale < 0) uscale = 1;
+	if (vscale < 0) vscale = 1;
+
+	txt->ldr = ygl::make_checker_image(128 * vscale, 128 * uscale, 64, float_to_byte(tex1), float_to_byte(tex2));
+	txt->path = txt->name + ".png";
+}
+
+//
+// parse_fbm_texture
+// TODO: test it
+//
+void PBRTParser::parse_fbm_texture(ygl::texture *txt) {
+	int octaves = 8;
+	float roughness = 0.5;
+
+	// TODO implement it
+}
+//
+// execute_Texture
+//
 void PBRTParser::execute_Texture() {
-	// NOTE: repeat information is lost. One should save texture_info instead,
+	// TODO: repeat information is lost. One should save texture_info instead
 	// TODO: constant color Texture "grass-1" "color" "constant" 
 	// "rgb value"[0.40000001 0.89999998 0.60000002]
-	// but then one should keep track of the various textures.
+
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected texture name string.");
@@ -1833,49 +2152,31 @@ void PBRTParser::execute_Texture() {
 		throw_syntax_error("Expected texture type string.");
 	std::string textureType = check_synonym(this->current_token().value);
 
-	//if (textureType != "spectrum" && textureType != "rgb" && textureType != "float")
-	// TODO: support float textures
-	if (textureType != "spectrum" && textureType != "rgb")
+	if (textureType != "spectrum" && textureType != "rgb" && textureType != "float")
 		throw_syntax_error("Unsupported texture type: " + textureType);
-
+	
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected texture class string.");
 	std::string textureClass = this->current_token().value;
-
-	if (textureClass != "imagemap")
-		throw_syntax_error("Only 'imagemap' textures type is supported.");
 	this->advance();
 
-	std::string filename = "";
-	while (this->current_token().type != LexemeType::IDENTIFIER) {
-		PBRTParameter par;
-		this->parse_parameter(par);
-
-		if (par.name == "filename") {
-			if (par.type != "string")
-				throw_syntax_error("'filename' parameter must have string type.");
-			auto data = (std:: string *)par.value;
-			filename = this->current_path() + "/" + *data;
-			delete data;
-		}
-	}
-	if (filename == "")
-		throw_syntax_error("No texture filename provided.");
-
-	ygl::texture *txt = new ygl::texture;
+	ygl::texture *txt = new ygl::texture();
+	txt->name = get_unique_id(CounterID::texture);
 	scn->textures.push_back(txt);
-	txt->path = filename;
-	if (ygl::endswith(filename, ".png")) {
-		txt->ldr = ygl::load_image4b(filename);
+
+	if (textureClass == "imagemap") {
+		this->parse_imagemap_texture(txt);
 	}
-	else if(ygl::endswith(filename, ".exr")){
-		txt->hdr = ygl::load_image4f(filename);
+	else if (textureClass == "checkerboard") {
+		this->parse_checkerboard_texture(txt);
+	}
+	else if (textureClass == "constant") {
+		this->parse_constant_texture(txt);
 	}
 	else {
-		throw_syntax_error("Texture format not recognised.");
+		throw_syntax_error("Texture class not supported: " + textureClass);
 	}
+
 	gState.nameToTexture.insert(std::make_pair(textureName, txt));
 }
-
-// TODO: http://www.fourmilab.ch/documents/specrend/
