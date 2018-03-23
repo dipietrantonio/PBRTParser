@@ -1,6 +1,6 @@
 cmake_minimum_required (VERSION 3.5)
 
-project (graphics17b_hw02)
+project (PBRTParser)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED on)
@@ -20,18 +20,23 @@ if(WIN32)
     add_definitions(/bigobj /D_CRT_SECURE_NO_WARNINGS /wd4018 /wd4244 /wd4305 /wd4800 /wd4267)
 endif(WIN32)
 
-add_library(projlib STATIC
-    src/ext/json.hpp
-    src/ext/stb_image.h
-    src/ext/nanosvg.cpp
-    src/ext/stb_image.cpp
-    src/ext/stb_image_write.h
-    src/ext/stb_image_resize.h
-    src/ext/tinyexr.h
-    src/yocto_gltf.h
-    src/yocto_gltf.cpp
-    src/yocto_gl.h
-    src/yocto_gl.cpp)
+add_library(yocto STATIC
+    yocto/ext/json.hpp
+    yocto/ext/stb_image.h
+    yocto/ext/nanosvg.cpp
+    yocto/ext/stb_image.cpp
+    yocto/ext/stb_image_write.h
+    yocto/ext/stb_image_resize.h
+    yocto/ext/tinyexr.h
+    yocto/yocto_gltf.h
+    yocto/yocto_gltf.cpp
+    yocto/yocto_gl.h
+    yocto/yocto_gl.cpp)
+
+add_library(pbrt_parser STATIC
+		src/PBRTParser.cpp 
+		src/PBRTLexer.cpp)
 
 add_executable(parse src/main.cpp)
-target_link_libraries(parse projlib)
+target_link_libraries(parse pbrt_parser)
+target_link_libraries(pbrt_parser yocto)

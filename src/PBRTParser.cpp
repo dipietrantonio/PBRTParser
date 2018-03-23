@@ -18,10 +18,10 @@
 #include <sstream>
 #include <exception>
 #include <locale>
+#include <unordered_map>
 #define YGL_IMAGEIO_IMPLEMENTATION 1
 #define YGL_OPENGL 0
 #include "yocto_gl.h"
-#include <unordered_map>
 
 
 // ======================================================================================
@@ -30,7 +30,7 @@
 
 //
 // split
-// split a string according to sep character
+// splits a string according to one or more separator characters
 //
 std::vector<std::string> split(std::string text, std::string sep = " ") {
 	std::vector<std::string> results;
@@ -85,8 +85,20 @@ std::pair<std::string, std::string> get_path_and_filename(std::string file) {
 }
 
 //
+// join_string_int
+// merge a string and an integer (used to create unique names)
+//
+inline std::string join_string_int(char *pref, int size) {
+	char buff[100];
+	sprintf(buff, "%s_%d", pref, size);
+	return std::string(buff);
+}
+
+//
 // parse_ply
-// Parse a PLY file format and returns a shape
+// Parse a PLY file format and returns a shape.
+// Note: works for binary and ascii, but only when faces and vertex elements are present.
+// TODO: a less ugly implementation (maybe is better a third party lib).
 //
 bool parse_ply(std::string filename, ygl::shape **shape) {
 	
@@ -94,16 +106,24 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 	// first, parse the header
 	std::ifstream plyFile;
 	plyFile.open(filename, std::ios::in | std::ios::binary);
+	// current line read
 	std::string line;
-	// vertexes
-	int n_vertexes = 0;
-	std::vector<std::pair<std::string, std::string>> vertex_prop {};
-
+	
+	// we are interested in vertices and faces (for now)
+	// number of vertices (equivalent to shape.pos)
+	int n_vertices = 0;
+	// per vertex properties name
+	std::vector<std::string> vertex_prop {};
+	// faces (triangles)
 	int n_faces = 0;
 	int n_vert_per_face = 0;
-	std::string last = "none";
-	std::getline(plyFile, line);
+	// list of elements present (should be only vertices and faces)
+	std::vector<std::string> elements;
 	bool is_asc = false;
+	auto errMsgStart = "[File: " + filename + "]: ";
+
+	std::getline(plyFile, line);
+
 	while (true) {
 		// skip comments
 		if (ygl::startswith(line, "end_header"))
@@ -113,51 +133,49 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 			std::getline(plyFile, line);
 			continue;
 		}
-
 		if (ygl::startswith(line, "element")) {
 			auto tokens = split(line, " \r\n");
 			// get name
-			if (!tokens[1].compare("vertex")) {
-				last = "vertex";
-				n_vertexes = atoi(tokens[2].c_str());
+			if (tokens[1] == "vertex") {
+				elements.push_back("vertex");
+				n_vertices = atoi(tokens[2].c_str());
 				// read properties
 				std::getline(plyFile, line);
 				while (ygl::startswith(line, "property")) {
-					auto v_tok = split(line, " \r\n");
-					if (v_tok[1].compare("float")) {
-						std::cerr << "Unexpected type for vertex property.\n";
+					auto prop_tokens = split(line, " \r\n");
+					if (prop_tokens[1] != "float") {
+						std::cerr << errMsgStart << "unexpected type (!= float) for vertex property.\n";
 						return false;
 					}
-					// memorize type and name of property
-					vertex_prop.push_back(std::make_pair(v_tok[1], v_tok[2]));
+					// memorize name of property
+					vertex_prop.push_back(prop_tokens[2]);
 					std::getline(plyFile, line);
 				}
 			}
-			else if (!tokens[1].compare("face")) {
-				last = "face";
+			else if (tokens[1] == "face") {
+				elements.push_back("face");
 				n_faces = atoi(tokens[2].c_str());
 				// read properties
 				std::getline(plyFile, line);
 				while (ygl::startswith(line, "property")) {
-					auto v_tok = split(line, " \r\n");
-					if (v_tok[2].compare("uint8") && v_tok[2].compare("uchar")) {
-						std::cerr << "Expected type uint8 for list of vertex indexes' size, but got " << v_tok[2] << ".\n";
+					auto prop_tokens = split(line, " \r\n");
+					if (prop_tokens[2] != "uint8" && prop_tokens[2] != "uchar") {
+						std::cerr << errMsgStart << "expected type uint8 or uchar for list of vertex indexes' size, but got " << prop_tokens[2] << ".\n";
 						return false;
 					}
-					if (v_tok[3].compare("int")) {
-						std::cerr << "Expected type int for vertex indexes\n";
+					if (prop_tokens[3] != "int") {
+						std::cerr << errMsgStart << "Expected type int for vertex indexes\n";
 						return false;
 					}
-					if (v_tok[4].compare("vertex_indices")) { // to do: trim for \r
-						std::cerr << "Expected vertex_indices property, got " << v_tok[4] <<" instead.\n";
+					if (prop_tokens[4] != "vertex_indices") {
+						std::cerr << errMsgStart<< "Expected vertex_indices property, got " << prop_tokens[4] <<" instead.\n";
 						return false;
 					}
 					std::getline(plyFile, line);
 				}
 			}
-			
 			else {
-				std::cerr << "Element " << tokens[1] << " not known.\n";
+				std::cerr << errMsgStart << "Element " << tokens[1] << " not known.\n";
 				return false;
 			}
 		}
@@ -165,153 +183,166 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 			std::getline(plyFile, line);
 		}
 	}
-	if (last.compare("face")) {
-		std::cerr << "Last element parsed was " << last << ", not face.\n";
-		return false;
-	}
-	for (int v = 0; v < n_vertexes; v++) {
-		bool bpos = false;
-		bool buv = false;
-		bool bnorm = false;
-		ygl::vec3f pos, norm;
-		ygl::vec2f uv;
-		if (is_asc) {
-			std::getline(plyFile, line);
-			auto vals = split(line, " \r\n");
-			int count = 0;
-			for (auto prop : vertex_prop) {
-				if (!prop.second.compare("x")) {
-					bpos = true;
-					pos.x = atof(vals[count++].c_str());
-				}
-				else if (!prop.second.compare("y")) {
-					pos.y = atof(vals[count++].c_str());
-				}
-				else if (!prop.second.compare("z")) {
-					pos.z = atof(vals[count++].c_str());
-				}
-				else if (!prop.second.compare("nx")) {
-					norm.x = atof(vals[count++].c_str());
-				}
-				else if (!prop.second.compare("ny")) {
-					norm.y = atof(vals[count++].c_str());
-				}
-				else if (!prop.second.compare("nz")) {
-					norm.z = atof(vals[count++].c_str());
-				}
-				else if (!prop.second.compare("u")) {
-					uv.x = atof(vals[count++].c_str());
-				}
-				else if (!prop.second.compare("v")) {
-					uv.y = atof(vals[count++].c_str());
+	// After the header, now parse the values
+	for (auto elem : elements) {
+		if (elem == "vertex") {
+			for (int v = 0; v < n_vertices; v++) {
+				// boolean values that tells whether those properties are 
+				// found in the list of properties for a vertex
+				bool bpos = false;
+				bool buv = false;
+				bool bnorm = false;
+
+				ygl::vec3f pos, norm;
+				ygl::vec2f uv;
+				
+				if (is_asc) {
+					std::getline(plyFile, line);
+					auto vals = split(line, " \r\n");
+					int count = 0;
+					for (auto prop : vertex_prop) {
+						if (prop == "x") {
+							bpos = true;
+							pos.x = atof(vals[count++].c_str());
+						}
+						else if (prop == "y") {
+							pos.y = atof(vals[count++].c_str());
+						}
+						else if (prop == "z") {
+							pos.z = atof(vals[count++].c_str());
+						}
+						else if (prop == "nx") {
+							norm.x = atof(vals[count++].c_str());
+						}
+						else if (prop == "ny") {
+							norm.y = atof(vals[count++].c_str());
+						}
+						else if (prop == "nz") {
+							norm.z = atof(vals[count++].c_str());
+						}
+						else if (prop == "u") {
+							uv.x = atof(vals[count++].c_str());
+						}
+						else if (prop == "v") {
+							uv.y = atof(vals[count++].c_str());
+						}
+						else {
+							std::cerr << "Value " << prop << " is not a recognized property of vertex.\n";
+							return false;
+						}
+					}
 				}
 				else {
-					std::cerr << prop.second << " is not a recognized property of vertex.\n";
+					// read binary
+					for (auto prop : vertex_prop) {
+						if (prop =="x") {
+							char buff[4];
+							bpos = true;
+							plyFile.read(buff, 4);
+							pos.x = *((float *)buff);
+						}
+						else if (prop =="y") {
+							char buff[4];
+							plyFile.read(buff, 4);
+							pos.y = *((float *)buff);
+						}
+						else if (prop =="z") {
+							char buff[4];
+							plyFile.read(buff, 4);
+							pos.z = *((float *)buff);
+						}
+						else if (prop =="nx") {
+							char buff[4];
+							bnorm = true;
+							plyFile.read(buff, 4);
+							norm.x = *((float *)buff);
+						}
+						else if (prop =="ny") {
+							char buff[4];
+							plyFile.read(buff, 4);
+							norm.y = *((float *)buff);
+						}
+						else if (prop =="nz") {
+							char buff[4];
+							plyFile.read(buff, 4);
+							norm.z = *((float *)buff);
+						}
+						else if (prop =="u") {
+							char buff[4];
+							buv = true;
+							plyFile.read(buff, 4);
+							uv.x = *((float *)buff);
+						}
+						else if (prop =="v") {
+							char buff[4];
+							plyFile.read(buff, 4);
+							uv.y = *((float *)buff);
+						}
+						else {
+							std::cerr << "Value " << prop << " is not a recognized property of vertex.\n";
+							return false;
+						}
+					}
+				}
+				if (!bpos) {
+					std::cerr << errMsgStart << "No vertex positions\n";
 					return false;
+				}
+				shp->pos.push_back(pos);
+				if (bnorm)
+					shp->norm.push_back(norm);
+				if (buv)
+					shp->texcoord.push_back(uv);
+			}
+		}
+		else if (elem == "face") {
+			for (int f = 0; f < n_faces; f++) {
+				if (is_asc) {
+					std::getline(plyFile, line);
+					auto vals = split(line, " \r\n");
+					if (vals[0] != "3") {
+						// only triangles for now
+						std::cerr << errMsgStart << "There must be only three vertices per face. Got " << vals[0] << " instead.\n";
+						return false;
+					}
+					ygl::vec3i triangle = { atoi(vals[1].c_str()), atoi(vals[2].c_str()), atoi(vals[3].c_str()) };
+					shp->triangles.push_back(triangle);
+				}
+				else {
+					ygl::vec3i triangle;
+
+					char buff1[1];
+					plyFile.read(buff1, 1);
+					unsigned char n_v = (unsigned char)buff1[0];
+					if (n_v != 3) {
+						std::cerr << errMsgStart << "There must be only three vertices per face. Got " << n_v << " instead.\n";
+						return false;
+					}
+					char buff[4];
+					plyFile.read(buff, 4);
+					triangle.x = *((int *)buff);
+
+					plyFile.read(buff, 4);
+					triangle.y = *((int *)buff);
+
+					plyFile.read(buff, 4);
+					triangle.z = *((int *)buff);
+
+					shp->triangles.push_back(triangle);
 				}
 			}
 		}
 		else {
-			for (auto prop : vertex_prop) {
-				if (!prop.second.compare("x")) {
-					char buff[4];
-					bpos = true;
-					plyFile.read(buff, 4);
-					pos.x = *((float *)buff);
-				}
-				else if (!prop.second.compare("y")) {
-					char buff[4];
-					plyFile.read(buff, 4);
-					pos.y = *((float *)buff);
-				}
-				else if (!prop.second.compare("z")) {
-					char buff[4];
-					plyFile.read(buff, 4);
-					pos.z = *((float *)buff);
-				}
-				else if (!prop.second.compare("nx")) {
-					char buff[4];
-					bnorm = true;
-					plyFile.read(buff, 4);
-					norm.x = *((float *)buff);
-				}
-				else if (!prop.second.compare("ny")) {
-					char buff[4];
-					plyFile.read(buff, 4);
-					norm.y = *((float *)buff);
-				}
-				else if (!prop.second.compare("nz")) {
-					char buff[4];
-					plyFile.read(buff, 4);
-					norm.z = *((float *)buff);
-				}
-				else if (!prop.second.compare("u")) {
-					char buff[4];
-					buv = true;
-					plyFile.read(buff, 4);
-					uv.x = *((float *)buff);
-				}
-				else if (!prop.second.compare("v")) {
-					char buff[4];
-					plyFile.read(buff, 4);
-					uv.y = *((float *)buff);
-				}
-				else {
-					std::cerr << prop.second << " is not a recognized property of vertex.\n";
-					return false;
-				}
-			}
-		}
-		if (!bpos) {
-			std::cerr << "No vertex positions\n";
+			std::cerr << errMsgStart << "Element '" << elem << "' not recognized.\n";
 			return false;
-		}
-
-		shp->pos.push_back(pos);
-		if (bnorm)
-			shp->norm.push_back(norm);
-		if (buv)
-			shp->texcoord.push_back(uv);
-	}
-
-	for (int f = 0; f < n_faces; f++) {
-		if (is_asc) {
-			std::getline(plyFile, line);
-			auto vals = split(line, " \r\n");
-			if (vals[0].compare("3")) {
-				std::cerr << "There must be only three vertexes per face. Got " << vals[0] << " instead.\n";
-				return false;
-			}
-			ygl::vec3i triangle = { atoi(vals[1].c_str()), atoi(vals[2].c_str()), atoi(vals[3].c_str()) };
-			shp->triangles.push_back(triangle);
-		}
-		else {
-			ygl::vec3i triangle;
-
-			char buff1[1];
-			plyFile.read(buff1, 1);
-			unsigned char n_v = (unsigned char)buff1[0];
-			if (n_v != 3) {
-				std::cerr << "There must be only three vertexes per face. Got " << n_v << " instead.\n";
-				return false;
-			}
-			char buff[4];
-			plyFile.read(buff, 4);
-			triangle.x = *((int *)buff);
-
-			plyFile.read(buff, 4);
-			triangle.y = *((int *)buff);
-
-			plyFile.read(buff, 4);
-			triangle.z = *((int *)buff);
-
-			shp->triangles.push_back(triangle);
 		}
 		
 	}
 	(*shape) = shp;
+	plyFile.close();
 	return true;
 }
+
 
 class InputEndedException : public std::exception {
 
@@ -320,77 +351,52 @@ class InputEndedException : public std::exception {
     }
 };
 
-class LexicalErrorException : public std::exception{
 
-    private:
-    std::string message;
-
-    public:
-    LexicalErrorException(std::string msg){
-        this->message = msg;
-    }
-	virtual char const * what() {
-		return message.c_str();
-	}
-
-};
-
-class SyntaxErrorException : public std::exception{
-
-    private:
-    std::string message;
-
-    public:
-    SyntaxErrorException(std::string msg){
-        this->message = msg;
-    }
-
-	virtual char const * what() {
-		return message.c_str();
-	}
-	
-};
+// =================================================================================
+//                          LEXICAL ANALYZER
+// =================================================================================
 
 enum LexemeType {IDENTIFIER, NUMBER, STRING, SINGLETON};
 
 class Lexeme {
-    private:
-    std::string value;
-    LexemeType type;
-
     public:
-    Lexeme() {};
+	std::string value;
+	LexemeType type;
+	Lexeme() {};
     Lexeme(LexemeType type, std::string value){
         this->type = type;
         this->value = value;
-    }
-    std::string get_value(){
-        return this->value;
-    }
-
-    LexemeType get_type(){
-        return this->type;
     }
 };
 
 class PBRTLexer{
 
     private:
+	// current line and column number in the file
     int line, column;
+	// current position of the Lexer's head
     int currentPos;
+	// text to be parsed
     std::string text;
     bool inputEnded;
-    int lastPos;
+	// index of last character of the text to be parsed
+    int lastPos; 
     
 	// Private methods
-    void remove_blanks();
-    void advance();
-	std::string read_file(std::string filename);
 
-    inline char look(int i = 0){
+	// remove whitespaces
+    void remove_blanks();
+	// advance the lexer head (currentPos)
+    void advance();
+	// read the file and store the content in text
+	std::string read_file(std::string filename);
+	// see the current character
+    inline char peek(int i = 0){
         return this->text[currentPos + i];
 	}
 
+	// the following functions implements reg exp parsers 
+	// to get meaningful elements in the text (i.e. grammar's terminal symbols).
     bool read_indentifier();
     bool read_number();
     bool read_string();
@@ -439,9 +445,10 @@ std::string PBRTLexer::read_file(std::string filename) {
 	while (std::getline(inputFile, line)) {
 		ss << line << "\n";
 	}
-	
 	// set filename and path properties
-	return ss.str();
+	auto textToParse = ss.str();
+	inputFile.close();
+	return textToParse;
 }
 
 
@@ -459,7 +466,7 @@ bool PBRTLexer::next_lexeme(){
 	if (this->read_number())
 		return true;
 
-	char c = this->look();
+	char c = this->peek();
 	if (c == '[' || c == ']') {
 		std::stringstream ss = std::stringstream();
 		ss.put(c);
@@ -470,11 +477,12 @@ bool PBRTLexer::next_lexeme(){
 
 	std::stringstream errStr;
 	errStr << "Lexical error (file: " << this->filename << ", line " << this->line << ", column " << this->column << ") input not recognized.";
-	throw LexicalErrorException(errStr.str());
+	throw std::exception(errStr.str().c_str());
 }
 
+
 bool PBRTLexer::read_indentifier(){
-    char c = this->look();
+    char c = this->peek();
     
     std::stringstream ss;
     if(!std::isalpha(c))
@@ -482,20 +490,21 @@ bool PBRTLexer::read_indentifier(){
     do{
         ss << c;
         this->advance();
-    }while(std::isalpha(c = this->look()));
+    }while(std::isalpha(c = this->peek()));
 
    this->currentLexeme = Lexeme(LexemeType::IDENTIFIER, ss.str());
    return true;
 }
 
+
 bool PBRTLexer::read_string(){
-    char c = this->look();
+    char c = this->peek();
     std::stringstream ss;
     // remove "
     if(!(c == '"'))
         return false;
     this->advance();
-    while((c = this->look()) != '"'){
+    while((c = this->peek()) != '"'){
         ss << c;
         this->advance();
     }
@@ -505,79 +514,78 @@ bool PBRTLexer::read_string(){
 }
 
 bool PBRTLexer::read_number(){
-    char c = this->look();
+    char c = this->peek();
     if( ! (c == '+' || c == '-' || c == '.' || std::isdigit(c)))
         return false;
     std::stringstream ss;
     bool point_seen = false;
     /*
-     * status = 0: a digit, `+`, `-` or `.` expected
-     * status = 7: sign seen, waiting for one digit or dot
-	 * status = 1: waiting for one mandatory digit
-     * status = 2: waiting for more digits or `.` (if not seen before) [final state]
-     * status = 3: waiting for zero or ore digits after point [final state]
-     * status = 4: waiting for `-`, `+` or a digit after "E" (exponential)
-     * status = 5: waiting for mandatory digit
-     * status = 6: waiting for zero or more additional digits [final state]
-	 * status = 7: waiting for mandatoty digit or dot
+     * state = 0: a digit, `+`, `-` or `.` expected
+     * state = 7: `+` or `-` seen, waiting for one digit or dot (7 because otherwise I had to rename all the others)
+	 * state = 1: waiting for one mandatory digit
+     * state = 2: waiting for more digits or `.` (if not seen before) [final state]
+     * state = 3: waiting for zero or ore digits after point [final state]
+     * state = 4: waiting for `-`, `+` or a digit after "E" (exponential)
+     * state = 5: waiting for mandatory digit
+     * state = 6: waiting for zero or more additional digits [final state]
+	 * state = 7: waiting for mandatoty digit or dot
      */
-    int status = 0;
+    int state = 0;
 
     while(true){
-        if(status == 0 && (c == '-' || c == '+' || c == '.')){
+        if(state == 0 && (c == '-' || c == '+' || c == '.')){
 			if (c == '.') {
 				point_seen = true;
-				status = 1; // at least one digit needed
+				state = 1; // at least one digit needed
 			}
 			else {
-				status = 7;
-			}
-				
-        }else if(status == 0 && std::isdigit(c)){
-            status = 2;
-        }else if(status == 1 && std::isdigit(c)){
+				state = 7;
+			}			
+        }else if(state == 0 && std::isdigit(c)){
+            state = 2;
+        }else if(state == 1 && std::isdigit(c)){
             if(point_seen)
-                status = 3;
+                state = 3;
             else
-                status = 2;
-        }else if(status == 2 && c == '.' && !point_seen){
+                state = 2;
+        }else if(state == 2 && c == '.' && !point_seen){
             point_seen = true;
-            status = 3;
-        }else if(status == 2 && std::isdigit(c)){
-            status = 2;
-        }else if(status == 2 && (std::tolower(c) == 'e')){
-            status = 4;
-        }else if(status == 3 && std::isdigit(c)){
-            status = 3;
-        }else if(status == 3 && (std::tolower(c) == 'e')){
-            status = 4;
-        }else if(status == 4 && (c == '-' || c == '+')){
-            status = 5;
-        }else if(status == 4 && std::isdigit(c)){
-            status = 6;
-        }else if(status == 5 && std::isdigit(c)){
-            status = 6;
+            state = 3;
+        }else if(state == 2 && std::isdigit(c)){
+            state = 2;
+        }else if(state == 2 && (std::tolower(c) == 'e')){
+            state = 4;
+        }else if(state == 3 && std::isdigit(c)){
+            state = 3;
+        }else if(state == 3 && (std::tolower(c) == 'e')){
+            state = 4;
+        }else if(state == 4 && (c == '-' || c == '+')){
+            state = 5;
+        }else if(state == 4 && std::isdigit(c)){
+            state = 6;
+        }else if(state == 5 && std::isdigit(c)){
+            state = 6;
 		}
-		else if (status == 6 && std::isdigit(c)) {
-			status = 6;
+		else if (state == 6 && std::isdigit(c)) {
+			state = 6;
 		}
-		else if (status == 7 && std::isdigit(c)) {
-			status = 2;
+		else if (state == 7 && std::isdigit(c)) {
+			state = 2;
 		}
-		else if (status == 7 && c == '.') {
+		else if (state == 7 && c == '.') {
 			point_seen = true;
-			status = 1;
-        }else if(status == 2 || status == 3 || status == 6){
+			state = 1;
+        }else if(state == 2 || state == 3 || state == 6){
             // legal point of exit
             break;
         }else{
             std::stringstream errstr;
             errstr << "Lexical error (line: " << this->line << ", column " << this->column << "): wrong litteral specification.";
-            throw LexicalErrorException(errstr.str());
+            throw std::exception(errstr.str().c_str());
         }
         ss << c;
         this->advance();
-        c = this->look();
+        c = this->peek();
     }
     this->currentLexeme = Lexeme(LexemeType::NUMBER, ss.str());
     return true;
@@ -591,7 +599,7 @@ void PBRTLexer::advance(){
 	if (this->currentPos < this->lastPos) {
 		this->currentPos++;
 		this->column++;
-		char tmp = this->look();
+		char tmp = this->peek();
 		if (tmp == '\n') {
 			this->line++;
 			this->column = 0;
@@ -617,7 +625,7 @@ void PBRTLexer::advance(){
 //
 void PBRTLexer::remove_blanks(){ 
     while(true){
-        char tmp = this->look();
+        char tmp = this->peek();
         if(tmp == ' ' || tmp == '\t' || tmp == '\r' || tmp == '\n'){
             this->advance();
             continue;
@@ -625,7 +633,7 @@ void PBRTLexer::remove_blanks(){
             // comment
             while(tmp != '\n'){
                 this->advance();
-                tmp = this->look();
+                tmp = this->peek();
             }
 			this->advance();
             continue;
@@ -636,11 +644,10 @@ void PBRTLexer::remove_blanks(){
     }
 }
 
-/* ===========================================================================================
- *                                          PBRTParser
- * Parses a stream of lexemes.
- * ===========================================================================================
- */
+// ===========================================================================================
+//                                         PBRTParser
+// ===========================================================================================
+
 
 struct PBRTParameter{
     std::string type;
@@ -654,6 +661,7 @@ struct AreaLightInfo {
 	bool twosided = false;
 };
 
+// not a fan of the following
 struct ParsedMaterialInfo {
 	bool b_type = false;
 	std::string type;
@@ -694,32 +702,24 @@ struct ParsedMaterialInfo {
 struct GraphicState {
 	// Current Transformation Matrix
 	ygl::mat4f CTM;
-	// AreaLight directive status
-	AreaLightInfo alInfo;
+	// AreaLight directive state
+	AreaLightInfo ALInfo;
 	// Current Material
-	ygl::material *mat;
+	ygl::material *mat = nullptr;
 
 	// mappings to memorize data (textures, objects, ..) by name and use
-	// them in different times duding parsing (eg for instancing).
+	// them in different times during parsing
 	std::unordered_map<std::string, ygl::texture*> nameToTexture{};
 	std::unordered_map<std::string, ygl::material*> nameToMaterial{};
-	// name to pair (list_of_shapes, CTM)
-	std::unordered_map < std::string, std::pair<std::vector<ygl::shape*>, ygl::mat4f>> nameToObject{}; // instancing
-
 };
 
-inline std::string join_string_int(char *pref, int size) {
-	char buff[100];
-	sprintf(buff, "%s_%d", pref, size);
-	return std::string(buff);
-}
 
 class PBRTParser {
 
     private:
 
 	// PRIVATE ATTRIBUTES
-	// stack of lexical analyzers
+	// stack of lexical analyzers (useful for Inlcude directives)
 	std::vector<PBRTLexer *> lexers{};
 	
 	// stack of CTMs
@@ -732,27 +732,36 @@ class PBRTParser {
 	// parsing statements
 	
 	// pointer to the newly created yocto scene
-	ygl::scene *scn;
+	ygl::scene *scn = nullptr;
+
+	// The following information must be gloabally accessible during parsing.
+
 	// aspect ratio can be set in Camera or Film directive
 	float defaultAspect = 16.0 / 9.0;
 	float defaultFocus = 1;
-	// The parser "head" is currently inside an object definition.
+
 	// "execute_Shape" call needs to know this information.
 	bool inObjectDefinition = false;
-	// when the parser is inside an Onject environment, it needs to keep
+	// When the parser is inside an Onject environment, it needs to keep
 	// track of all the shapes that define the object. While "inObjectDefinition"
 	// is true, every shape parsed will be put in this vector. Since we can parse
 	// one Object at time, using a single vector is fine.
-	std::vector<ygl::shape*> shapesInObject = {};
+	ygl::shape_group *shapesInObject = nullptr;
 
+	// Defines the current graphics properties active and to apply to the scene objects.
 	GraphicState gState{ ygl::identity_mat4f, {}, nullptr};
+	// name to pair (list_of_shapes, CTM)
+	std::unordered_map < std::string, std::pair<ygl::shape_group*, ygl::mat4f>> nameToObject{}; // instancing
 
 	// PRIVATE METHODS
+	
+	// Read the next token
 	void advance();
+	// Get the current token
 	Lexeme& current_token() {
 		return this->lexers.at(0)->currentLexeme;
 	};
-
+	// current position of parser in the filesystem
 	std::string& current_path() {
 		return this->lexers.at(0)->path;
 	}
@@ -760,6 +769,7 @@ class PBRTParser {
 	std::string current_file() {
 		return this->lexers.at(0)->path + "/" + this->lexers.at(0)->filename;
 	}
+
 	// parse a single parameter type, name and associated value
 	bool parse_parameter(PBRTParameter &par, std::string type = "");
 
@@ -769,6 +779,8 @@ class PBRTParser {
 
 
 	// The following private methods correspond to Directives in pbrt format.
+	// execute_* are a direct corrispondence to the pbrt directives. Sometimes they use and share some
+	// helper functions, which have the prefix "parse_*".
 	 
 	void execute_Include();
 	// Scene wide rendering options
@@ -785,13 +797,13 @@ class PBRTParser {
 	// Attributes
 	void execute_AttributeBegin();
 	void execute_AttributeEnd();
-	void execute_TransformBegin(bool fictional = false);
-	void execute_TransformEnd(bool fictional = false);
+	void execute_TransformBegin();
+	void execute_TransformEnd();
 
 	void execute_Shape();
 	void parse_curve(ygl::shape *shp);
 	void parse_trianglemesh(ygl::shape *shp);
-	// DEBUG methods
+	// DEBUG method
 	void parse_cube(ygl::shape *shp);
 
 	void execute_ObjectBlock();
@@ -816,11 +828,12 @@ class PBRTParser {
 
 	void execute_Texture();
 
-	bool parse_preworld_directives();
-	bool parse_world_directives();
+	void parse_preworld_directives();
+	void parse_world_directives();
 
 	void parse_world_directive();
-	void parse_object_directive();
+
+	// Error and format compatibility handling methods.
 
 	void ignore_current_directive();
 
@@ -828,21 +841,30 @@ class PBRTParser {
         std::stringstream ss;
         ss << "Syntax Error (file: " << this->current_file() << ", line " << this->lexers.at(0)->get_line() <<\
 			", column " << this->lexers.at(0)->get_column() << "): " << msg;
-        throw SyntaxErrorException(ss.str());
+        throw std::exception(ss.str().c_str());
     };
 
+	inline void check_type() {
+
+	}
     public:
     
 	// public methods
 
+	// Build a parser for the scene pointed by "filename"
 	PBRTParser(std::string filename){
 		this->lexers.push_back(new PBRTLexer(filename));
 		this->scn = new ygl::scene();
     };
 
+	// start the parsing.
     ygl::scene *parse();
 
 };
+
+// --------------------------------------------------------------------
+//                        PARSER IMPLEMENTATION
+// --------------------------------------------------------------------
 
 //
 // advance
@@ -877,17 +899,17 @@ ygl::scene *PBRTParser::parse() {
 
 void PBRTParser::ignore_current_directive() {
 	this->advance();
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER)
+	while (this->current_token().type != LexemeType::IDENTIFIER)
 		this->advance();
 }
 
 void PBRTParser::execute_Include() {
 	this->advance();
 	// now read the file to include
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected the name of the file to be included.");
 
-	std::string fileToBeIncl = this->current_token().get_value();
+	std::string fileToBeIncl = this->current_token().value;
 
 	// call advance here is dangerous. It could end the parsing too soon.
 	// better call it in advance() method, directly on the lexter after being
@@ -895,6 +917,7 @@ void PBRTParser::execute_Include() {
 
 	if (fileToBeIncl.length() == 0)
 		throw_syntax_error("Empty filename.");
+
 	//distinguish if it is relative or absolute path
 	std::stringstream ss;
 	for (char ch : fileToBeIncl) {
@@ -918,219 +941,144 @@ void PBRTParser::execute_Include() {
 	this->advance();
 }
 
-bool PBRTParser::parse_preworld_directives() {
+void PBRTParser::parse_preworld_directives() {
     // When this method starts executing, the first token must be an Identifier of
 	// a directive.
-	bool checkCamera = false;
 
 	// parse scene wide rendering options until the WorldBegin statement is met.
-	while (!(this->current_token().get_type() == LexemeType::IDENTIFIER &&
-		!this->current_token().get_value().compare("WorldBegin"))) {
+	while (!(this->current_token().type == LexemeType::IDENTIFIER &&
+		this->current_token().value =="WorldBegin")) {
 
-		if (this->current_token().get_type() != LexemeType::IDENTIFIER)
-			throw_syntax_error("Identifier expected, got " + this->current_token().get_value() +" instead.");
+		if (this->current_token().type != LexemeType::IDENTIFIER)
+			throw_syntax_error("Identifier expected, got " + this->current_token().value + " instead.");
 
 		// Scene-Wide rendering options
-		else if (!this->current_token().get_value().compare("Camera")) {
+		else if (this->current_token().value =="Camera") {
 			this->execute_Camera();
-			checkCamera = true;
 		}
-		else if (!this->current_token().get_value().compare("Film")) {
+		else if (this->current_token().value =="Film"){
 			this->execute_Film();
 		}
 
-		else if (!this->current_token().get_value().compare("Include")) {
+		else if (this->current_token().value =="Include") {
 			this->execute_Include();
 		}
-		else if (!this->current_token().get_value().compare("Translate")) {
+		else if (this->current_token().value =="Translate") {
 			this->execute_Translate();
 		}
-		else if (!this->current_token().get_value().compare("Transform")) {
+		else if (this->current_token().value =="Transform") {
 			this->execute_Transform();
 		}
-		else if (!this->current_token().get_value().compare("ConcatTransform")) {
+		else if (this->current_token().value =="ConcatTransform") {
 			this->execute_ConcatTransform();
 		}
-		else if (!this->current_token().get_value().compare("Scale")) {
+		else if (this->current_token().value =="Scale") {
 			this->execute_Scale();
 		}
-		else if (!this->current_token().get_value().compare("Rotate")) {
+		else if (this->current_token().value =="Rotate") {
 			this->execute_Rotate();
 		}
-		else if (!this->current_token().get_value().compare("LookAt")) {
+		else if (this->current_token().value =="LookAt"){
 			this->execute_LookAt();
 		}
 		else {
-			std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring " << this->current_token().get_value() << " directive..\n";
+			std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring " << this->current_token().value << " directive..\n";
 			this->ignore_current_directive();
 		}
 	}
-	return checkCamera;
 }
 
 
-
-bool PBRTParser::parse_world_directives() {
+void PBRTParser::parse_world_directives() {
 	this->gState.CTM = ygl::identity_mat4f;
 	this->advance();
 	// parse scene wide rendering options until the WorldBegin statement is met.
-	while (!(this->current_token().get_type() == LexemeType::IDENTIFIER &&
-		!this->current_token().get_value().compare("WorldEnd"))) {
+	while (!(this->current_token().type == LexemeType::IDENTIFIER &&
+		this->current_token().value =="WorldEnd")) {
 		this->parse_world_directive();
 	}
-	return true;
 }
 
 void PBRTParser::parse_world_directive() {
 
-	if (this->current_token().get_type() != LexemeType::IDENTIFIER)
-		throw_syntax_error("Identifier expected, got " + this->current_token().get_value() + " instead.");
+	if (this->current_token().type != LexemeType::IDENTIFIER)
+		throw_syntax_error("Identifier expected, got " + this->current_token().value + " instead.");
 
-	if (!this->current_token().get_value().compare("Include")) {
+	if (this->current_token().value =="Include") {
 		this->execute_Include();
 	}
-	else if (!this->current_token().get_value().compare("Translate")) {
+	else if (this->current_token().value =="Translate") {
 		this->execute_Translate();
 	}
-	else if (!this->current_token().get_value().compare("Transform")) {
+	else if (this->current_token().value =="Transform") {
 		this->execute_Transform();
 	}
-	else if (!this->current_token().get_value().compare("ConcatTransform")) {
+	else if (this->current_token().value =="ConcatTransform") {
 		this->execute_ConcatTransform();
 	}
-	else if (!this->current_token().get_value().compare("Scale")) {
+	else if (this->current_token().value =="Scale") {
 		this->execute_Scale();
 	}
-	else if (!this->current_token().get_value().compare("Rotate")) {
+	else if (this->current_token().value =="Rotate") {
 		this->execute_Rotate();
 	}
-	else if (!this->current_token().get_value().compare("LookAt")) {
+	else if (this->current_token().value =="LookAt") {
 		this->execute_LookAt();
 	}
-	else if (!this->current_token().get_value().compare("AttributeBegin")) {
+	else if (this->current_token().value =="AttributeBegin") {
 		this->execute_AttributeBegin();
 	}
-	else if (!this->current_token().get_value().compare("TransformBegin")) {
+	else if (this->current_token().value =="TransformBegin") {
 		this->execute_TransformBegin();
 	}
-	else if (!this->current_token().get_value().compare("AttributeEnd")) {
+	else if (this->current_token().value =="AttributeEnd") {
 		this->execute_AttributeEnd();
 	}
-	else if (!this->current_token().get_value().compare("TransformEnd")) {
+	else if (this->current_token().value =="TransformEnd") {
 		this->execute_TransformEnd();
 	}
-	else if (!this->current_token().get_value().compare("Shape")) {
+	else if (this->current_token().value =="Shape") {
 		this->execute_Shape();
 	}
-	else if (!this->current_token().get_value().compare("ObjectBegin")) {
+	else if (this->current_token().value =="ObjectBegin") {
 		this->execute_ObjectBlock();
 	}
-	else if (!this->current_token().get_value().compare("ObjectInstance")) {
+	else if (this->current_token().value =="ObjectInstance") {
 		this->execute_ObjectInstance();
 	}
-	else if (!this->current_token().get_value().compare("LightSource")) {
+	else if (this->current_token().value =="LightSource") {
 		this->execute_LightSource();
 	}
-	else if (!this->current_token().get_value().compare("AreaLightSource")) {
+	else if (this->current_token().value =="AreaLightSource") {
 		this->execute_AreaLightSource();
 	}
-	else if (!this->current_token().get_value().compare("Material")) {
+	else if (this->current_token().value =="Material") {
 		this->execute_Material();
 	}
-	else if (!this->current_token().get_value().compare("MakeNamedMaterial")) {
+	else if (this->current_token().value =="MakeNamedMaterial") {
 		this->execute_MakeNamedMaterial();
 	}
-	else if (!this->current_token().get_value().compare("NamedMaterial")) {
+	else if (this->current_token().value =="NamedMaterial") {
 		this->execute_NamedMaterial();
 	}
-	else if (!this->current_token().get_value().compare("Texture")) {
+	else if (this->current_token().value =="Texture") {
 		this->execute_Texture();
 	}
 	else {
-		std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring " << this->current_token().get_value() << " directive..\n";
+		std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring " << this->current_token().value << " directive..\n";
 		this->ignore_current_directive();
 	}
 }
 
-void PBRTParser::parse_object_directive() {
-
-	if (this->current_token().get_type() != LexemeType::IDENTIFIER)
-		throw_syntax_error("Identifier expected.");
-
-	if (!this->current_token().get_value().compare("Include")) {
-		this->execute_Include();
-	}
-	else if (!this->current_token().get_value().compare("Translate")) {
-		this->execute_Translate();
-	}
-	else if (!this->current_token().get_value().compare("Transform")) {
-		this->execute_Transform();
-	}
-	else if (!this->current_token().get_value().compare("ConcatTransform")) {
-		this->execute_ConcatTransform();
-	}
-	else if (!this->current_token().get_value().compare("Scale")) {
-		this->execute_Scale();
-	}
-	else if (!this->current_token().get_value().compare("Rotate")) {
-		this->execute_Rotate();
-	}
-	else if (!this->current_token().get_value().compare("LookAt")) {
-		this->execute_LookAt();
-	}
-	else if (!this->current_token().get_value().compare("AttributeBegin")) {
-		this->execute_AttributeBegin();
-	}
-	else if (!this->current_token().get_value().compare("TransformBegin")) {
-		this->execute_TransformBegin();
-	}
-	else if (!this->current_token().get_value().compare("AttributeEnd")) {
-		this->execute_AttributeEnd();
-	}
-	else if (!this->current_token().get_value().compare("TransformEnd")) {
-		this->execute_TransformEnd();
-	}
-	else if (!this->current_token().get_value().compare("Shape")) {
-		this->execute_Shape();
-	}
-	else if (!this->current_token().get_value().compare("ObjectBegin")) {
-		this->execute_ObjectBlock();
-	}
-	else if (!this->current_token().get_value().compare("ObjectInstance")) {
-		this->execute_ObjectInstance();
-	}
-	else if (!this->current_token().get_value().compare("LightSource")) {
-		this->execute_LightSource();
-	}
-	else if (!this->current_token().get_value().compare("AreaLightSource")) {
-		this->execute_AreaLightSource();
-	}
-	else if (!this->current_token().get_value().compare("Material")) {
-		this->execute_Material();
-	}
-	else if (!this->current_token().get_value().compare("MakeNamedMaterial")) {
-		this->execute_MakeNamedMaterial();
-	}
-	else if (!this->current_token().get_value().compare("NamedMaterial")) {
-		this->execute_NamedMaterial();
-	}
-	else if (!this->current_token().get_value().compare("Texture")) {
-		this->execute_Texture();
-	}
-	else {
-		std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring " << this->current_token().get_value() << " directive..\n";
-		this->ignore_current_directive();
-	}
-}
-
+// some types are synonyms, transform them to default.
 std::string check_synonym(std::string s) {
-	if (!s.compare("point"))
+	if (s == "point")
 		return std::string("point3");
-	if (!s.compare("normal"))
+	if (s == "normal")
 		return std::string("normal3");
-	if (!s.compare("vector"))
+	if (s == "vector")
 		return std::string("vector3");
-	if (!s.compare("rgb") || !s.compare("color"))
+	if (s == "color")
 		return std::string("rgb");
 
 	return s;
@@ -1139,9 +1087,8 @@ std::string check_synonym(std::string s) {
 bool check_type_existence(std::string &val){
 	std::vector<std::string> varTypes{ "integer", "float", "point2", "vector2", "point3", "vector3",\
 		"normal3", "spectrum", "bool", "string", "rgb", "color", "point", "vector", "normal", "texture" };
-
 	for (auto s : varTypes)
-		if (!s.compare(val))
+		if (s == val)
 			return true;
     return false;
 }
@@ -1153,17 +1100,17 @@ void PBRTParser::parse_value_array(int groupSize, std::vector<T1> *vals, bool(*c
 	// it can be a single value or multiple values
 	if (checkValue(this->current_token()) && groupSize == 1) {
 		// single value
-		T2 v = convert2(this->current_token().get_value());
+		T2 v = convert2(this->current_token().value);
 		vals->push_back(convert(&v, 1));
 	}
-	else if (this->current_token().get_type() == LexemeType::SINGLETON && !this->current_token().get_value().compare("[")) {
+	else if (this->current_token().type == LexemeType::SINGLETON && this->current_token().value =="[") {
 		// start array of value(s)
 		bool stopped = false;
 		T2 *value = new T2[groupSize];
 		while (!stopped) {
 			for (int i = 0; i < groupSize; i++) {
 				this->advance();
-				if (this->current_token().get_type() == LexemeType::SINGLETON && !this->current_token().get_value().compare("]")) {
+				if (this->current_token().type == LexemeType::SINGLETON && this->current_token().value =="]") {
 					if (i == 0) {
 						stopped = true;
 						break; // finished to read the array
@@ -1174,7 +1121,7 @@ void PBRTParser::parse_value_array(int groupSize, std::vector<T1> *vals, bool(*c
 				}	
 				if (!checkValue(this->current_token()))
 					throw_syntax_error("One of the values differs from the expected type.");
-				value[i] = convert2(this->current_token().get_value());
+				value[i] = convert2(this->current_token().value);
 			}
 			if(!stopped)
 				vals->push_back(convert(value, groupSize));
@@ -1188,15 +1135,17 @@ void PBRTParser::parse_value_array(int groupSize, std::vector<T1> *vals, bool(*c
 }
 
 bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
-	if (this->current_token().get_type() != LexemeType::STRING)
+
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected a string with type and name of a parameter.");
-    auto tokens = split(this->current_token().get_value());
+    
+	auto tokens = split(this->current_token().value);
     // handle type
     if(!check_type_existence(tokens[0]))
         throw_syntax_error("Unrecognized type.");
 	par.type = check_synonym(std::string(tokens[0]));
 
-    if(!type.compare("") && !(type.compare(par.type))){
+    if(type != "" && type != par.type){
         std::stringstream ss;
         ss << "Expected parameter of type `" << type << "` but got `" << par.type << "`.";
         throw_syntax_error(ss.str());
@@ -1204,10 +1153,10 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	par.name = tokens[1];
 
 	// now, according to type, we parse the value
-	if (!par.type.compare("string") || !par.type.compare("texture")) {
+	if (par.type == "string" || par.type == "texture") {
 		std::vector<std::string> *vals = new std::vector<std::string>();
 		parse_value_array<std::string, std::string>( 1, vals, \
-			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::STRING; },\
+			[](Lexeme &lex)->bool {return lex.type == LexemeType::STRING; },\
 			[](std::string *x, int g)->std::string {return *x; },
 			[](std::string x) -> std::string {return x; }
 		);
@@ -1218,7 +1167,7 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	else if (!par.type.compare("float")) {
 		std::vector<float> *vals = new std::vector<float>();
 		parse_value_array<float, float>( 1, vals, \
-			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; },\
+			[](Lexeme &lex)->bool {return lex.type == LexemeType::NUMBER; },\
 			[](float *x, int g)->float {return *x; },
 			[](std::string x) -> float {return atof(x.c_str()); }
 		);
@@ -1229,7 +1178,7 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	else if (!par.type.compare("integer")) {
 		std::vector<int> *vals = new std::vector<int>();
 		parse_value_array<int, int>( 1, vals, \
-			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; }, \
+			[](Lexeme &lex)->bool {return lex.type == LexemeType::NUMBER; }, \
 			[](int *x, int g)->int {return *x; },
 			[](std::string x) -> int {return atoi(x.c_str()); }
 		);
@@ -1240,8 +1189,8 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	else if (!par.type.compare("bool")) {
 		std::vector<bool> *vals = new std::vector<bool>();
 		parse_value_array<bool, bool>( 1, vals, \
-			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::STRING && \
-				(!lex.get_value().compare("true") || !lex.get_value().compare("false")); }, \
+			[](Lexeme &lex)->bool {return lex.type == LexemeType::STRING && \
+				(!lex.value.compare("true") || !lex.value.compare("false")); }, \
 			[](bool *x, int g)->bool {return *x; },
 			[](std::string x) -> bool { return (!x.compare("true")) ? true : false; }
 		);
@@ -1253,7 +1202,7 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	else if (!par.type.compare("point3") || !par.type.compare("normal3") || !par.type.compare("rgb") || !par.type.compare("spectrum")) {
 		std::vector<ygl::vec3f> *vals = new std::vector<ygl::vec3f>();
 		parse_value_array<ygl::vec3f, float>( 3, vals, \
-			[](Lexeme &lex)->bool {return lex.get_type() == LexemeType::NUMBER; }, \
+			[](Lexeme &lex)->bool {return lex.type == LexemeType::NUMBER; }, \
 			[](float *x, int g)->ygl::vec3f {
 				ygl::vec3f r; 
 				for (int k = 0; k < g; k++) 
@@ -1271,13 +1220,6 @@ bool PBRTParser::parse_parameter(PBRTParameter &par, std::string type){
 	return true;
 }
 
-bool is_camera_type(std::string type) {
-	std::vector<std::string> camTypes { "environment", "ortographic", "perspective", "realistic" };
-	for (auto s : camTypes)
-		if (!s.compare(type))
-			return true;
-	return false;
-}
 
 //
 // TRANSFORMATIONS
@@ -1287,19 +1229,19 @@ void PBRTParser::execute_Translate() {
 	float x, y, z;
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'x' parameter of Translate directive.");
-	x = atof(this->current_token().get_value().c_str());
+	x = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'y' parameter of Translate directive.");
-	y = atof(this->current_token().get_value().c_str());
+	y = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'z' parameter of Translate directive.");
-	z = atof(this->current_token().get_value().c_str());
+	z = atof(this->current_token().value.c_str());
 	
 	const ygl::vec3f transl_vec { x, y, z };
 	auto transl_mat = ygl::frame_to_mat(ygl::translation_frame(transl_vec));
@@ -1311,19 +1253,19 @@ void PBRTParser::execute_Scale(){
 	float x, y, z;
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'x' parameter of Scale directive.");
-	x = atof(this->current_token().get_value().c_str());
+	x = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'y' parameter of Scale directive.");
-	y = atof(this->current_token().get_value().c_str());
+	y = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'z' parameter of Scale directive.");
-	z = atof(this->current_token().get_value().c_str());
+	z = atof(this->current_token().value.c_str());
 
 	const ygl::vec3f scale_vec{ x, y, z };
 	
@@ -1335,25 +1277,25 @@ void PBRTParser::execute_Rotate() {
 	float angle, x, y, z;
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'angle' parameter of Rotate directive.");
-	angle = atof(this->current_token().get_value().c_str());
+	angle = atof(this->current_token().value.c_str());
 	angle = angle *ygl::pif / 180;
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'x' parameter of Rotate directive.");
-	x = atof(this->current_token().get_value().c_str());
+	x = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'y' parameter of Rotate directive.");
-	y = atof(this->current_token().get_value().c_str());
+	y = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'z' parameter of Rotate directive.");
-	z = atof(this->current_token().get_value().c_str());
+	z = atof(this->current_token().value.c_str());
 
 	const ygl::vec3f rot_vec{ x, y, z };
 	auto rot_mat = ygl::frame_to_mat(ygl::rotation_frame(rot_vec, angle));
@@ -1365,72 +1307,71 @@ void PBRTParser::execute_LookAt(){
 	float eye_x, eye_y, eye_z, look_x, look_y, look_z, up_x, up_y, up_z;
 	
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'eye_x' parameter of LookAt directive.");
-	eye_x = atof(this->current_token().get_value().c_str());
+	eye_x = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'eye_y' parameter of LookAt directive.");
-	eye_y = atof(this->current_token().get_value().c_str());
+	eye_y = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'eye_z' parameter of LookAt directive.");
-	eye_z = atof(this->current_token().get_value().c_str());
+	eye_z = atof(this->current_token().value.c_str());
 
 	const ygl::vec3f eye{ eye_x, eye_y, eye_z };
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'look_x' parameter of LookAt directive.");
-	look_x = atof(this->current_token().get_value().c_str());
+	look_x = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'look_y' parameter of LookAt directive.");
-	look_y = atof(this->current_token().get_value().c_str());
+	look_y = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'look_z' parameter of LookAt directive.");
-	look_z = atof(this->current_token().get_value().c_str());
+	look_z = atof(this->current_token().value.c_str());
 
-	const ygl::vec3f look { look_x, look_y, look_z };
+	const ygl::vec3f peek { look_x, look_y, look_z };
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'up_x' parameter of LookAt directive.");
-	up_x = atof(this->current_token().get_value().c_str());
+	up_x = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'up_y' parameter of LookAt directive.");
-	up_y = atof(this->current_token().get_value().c_str());
+	up_y = atof(this->current_token().value.c_str());
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::NUMBER)
+	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'up_z' parameter of LookAt directive.");
-	up_z = atof(this->current_token().get_value().c_str());
+	up_z = atof(this->current_token().value.c_str());
 
 	const ygl::vec3f up{ up_x, up_y, up_z };
 
-	auto fm = ygl::lookat_frame(eye, look, up);
+	auto fm = ygl::lookat_frame(eye, peek, up);
 	fm.x = -fm.x;
 	fm.z = -fm.z;
 	auto mm = ygl::frame_to_mat(fm);
-	this->defaultFocus = ygl::length(eye - look);
+	this->defaultFocus = ygl::length(eye - peek);
 	this->gState.CTM = this->gState.CTM * ygl::inverse(mm); // inverse here because pbrt boh
 	this->advance();
 }
-
 
 
 void PBRTParser::execute_Transform() {
 	std::vector<ygl::vec4f> vals;
 	
 	// parse array of values, grouped by 4
-	auto check = [](Lexeme &lxm) {return lxm.get_type() == LexemeType::NUMBER; };
+	auto check = [](Lexeme &lxm) {return lxm.type == LexemeType::NUMBER; };
 	auto conversion2 = [](float *x, int g)->ygl::vec4f {
 		ygl::vec4f r;
 		for (int k = 0; k < g; k++)
@@ -1456,7 +1397,7 @@ void PBRTParser::execute_ConcatTransform() {
 	std::vector<ygl::vec4f> vals;
 
 	// parse array of values, grouped by 4
-	auto check = [](Lexeme &lxm) {return lxm.get_type() == LexemeType::NUMBER; };
+	auto check = [](Lexeme &lxm) {return lxm.type == LexemeType::NUMBER; };
 	auto conversion2 = [](float *x, int g)->ygl::vec4f {
 		ygl::vec4f r;
 		for (int k = 0; k < g; k++)
@@ -1501,9 +1442,9 @@ void PBRTParser::execute_Camera() {
 	// Parse the camera parameters
 	// First parameter is the type
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected type string.");
-	std::string camType = this->current_token().get_value();
+	std::string camType = this->current_token().value;
 	this->advance();
 
 	// RESTRICTION: only perspective camera is supported
@@ -1512,7 +1453,7 @@ void PBRTParser::execute_Camera() {
 	// END-RESTRICTION
 
 	// read parameters
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 
@@ -1565,9 +1506,9 @@ void PBRTParser::execute_Film() {
 	
 	// First parameter is the type
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected type string.");
-	std::string filmType = this->current_token().get_value();
+	std::string filmType = this->current_token().value;
 	this->advance();
 
 	if (filmType.compare("image"))
@@ -1576,7 +1517,7 @@ void PBRTParser::execute_Film() {
 	int xres = 0;
 	int yres = 0;
 	// read parameters
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 
@@ -1621,29 +1562,32 @@ void PBRTParser::execute_AttributeBegin() {
 
 void PBRTParser::execute_AttributeEnd() {
 	this->advance();
-	// save the current state
+	if (stateStack.size() == 0) {
+		throw_syntax_error("AttributeEnd instruction unmatched with AttributeBegin.");
+	}
 	this->gState = stateStack.back();
 	stateStack.pop_back();
 }
 
-void PBRTParser::execute_TransformBegin(bool fictional) {
-	if(!fictional)
-		this->advance();
+void PBRTParser::execute_TransformBegin() {
+	this->advance();
 	// save the current CTM
 	CTMStack.push_back(this->gState.CTM);
 }
 
-void PBRTParser::execute_TransformEnd(bool fictional) {
-	if(!fictional)
-		this->advance();
+void PBRTParser::execute_TransformEnd() {
+	this->advance();
 	// save the current CTM
+	if (CTMStack.size() == 0) {
+		throw_syntax_error("TranformEnd instruction unmatched with TransformBegin.");
+	}
 	this->gState.CTM = CTMStack.back();
 	CTMStack.pop_back();
 }
 
 void PBRTParser::parse_cube(ygl::shape *shp) {
 	// DEBUG: this is a debug function
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER)
+	while (this->current_token().type != LexemeType::IDENTIFIER)
 		this->advance();
 	    ygl::make_uvcube(shp->quads, shp->pos, shp->norm, shp->texcoord, 1);
 }
@@ -1658,7 +1602,7 @@ void PBRTParser::parse_curve(ygl::shape *shp) {
 	int width = 1;
 
 	// read parameters
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 
@@ -1730,6 +1674,7 @@ void PBRTParser::parse_curve(ygl::shape *shp) {
 	}
 }
 
+// my_compute_normals, because pbrt computes it differently
 void my_compute_normals(const std::vector<ygl::vec3i>& triangles,
 	const std::vector<ygl::vec3f>& pos, std::vector<ygl::vec3f>& norm, bool weighted ) {
 	norm.resize(pos.size());
@@ -1742,13 +1687,14 @@ void my_compute_normals(const std::vector<ygl::vec3i>& triangles,
 	for (auto& n : norm) n = normalize(n);
 }
 
+
 void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 
 	bool indicesCheck = false;
 	bool PCheck = false;
 
 	// read parameters
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 		if (!par.name.compare("indices")) {
@@ -1818,10 +1764,10 @@ void PBRTParser::execute_Shape() {
 	this->advance();
 
 	// parse the shape name
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected shape name.");
 	// TODO: check if the shape type is correct
-	std::string shapeName = this->current_token().get_value();
+	std::string shapeName = this->current_token().value;
 	this->advance();
 	
 	ygl::shape *shp = new ygl::shape();
@@ -1839,9 +1785,9 @@ void PBRTParser::execute_Shape() {
 	shp->name = shpName;
 	// TODO: handle when shapes override some material properties
 
-	if (this->gState.alInfo.active) {
-		shp->mat->ke = gState.alInfo.L;
-		shp->mat->double_sided = gState.alInfo.twosided;
+	if (this->gState.ALInfo.active) {
+		shp->mat->ke = gState.ALInfo.L;
+		shp->mat->double_sided = gState.ALInfo.twosided;
 	}
 
 	if (!shapeName.compare("curve"))
@@ -1862,7 +1808,7 @@ void PBRTParser::execute_Shape() {
 			throw_syntax_error("Error parsing ply file: " + fname);
 		}
 
-		while (this->current_token().get_type() != LexemeType::IDENTIFIER)
+		while (this->current_token().type != LexemeType::IDENTIFIER)
 			this->advance();
 	
 	}
@@ -1876,7 +1822,7 @@ void PBRTParser::execute_Shape() {
 		ygl::compute_normals(shp);
 
 	if (this->inObjectDefinition) {
-		shapesInObject.push_back(shp);
+		shapesInObject->shapes.push_back(shp);
 	}
 	else {
 		// add shp in scene
@@ -1898,76 +1844,71 @@ void PBRTParser::execute_Shape() {
 void PBRTParser::execute_ObjectBlock() {
 	if (this->inObjectDefinition)
 		throw_syntax_error("Cannot define an object inside another object.");
-
-	this->advance();
+	this->execute_AttributeBegin(); // it will execute advance() too
 	this->inObjectDefinition = true;
-	if (this->current_token().get_type() != LexemeType::STRING)
+	this->shapesInObject = new ygl::shape_group();
+	this->shapesInObject->name = join_string_int("sg", scn->shapes.size());
+	this->scn->shapes.push_back(this->shapesInObject);
+	
+	// DEGUB
+	int start = this->lexers[0]->get_line();
+
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected object name as a string.");
 	//NOTE: the current transformation matrix defines the transformation from
 	//object space to instance's coordinate space
-	std::string objName = this->current_token().get_value();
+	std::string objName = this->current_token().value;
 	
-	// NOTE: What to do here? in some files two object are called the same way. I override
-	/*if (gState.nameToObject.find(objName) != gState.nameToObject.end())
-		throw_syntax_error("There already exists an object with the specified name.");
-	*/
 	this->advance();
-	this->execute_TransformBegin(true);
 
-	while (!(this->current_token().get_type() == LexemeType::IDENTIFIER &&
-		!this->current_token().get_value().compare("ObjectEnd"))) {
-		this->parse_object_directive();
+	while (!(this->current_token().type == LexemeType::IDENTIFIER &&
+		this->current_token().value =="ObjectEnd")) {
+		this->parse_world_directive();
 	}
-	auto it = gState.nameToObject.find(objName);
-	if (it == gState.nameToObject.end()) {
-		auto shapesInObjectCopy = shapesInObject;
-		gState.nameToObject.insert(std::make_pair(objName, std::make_pair(shapesInObjectCopy, this->gState.CTM)));
+	auto it = nameToObject.find(objName);
+	if (it == nameToObject.end()) {
+		nameToObject.insert(std::make_pair(objName, std::make_pair(shapesInObject, this->gState.CTM)));
 	}		
-	else
-		it->second = std::make_pair(std::vector<ygl::shape*>(shapesInObject), this->gState.CTM);
+	else {
+		it->second = std::make_pair(this->shapesInObject, this->gState.CTM);
+		std::cout << "Object defined at line " << start << " overrides onther existent one.\n";
+	}
+		
 	this->inObjectDefinition = false;
-	this->shapesInObject = std::vector<ygl::shape*>();
-	this->advance();
-	this->execute_TransformEnd(true);
+	this->execute_AttributeEnd();
 }
 
 void PBRTParser::execute_ObjectInstance() {
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected object name as a string.");
 	//NOTE: the current transformation matrix defines the transformation from
 	//instance space to world coordinate space
-	std::string objName = this->current_token().get_value();
+	std::string objName = this->current_token().value;
 	this->advance();
 
-	auto obj = gState.nameToObject.find(objName);
-	if (obj == gState.nameToObject.end())
+	auto obj = nameToObject.find(objName);
+	if (obj == nameToObject.end())
 		throw_syntax_error("Object name not found.");
 
 	auto shapes = (obj->second).first;
 	ygl::mat4f objectToInstanceCTM = (obj->second).second;
 	ygl::mat4f finalCTM = this->gState.CTM * objectToInstanceCTM;
 
-	ygl::shape_group *sg = new ygl::shape_group();
 	ygl::instance *inst = new ygl::instance();
-	inst->shp = sg;
-	sg->name = join_string_int("shape_", scn->shapes.size());
-	for (auto shp : shapes) {
-		sg->shapes.push_back(shp);
-	}
-	scn->shapes.push_back(sg);
+	inst->shp = shapes;
 	inst->frame = ygl::mat_to_frame(finalCTM);
-	inst->name = join_string_int("instance_", scn->instances.size());
+	inst->name = join_string_int("i", scn->instances.size());
 	scn->instances.push_back(inst);
 }
 
 void PBRTParser::execute_LightSource() {
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected lightsource type as a string.");
 	// NOTE: when a light source is defined, the CTM is uded to define
 	// the light-to-world transformation. 
-	std::string lightType = this->current_token().get_value();
+	std::string lightType = this->current_token().value;
 	this->advance();
 
 	if (!lightType.compare("point"))
@@ -1987,7 +1928,7 @@ void PBRTParser::parse_InfiniteLight() {
 	ygl::vec3f L { 1, 1, 1 };
 	std::string mapname;
 
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 
@@ -2037,12 +1978,13 @@ void PBRTParser::parse_InfiniteLight() {
 	scn->environments.push_back(env);
 }
 
+
 void PBRTParser::parse_PointLight() {
 	ygl::vec3f scale{ 1, 1, 1 };
 	ygl::vec3f I{ 1, 1, 1 };
 	ygl::vec3f point;
 
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 
@@ -2098,10 +2040,10 @@ void PBRTParser::parse_PointLight() {
 
 void PBRTParser::execute_AreaLightSource() {
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected lightsource type as a string.");
 	
-	std::string areaLightType = this->current_token().get_value();
+	std::string areaLightType = this->current_token().value;
 	// TODO: check type
 	this->advance();
 
@@ -2109,7 +2051,7 @@ void PBRTParser::execute_AreaLightSource() {
 	ygl::vec3f L{ 1, 1, 1 };
 	bool twosided = false;
 
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 
@@ -2136,17 +2078,17 @@ void PBRTParser::execute_AreaLightSource() {
 		}
 	}
 
-	this->gState.alInfo.active = true;
-	this->gState.alInfo.L = L;
-	this->gState.alInfo.twosided = twosided;
+	this->gState.ALInfo.active = true;
+	this->gState.ALInfo.L = L;
+	this->gState.ALInfo.twosided = twosided;
 }
 
 void PBRTParser::execute_Material() {
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected lightsource type as a string.");
 
-	std::string materialType = this->current_token().get_value();
+	std::string materialType = this->current_token().value;
 	this->advance();
 	// TODO: check material type
 	// For now, implement matte, plastic, metal, mirror
@@ -2184,7 +2126,7 @@ void PBRTParser::execute_Material() {
 
 void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 
@@ -2692,10 +2634,10 @@ void PBRTParser::parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi,
 void PBRTParser::execute_MakeNamedMaterial() {
 	this->advance();
 
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected material name as string.");
 
-	std::string materialName = this->current_token().get_value();
+	std::string materialName = this->current_token().value;
 	if (gState.nameToMaterial.find(materialName) != gState.nameToMaterial.end())
 		throw_syntax_error("A material with the specified name already exists.");
 	this->advance();
@@ -2731,9 +2673,9 @@ void PBRTParser::execute_MakeNamedMaterial() {
 
 void PBRTParser::execute_NamedMaterial() {
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected material name string.");
-	std::string materialName = this->current_token().get_value();
+	std::string materialName = this->current_token().value;
 	this->advance();
 	auto it = gState.nameToMaterial.find(materialName);
 	if (it == gState.nameToMaterial.end())
@@ -2748,33 +2690,33 @@ void PBRTParser::execute_Texture() {
 	// "rgb value"[0.40000001 0.89999998 0.60000002]
 	// but then one should keep track of the various textures.
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected texture name string.");
-	std::string textureName = this->current_token().get_value();
+	std::string textureName = this->current_token().value;
 	
 	if (gState.nameToTexture.find(textureName) != gState.nameToTexture.end())
 		throw_syntax_error("Texture name already used.");
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected texture type string.");
-	std::string textureType = check_synonym(this->current_token().get_value());
+	std::string textureType = check_synonym(this->current_token().value);
 
 	if (textureType.compare("spectrum") && textureType.compare("rgb")
 		&& textureType.compare("float"))
 		throw_syntax_error("Unsupported texture type: " + textureType);
 
 	this->advance();
-	if (this->current_token().get_type() != LexemeType::STRING)
+	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected texture class string.");
-	std::string textureClass = this->current_token().get_value();
+	std::string textureClass = this->current_token().value;
 
 	if (textureClass.compare("imagemap"))
 		throw_syntax_error("Only 'imagemap' and 'color' texture type is supported.");
 	this->advance();
 
 	std::string filename;
-	while (this->current_token().get_type() != LexemeType::IDENTIFIER) {
+	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
 		this->parse_parameter(par);
 

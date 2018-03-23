@@ -13,20 +13,22 @@ int main(int argc, char** argv){
 	std::cout << "tracing..\n";
 	ygl::trace_image(obj, obj->cameras[0], bvh, tp);
 	*/
+	if (argc < 3)
+	{
+		//printf("Arguments missing.\n");
+		//exit(1);
+	}
 	auto parser = PBRTParser(argv[1]);
 	//auto parser = PBRTParser("C:\\Users\\cristian\\Documents\\Università\\Magistrale\\ComputerGraphics\\PBRTParser\\bin\\Release\\simple\\prova.pbrt");
 	ygl::scene *scn;
 	try {
 		scn = parser.parse();
 	}
-	catch (SyntaxErrorException ex) {
+	catch (std::exception ex) {
 		std::cout << ex.what() << std::endl;
 		return 1;
 	}
-	catch (LexicalErrorException ex) {
-		std::cout << ex.what() << std::endl;
-		return 1;
-	}
+
 	/*std::cout << "Trace scene..\n";
 	auto par = ygl::trace_params();
 	par.nsamples = 16;
@@ -35,6 +37,8 @@ int main(int argc, char** argv){
 	std::cout << "Save gen..\n";
 	ygl::save_image("provad2.png", img, 1, 2.2);
 	std::cout << "Save scene\n";*/
-	ygl::save_scene("C:\\Users\\cristian\\Desktop\\itrace\\prova.obj", scn, ygl::save_options());
+	std::cout << "Fine\n";
+	//ygl::save_scene(argv[2], scn, ygl::save_options());
+	ygl::save_scene("C:\\Users\\cristian\\Desktop\\itrace\\land.obj", scn, ygl::save_options());
 	return 0;
 }
