@@ -28,7 +28,7 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 	auto errMsgStart = "[File: " + filename + "]: ";
 
 	std::getline(plyFile, line);
-
+	
 	while (true) {
 		// skip comments
 		if (ygl::startswith(line, "end_header"))

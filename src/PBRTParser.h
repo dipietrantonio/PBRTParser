@@ -15,10 +15,9 @@
 #include <string>
 #include <iostream>
 #include <fstream>
-#include <cstdio>
 #include <sstream>
 #include <exception>
-#include <locale>
+#include <typeinfo>
 #include <unordered_map>
 #define YGL_IMAGEIO_IMPLEMENTATION 1
 #define YGL_OPENGL 0
@@ -104,7 +103,6 @@ struct ShapeData {
 	ShapeData(ygl::shape_group *s, ygl::mat4f ctm) : sg(s), CTM(ctm) {};
 };
 
-
 class PBRTParser {
 
     private:
@@ -144,6 +142,11 @@ class PBRTParser {
 	// name to pair (list_of_shapes, CTM)
 	std::unordered_map < std::string, ShapeData> nameToObject{}; // instancing
 
+	unsigned int shapeCounter = 0;
+	unsigned int shapeGroupCounter = 0;
+	unsigned int instanceCounter = 0;
+	unsigned int materialCounter = 0;
+
 	// PRIVATE METHODS
 	
 	// Read the next token
@@ -161,70 +164,12 @@ class PBRTParser {
 		return this->lexers.at(0)->path + "/" + this->lexers.at(0)->filename;
 	}
 
-	// The following methods are used to parse parameter values (i.e. normals, vertices, positions)
-	template<typename T, int N>
-	ygl::vec<T, N> parse_vec() {
-		ygl::vec<T, N> v;
-		for (int i = 0; i < N; i++) {
-			if (this->current_token().type != LexemeType::NUMBER) {
-				throw_syntax_error("The parsed value is not a number.");
-			}
-			if (T == int) {
-				v[i] = atoi(this->current_token().value);
-			}
-			else {
-				v[i] = atof(this->current_token().value);
-			}
-			this->advance();
-		}
-		return v;
-	}
-
+	// The following functions parse array of values
+	void parse_value_int(std::vector<int> *vals);
+	void parse_value_float(std::vector<float> *vals);
+	void parse_value_string(std::vector<std::string> *vals);
 	// parse a single parameter type, name and associated value
-	bool parse_parameter(PBRTParameter &par, std::string type = "");
-
-	template<typename T1, typename T2>
-	void parse_value_array(int groupSize, std::vector<T1> *vals, bool(*checkValue)(Lexeme &lexm),
-		T1(*convert)(T2*, int), T2(*convert2)(std::string)) {
-		this->advance();
-		// it can be a single value or multiple values
-		if (checkValue(this->current_token()) && groupSize == 1) {
-			// single value
-			T2 v = convert2(this->current_token().value);
-			vals->push_back(convert(&v, 1));
-		}
-		else if (this->current_token().type == LexemeType::SINGLETON && this->current_token().value == "[") {
-			// start array of value(s)
-			bool stopped = false;
-			T2 *value = new T2[groupSize];
-			while (!stopped) {
-				for (int i = 0; i < groupSize; i++) {
-					this->advance();
-					if (this->current_token().type == LexemeType::SINGLETON && this->current_token().value == "]") {
-						if (i == 0) {
-							stopped = true;
-							break; // finished to read the array
-						}
-						else {
-							throw_syntax_error("Too few values specified.");
-						}
-					}
-					if (!checkValue(this->current_token()))
-						throw_syntax_error("One of the values differs from the expected type.");
-					value[i] = convert2(this->current_token().value);
-				}
-				if (!stopped)
-					vals->push_back(convert(value, groupSize));
-			}
-			delete[] value;
-		}
-		else {
-			throw_syntax_error("Value differ from expected type.");
-		}
-		this->advance(); // remove ] or single value
-	}
-
-
+	void parse_parameter(PBRTParameter &par);
 
 	// The following private methods correspond to Directives in pbrt format.
 	// execute_* are a direct corrispondence to the pbrt directives. Sometimes they use and share some
@@ -242,7 +187,6 @@ class PBRTParser {
 	void execute_Transform();
 	void execute_ConcatTransform();
 
-	// Attributes
 	void execute_AttributeBegin();
 	void execute_AttributeEnd();
 	void execute_TransformBegin();
@@ -276,10 +220,10 @@ class PBRTParser {
 
 	void execute_Texture();
 
-	void parse_preworld_directives();
-	void parse_world_directives();
+	void execute_preworld_directives();
+	void execute_world_directives();
 
-	void parse_world_directive();
+	void execute_world_directive();
 
 	// Error and format compatibility handling methods.
 
@@ -292,9 +236,23 @@ class PBRTParser {
         throw std::exception(ss.str().c_str());
     };
 
-	inline void check_type() {
-
+	inline std::string get_unique_shape_id() {
+		return join_string_int("s_", shapeCounter++);
 	}
+
+	inline std::string get_unique_shapegroup_id() {
+		return join_string_int("sg_", shapeGroupCounter++);
+	}
+
+	inline std::string get_unique_inst_id() {
+		return join_string_int("i_", instanceCounter++);
+	}
+
+	inline std::string get_unique_mat_id() {
+		return join_string_int("m_", materialCounter++);
+	}
+
+
     public:
     
 	// public methods

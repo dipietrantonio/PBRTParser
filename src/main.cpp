@@ -37,9 +37,9 @@ int main(int argc, char** argv){
 	auto img = ygl::trace_image(scn, scn->cameras[0], ygl::make_bvh(scn), par);
 	std::cout << "Save gen..\n";
 	ygl::save_image("provad2.png", img, 1, 2.2);
-	std::cout << "Save scene\n";
-	std::cout << "Fine\n";*/
+	std::cout << "Save scene\n";*/
+	std::cout << "Fine\n";
 	//ygl::save_scene(argv[2], scn, ygl::save_options());
-	ygl::save_scene("C:\\Users\\cristian\\Desktop\\itrace\\land.obj", scn, ygl::save_options());
+	ygl::save_scene("C:\\Users\\cristian\\Desktop\\itrace\\prova.obj", scn, ygl::save_options());
 	return 0;
 }
