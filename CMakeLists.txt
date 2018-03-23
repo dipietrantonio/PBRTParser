@@ -33,10 +33,17 @@ add_library(yocto STATIC
     yocto/yocto_gl.h
     yocto/yocto_gl.cpp)
 
-add_library(pbrt_parser STATIC
-		src/PBRTParser.cpp 
-		src/PBRTLexer.cpp)
+add_library(mylib STATIC
+
+    src/PBRTParser.h
+    src/utils.h
+    src/PLYParser.h
+    src/PBRTLexer.h
+    src/PBRTParser.cpp
+    src/utils.cpp
+    src/PLYParser.cpp 
+    src/PBRTLexer.cpp)
 
 add_executable(parse src/main.cpp)
-target_link_libraries(parse pbrt_parser)
-target_link_libraries(pbrt_parser yocto)
+target_link_libraries(parse mylib)
+target_link_libraries(mylib yocto)

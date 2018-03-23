@@ -1,10 +1,10 @@
 
-#include "PBRTParser.cpp"
+#include "PBRTParser.h"
 #include <fstream>
 
 int main(int argc, char** argv){
 	/*std::cout << "Loading scene\n";
-	auto obj = ygl::load_scene("C:/Users/cristian/Desktop/itrace/prova.obj");
+	auto obj = ygl::load_scene("C:/Users/cristian/Desktop/itrace/land.obj");
 	std::cout << "make bvh\n";
 	auto bvh = ygl::make_bvh(obj);
 	auto tp = ygl::trace_params();
@@ -12,6 +12,7 @@ int main(int argc, char** argv){
 
 	std::cout << "tracing..\n";
 	ygl::trace_image(obj, obj->cameras[0], bvh, tp);
+	exit(1);
 	*/
 	if (argc < 3)
 	{
@@ -36,8 +37,8 @@ int main(int argc, char** argv){
 	auto img = ygl::trace_image(scn, scn->cameras[0], ygl::make_bvh(scn), par);
 	std::cout << "Save gen..\n";
 	ygl::save_image("provad2.png", img, 1, 2.2);
-	std::cout << "Save scene\n";*/
-	std::cout << "Fine\n";
+	std::cout << "Save scene\n";
+	std::cout << "Fine\n";*/
 	//ygl::save_scene(argv[2], scn, ygl::save_options());
 	ygl::save_scene("C:\\Users\\cristian\\Desktop\\itrace\\land.obj", scn, ygl::save_options());
 	return 0;
