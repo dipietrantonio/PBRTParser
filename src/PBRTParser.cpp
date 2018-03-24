@@ -649,7 +649,7 @@ void PBRTParser::execute_Camera() {
 	cam->yfov = 90.0f * ygl::pif / 180;
 	cam->focus = defaultFocus;
 	char buff[100];
-	sprintf(buff, "c%d", scn->cameras.size());
+	sprintf(buff, "c%u", scn->cameras.size());
 	cam->name = std::string(buff);
 	
 	// CTM defines world to camera transformation
@@ -967,6 +967,7 @@ void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 
 		// TODO: materials parameters overriding
 	}
+	// TODO: solve problem with normals
 	if (shp->norm.size() == 0);
 		//my_compute_normals(shp->triangles, shp->pos, shp->norm, true);
 
@@ -1278,7 +1279,7 @@ void PBRTParser::parse_PointLight() {
 	scn->shapes.push_back(sg);
 	ygl::instance *inst = new ygl::instance;
 	inst->shp = sg;
-	// TODO check validity of frame
+
 	inst->frame = ygl::mat_to_frame(gState.CTM);
 	inst->name = get_unique_id(CounterID::instance);
 	scn->instances.push_back(inst);
@@ -1371,6 +1372,8 @@ void PBRTParser::execute_Material() {
 		this->parse_material_uber(newMat, pmi, false);
 	else if (materialType == "translucent")
 		this->parse_material_translucent(newMat, pmi, false);
+	else if (materialType == "glass")
+		this->parse_material_glass(newMat, pmi, false);
 	else {
 		//throw_syntax_error("Material '" + materialType + " not supported. Ignoring..\n");
 		std::cerr << "Material '" + materialType + "' not supported. Ignoring and using 'matte'..\n";
@@ -1385,6 +1388,9 @@ void PBRTParser::execute_Material() {
 // parse_material_properties
 //
 void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
+
+	// temp fix
+	float index = 0;
 
 	while (this->current_token().type != LexemeType::IDENTIFIER) {
 		PBRTParameter par;
@@ -1533,6 +1539,13 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 				throw_syntax_error("'eta' parameter must be a spectrum or a texture.");
 			}
 		}
+		else if (par.name == "index") {
+			if (par.type != "float")
+				throw_syntax_error("'index' parameter must be of float type.");
+			auto data = (std::vector<float> *)par.value;
+			index = data->at(0);
+			delete data;
+		}
 		else if (par.name == "k"){
 			pmi.b_k = true;
 			if (par.type == "spectrum" || par.type == "rgb"){
@@ -1603,6 +1616,9 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 			std::cerr << "Material property " << par.name << " ignored..\n";
 		}
 	}
+	if (!pmi.b_eta) {
+		// TODO: create float textture with value = index
+	}
 }
 
 //
@@ -1610,7 +1626,7 @@ void PBRTParser::parse_material_properties(ParsedMaterialInfo &pmi) {
 //
 void PBRTParser::parse_material_matte(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
 	mat->kd = { 0.5f, 0.5f, 0.5f };
-	
+	mat->rs = 1;
 	if(!already_parsed)
 		this->parse_material_properties(pmi);
 
@@ -1698,25 +1714,28 @@ void PBRTParser::parse_material_translucent(ygl::material *mat, ParsedMaterialIn
 // parser_material_metal
 //
 void PBRTParser::parse_material_metal(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
-	// TODO: default values = copper
 	ygl::vec3f eta{ 0.5, 0.5, 0.5 };
+	ygl::texture *etaTexture = nullptr;
 	ygl::vec3f k { 0.5, 0.5, 0.5 };
+	ygl::texture *kTexture = nullptr;
+
 	mat->rs = 0.01;
 	if (!already_parsed)
 		this->parse_material_properties(pmi);
 
 	if (pmi.b_eta) {
-		mat->ks = pmi.eta;
-		mat->ks_txt = pmi.textureETA;
+		eta = pmi.eta;
+		etaTexture = pmi.textureETA;
 	}
 	if (pmi.b_k) {
-		mat->kd = pmi.k;
+		k = pmi.k;
 		mat->kd_txt = pmi.textureK;
 	}
 	if (pmi.b_rs) {
 		mat->rs = pmi.rs;
 		mat->rs_txt = pmi.textureRs;
 	}
+	mat->ks = ygl::fresnel_metal(1, eta, k);
 	mat->type = ygl::material_type::metallic_roughness;
 }
 
@@ -1725,6 +1744,7 @@ void PBRTParser::parse_material_metal(ygl::material *mat, ParsedMaterialInfo &pm
 //
 void PBRTParser::parse_material_mirror(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
 	mat->kr = { 0.9f, 0.9f, 0.9f };
+	mat->rs = 0;
 	if (!already_parsed)
 		this->parse_material_properties(pmi);
 
@@ -1748,12 +1768,33 @@ void PBRTParser::parse_material_plastic(ygl::material *mat, ParsedMaterialInfo &
 	if(!already_parsed)
 		this->parse_material_properties(pmi);
 
-	if (pmi.b_kr) {
-		mat->kr = pmi.kr;
-		mat->kr_txt = pmi.textureKr;
+	if (pmi.b_kd) {
+		mat->kd = pmi.kd;
+		mat->kd_txt = pmi.textureKd;
 	}
-	if (pmi.b_bump) {
-		mat->bump_txt = pmi.bump;
+	if (pmi.b_ks) {
+		mat->ks = pmi.ks;
+		mat->ks_txt = pmi.textureKs;
+	}
+}
+
+//
+// parse_material_pglass
+//
+void PBRTParser::parse_material_glass(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
+	mat->ks = { 0.04f, 0.04f, 0.04f };
+	mat->kt = { 1, 1, 1 };
+	mat->rs = 0.1;
+	if (!already_parsed)
+		this->parse_material_properties(pmi);
+
+	if (pmi.b_ks) {
+		mat->ks = pmi.ks;
+		mat->ks_txt = pmi.textureKs;
+	}
+	if (pmi.b_kt) {
+		mat->kt = pmi.kt;
+		mat->kt_txt = pmi.textureKt;
 	}
 }
 
@@ -1903,6 +1944,8 @@ void PBRTParser::execute_MakeNamedMaterial() {
 		this->parse_material_mix(mat, pmi, true);
 	else if (pmi.type == "translucent")
 		this->parse_material_translucent(mat, pmi, true);
+	else if (pmi.type == "glass")
+		this->parse_material_glass(mat, pmi, true);
 	else
 		throw_syntax_error("Material type " + pmi.type + " not supported or recognized.");
 	gState.nameToMaterial.insert(std::make_pair(materialName, mat));

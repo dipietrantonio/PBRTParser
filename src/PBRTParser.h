@@ -254,6 +254,7 @@ class PBRTParser {
 	void parse_material_translucent(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed = false);
 	void parse_material_mirror(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed = false);
 	void parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed = false);
+	void parse_material_glass(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed = false);
 
 	// TEXTURES
 	ygl::texture* blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount);
