@@ -105,8 +105,8 @@ struct ShapeData {
 
 // This structure will simplify the code later, allowing to use
 // both HDR and LDR images.
-struct TextureSupport {
-
+class TextureSupport {
+public:
 	ygl::texture *txt;
 	int height;
 	int width;
@@ -121,6 +121,8 @@ struct TextureSupport {
 
 	TextureSupport(ygl::texture *t) {
 		txt = t;
+		if (!t)
+			return;
 		if (t->ldr.empty()) {
 			is_hdr = true;
 			height = t->hdr.height();
@@ -131,7 +133,7 @@ struct TextureSupport {
 			height = t->ldr.height();
 			width = t->ldr.width();
 		}	
-	}
+	};
 };
 
 class PBRTParser {
@@ -173,13 +175,14 @@ class PBRTParser {
 	// name to pair (list_of_shapes, CTM)
 	std::unordered_map < std::string, ShapeData> nameToObject{}; // instancing
 
+	// the following items are used to assign unique names to elements.
 	unsigned int shapeCounter = 0;
 	unsigned int shapeGroupCounter = 0;
 	unsigned int instanceCounter = 0;
 	unsigned int materialCounter = 0;
 	unsigned int textureCounter = 0;
-
-	enum CounterID {shape, shape_group, instance, material, texture};
+	unsigned int envCounter = 0;
+	enum CounterID {shape, shape_group, instance, material, texture, environment};
 
 	// PRIVATE METHODS
 	
@@ -253,6 +256,8 @@ class PBRTParser {
 	void parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed = false);
 
 	// TEXTURES
+	ygl::texture* blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount);
+
 	void parse_imagemap_texture(ygl::texture *txt);
 	void parse_constant_texture(ygl::texture *txt);
 	void parse_checkerboard_texture(ygl::texture *txt);
@@ -277,16 +282,25 @@ class PBRTParser {
     };
 
 	inline std::string get_unique_id(CounterID id) {
-		if(id == CounterID::shape)
-			return join_string_int("s_", shapeCounter++);
-		else if(id == CounterID::shape_group) 
-			return join_string_int("sg_", shapeGroupCounter++);
-		else if(id == CounterID::instance)
-			return join_string_int("i_", instanceCounter++);
-		else if(id == CounterID::material)
-			return join_string_int("m_", materialCounter++);
+		char buff[300];
+		unsigned int val;
+		char *st = "";
+
+		if (id == CounterID::shape)
+			st = "s_", val = shapeCounter++;
+		else if (id == CounterID::shape_group)
+			st = "sg_", val = shapeGroupCounter++;
+		else if (id == CounterID::instance)
+			st = "i_", instanceCounter++;
+		else if (id == CounterID::material)
+			st = "m_", val = materialCounter++;
+		else if (id == CounterID::environment)
+			st = "e_", val = envCounter++;
 		else
-			return join_string_int("t_", textureCounter++);
+			st = "t_", val = textureCounter++;
+		
+		sprintf(buff, "%s%u", st, val);
+		return std::string(buff);
 	}
 
     public:

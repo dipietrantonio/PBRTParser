@@ -648,7 +648,9 @@ void PBRTParser::execute_Camera() {
 	cam->aperture = 0;
 	cam->yfov = 90.0f * ygl::pif / 180;
 	cam->focus = defaultFocus;
-	cam->name = join_string_int("camera", scn->cameras.size());
+	char buff[100];
+	sprintf(buff, "c%d", scn->cameras.size());
+	cam->name = std::string(buff);
 	
 	// CTM defines world to camera transformation
 	cam->frame = ygl::mat_to_frame(ygl::inverse(this->gState.CTM));
@@ -678,7 +680,7 @@ void PBRTParser::execute_Camera() {
 			cam->aspect = data->at(0);
 			delete data;
 		}
-
+		/*
 		else if (par.name == "lensradius") {
 			if (par.type != "float")
 				throw_syntax_error("'lensradius' must have type float.");
@@ -693,6 +695,7 @@ void PBRTParser::execute_Camera() {
 			cam->focus = data->at(0);
 			delete data;
 		}
+		*/
 		else if (par.name == "fov") {
 			if (par.type != "float")
 				throw_syntax_error("'fov' must have type float.");
@@ -964,8 +967,8 @@ void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 
 		// TODO: materials parameters overriding
 	}
-	if (shp->norm.size() == 0)
-		my_compute_normals(shp->triangles, shp->pos, shp->norm, true);
+	if (shp->norm.size() == 0);
+		//my_compute_normals(shp->triangles, shp->pos, shp->norm, true);
 
 	if (!(indicesCheck && PCheck))
 		throw_syntax_error("Missing indices or positions in triangle mesh specification.");
@@ -1094,7 +1097,7 @@ void PBRTParser::execute_ObjectBlock() {
 			delete prev.sg;
 		}
 		it->second = ShapeData(this->shapesInObject, this->gState.CTM);
-		std::cout << "Object defined at line " << start << " overrides onther existent one.\n";
+		std::cout << "Object defined at line " << start << " overrides an existent one.\n";
 	}
 		
 	this->inObjectDefinition = false;
@@ -1196,7 +1199,7 @@ void PBRTParser::parse_InfiniteLight() {
 	}
 
 	ygl::environment *env = new ygl::environment;
-	env->name = join_string_int("env", scn->environments.size());
+	env->name = get_unique_id(CounterID::environment);
 	env->ke = scale * L;
 
 	if (mapname.length() > 0) {
@@ -1204,8 +1207,8 @@ void PBRTParser::parse_InfiniteLight() {
 		auto path_name = get_path_and_filename(completePath);
 		ygl::texture *txt = new ygl::texture;
 		scn->textures.push_back(txt);
-		txt->path = path_name.first;
-		txt->name = path_name.second;
+		txt->path = completePath;
+		txt->name = get_unique_id(CounterID::texture);
 		if (ygl::endswith(mapname, ".png")){
 			txt->ldr = ygl::load_image4b(completePath);
 		}
@@ -1759,104 +1762,67 @@ void PBRTParser::parse_material_plastic(ygl::material *mat, ParsedMaterialInfo &
 // TODO: test them. Actually I should check if PBRT implements this in a similar way
 // --------------------------------------------------------------------------------
 
-//
-// scale_vec
-// Multiply vector components by a scalar
-// NOTE: had to do this because yocto doent allow scaling byte vector (I know, it may
-// not be correct, but I just try)
-//
-template <typename T>
-inline ygl::vec<T, 4> scale_vec(ygl::vec<T, 4> v, float a) {
-	ygl::vec<T, 4> r;
-	r.x = (T)(v.x * a);
-	r.y = (T)(v.y * a);
-	r.z = (T)(v.z * a);
-	r.w = (T)(v.w * a);
-	return r;
-}
-
-//
-// blend_images
-//
-template <typename T>
-ygl::image<ygl::vec<T, 4>> blend_images(ygl::image<ygl::vec<T, 4>> img1, ygl::image<ygl::vec<T, 4>> img2, float amount) {
-	int width = img1.width() > img2.width() ? img1.width() : img2.width();
-	int height = img1.height() > img2.height() ? img1.height() : img2.height();
-
-	auto img = ygl::image<ygl::vec<T, 4>>(width, height);
-
-	for (int w = 0; w < width; w++) {
-		for (int h = 0; h < height; h++) {
-			int w1 = w % img1.width();
-			int h1 = h % img1.height();
-			int w2 = w % img2.width();
-			int h2 = h % img2.height();
-
-			auto a = scale_vec<T>(img1.at(w1, h1), amount);
-			auto b = scale_vec<T>(img2.at(w2, h2), (1 - amount));
-			img.at(w, h) = { (T) (a.x + b.x), (T) (a.y + b.y), (T)(a.z + b.z), (T)(a.w + b.w) };
-		}
-	}
-	return img;
-}
 
 //
 // blend_textures
 // Mix two textures
 //
-ygl::texture *blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount) {
+ygl::texture* PBRTParser::blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount) {
 
-	auto scale_single_texture = [&amount](ygl::texture *txt1)->ygl::texture* {
+	auto ts1 = TextureSupport(txt1);
+	auto ts2 = TextureSupport(txt2);
+	ygl::texture *txt = nullptr;
+
+	auto scale_single_texture = [&amount](TextureSupport &txtin)->ygl::texture* {
 		ygl::texture *txt = new ygl::texture();
-		if (ygl::is_hdr_filename(txt1->name)) {
-			txt->hdr = ygl::image4f(txt1->hdr.width(), txt1->hdr.height());
-			for (int w = 0; w < txt1->hdr.width(); w++) {
-				for (int h = 0; h < txt1->hdr.height(); h++) {
-					txt->hdr.at(w, h) = txt1->hdr.at(w, h)*(1 - amount);
+		txt->ldr = ygl::image4b(txtin.width, txtin.height);
+			for (int w = 0; w < txtin.width; w++) {
+				for (int h = 0; h < txtin.height; h++) {
+					txt->ldr.at(w, h) = ygl::float_to_byte(txtin.at(w, h)*(1 - amount));
 				}
 			}
-		}
-		else {
-			txt->ldr = ygl::image4b(txt1->ldr.width(), txt1->ldr.height());
-			for (int w = 0; w <txt1->ldr.width(); w++) {
-				for (int h = 0; h < txt1->ldr.height(); h++) {
-					txt->ldr.at(w, h) = scale_vec(txt1->ldr.at(w, h), (1 - amount));
-				}
-			}
-		}
-		return txt;
+			return txt;
 	};
 	
 	if (!txt1 && !txt2)
 		return nullptr;
 	else if (!txt1) {
-		return scale_single_texture(txt2);
+		txt = scale_single_texture(ts2);
 	}
 	else if (!txt2) {
-		return scale_single_texture(txt1);
+		txt = scale_single_texture(ts1);
 	}
 	else {
-		ygl::texture *txt = new ygl::texture();
+		txt = new ygl::texture();
 
-		if (ygl::is_hdr_filename(txt1->name) && ygl::is_hdr_filename(txt2->name)) {
-			blend_images<float>(txt1->hdr, txt2->hdr, amount);
+		int width = ts1.width > ts2.width ? ts1.width : ts2.width;
+		int height = ts1.height > ts2.height ? ts1.height : ts2.height;
+
+		auto img = ygl::image4b(width, height);
+
+		for (int w = 0; w < width; w++) {
+			for (int h = 0; h < height; h++) {
+				int w1 = w % ts1.width;
+				int h1 = h % ts1.height;
+				int w2 = w % ts2.width;
+				int h2 = h % ts2.height;
+
+				auto newPixel = ts1.at(w1, h1)* amount + ts2.at(w2, h2)* (1 - amount);
+				img.at(w, h) = ygl::float_to_byte(newPixel);
+			}
 		}
-		else if (!ygl::is_hdr_filename(txt1->name) && !ygl::is_hdr_filename(txt2->name)) {
-			blend_images<ygl::byte>(txt1->ldr, txt2->ldr, amount);
-		}
-		else {
-			std::cerr << "Error while blending 2 textures: one is hdr, the other is ldr\n";
-			return nullptr;
-		}
-		return txt;
+		txt->ldr = img;
 	}
+	txt->name = get_unique_id(CounterID::texture);
+	txt->path = txt->name + ".png";
+	scn->textures.push_back(txt);
+	return txt;
 }
 
 //
 // parse_material_mix
 //
 void PBRTParser::parse_material_mix(ygl::material *mat, ParsedMaterialInfo &pmi, bool already_parsed) {
-	std::cout << "Experimental: mixing material...\n";
 	if (!already_parsed)
 		this->parse_material_properties(pmi);
 
@@ -1965,18 +1931,19 @@ void PBRTParser::execute_NamedMaterial() {
 //
 // make_constant_image
 //
-ygl::image4f make_constant_image(float v) {
-	auto  x = ygl::image4f(1, 1);
-	x.at(0, 0) = { v, v, v, 1 };
+ygl::image4b make_constant_image(float v) {
+	auto  x = ygl::image4b(1, 1);
+	auto b = ygl::float_to_byte(v);
+	x.at(0, 0) = { b, b, b, 255 };
 	return x;
 }
 
 //
 // make_constant_image
 //
-ygl::image4f make_constant_image(ygl::vec3f v) {
-	auto  x = ygl::image4f(1, 1);
-	x.at(0, 0) = { v.x, v.y, v.z, 1 };
+ygl::image4b make_constant_image(ygl::vec3f v) {
+	auto  x = ygl::image4b(1, 1);
+	x.at(0, 0) = ygl::float_to_byte({ v.x, v.y, v.z, 1 });
 	return x;
 }
 
@@ -2041,8 +2008,8 @@ void PBRTParser::parse_constant_texture(ygl::texture *txt) {
 			}
 		}
 	}
-	txt->hdr = make_constant_image(value);
-	txt->path = txt->name + ".exr";
+	txt->ldr = make_constant_image(value);
+	txt->path = txt->name + ".png";
 }
 
 //
@@ -2114,6 +2081,7 @@ void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
 		}
 	}
 
+	// hack
 	if (uscale < 0) uscale = 1;
 	if (vscale < 0) vscale = 1;
 
@@ -2123,7 +2091,7 @@ void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
 
 //
 // parse_fbm_texture
-// TODO: test it
+// TODO: implement and test it
 //
 void PBRTParser::parse_fbm_texture(ygl::texture *txt) {
 	int octaves = 8;
@@ -2131,13 +2099,12 @@ void PBRTParser::parse_fbm_texture(ygl::texture *txt) {
 
 	// TODO implement it
 }
+
 //
 // execute_Texture
 //
 void PBRTParser::execute_Texture() {
 	// TODO: repeat information is lost. One should save texture_info instead
-	// TODO: constant color Texture "grass-1" "color" "constant" 
-	// "rgb value"[0.40000001 0.89999998 0.60000002]
 
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
@@ -2153,7 +2120,7 @@ void PBRTParser::execute_Texture() {
 	std::string textureType = check_synonym(this->current_token().value);
 
 	if (textureType != "spectrum" && textureType != "rgb" && textureType != "float")
-		throw_syntax_error("Unsupported texture type: " + textureType);
+		throw_syntax_error("Unsupported texture base type: " + textureType);
 	
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)

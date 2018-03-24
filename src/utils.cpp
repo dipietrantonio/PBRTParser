@@ -54,13 +54,3 @@ std::pair<std::string, std::string> get_path_and_filename(std::string file) {
 	}
 	return std::make_pair(path, filename);
 }
-
-//
-// join_string_int
-// merge a string and an integer (used to create unique names)
-//
-std::string join_string_int(char *pref, int size) {
-	char buff[100];
-	sprintf(buff, "%s_%d", pref, size);
-	return std::string(buff);
-}
