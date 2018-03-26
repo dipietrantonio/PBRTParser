@@ -17,7 +17,6 @@
 #include <fstream>
 #include <sstream>
 #include <exception>
-#include <typeinfo>
 #include <unordered_map>
 #define YGL_IMAGEIO_IMPLEMENTATION 1
 #define YGL_OPENGL 0
@@ -26,18 +25,15 @@
 #include "PLYParser.h"
 #include "utils.h"
 
-// ===========================================================================================
-//                                         PBRTParser
-// ===========================================================================================
-
-
+// A general directive parsed parameter has type, name and value
 struct PBRTParameter{
     std::string type;
     std::string name;
     void *value;
 };
 
-struct AreaLightInfo {
+// All the shapes declared while AreaLightMode is active become lights
+struct AreaLightMode {
 	bool active = false;
 	ygl::vec3f L = { 1, 1, 1 };
 	bool twosided = false;
@@ -47,25 +43,24 @@ struct GraphicState {
 	// Current Transformation Matrix
 	ygl::mat4f CTM;
 	// AreaLight directive state
-	AreaLightInfo ALInfo;
+	AreaLightMode ALInfo;
 	// Current Material
 	ygl::material *mat = nullptr;
 
-	// mappings to memorize data (textures, objects, ..) by name and use
-	// them in different times during parsing
+	// mappings to memorize data by name and use them in different times during parsing
 	std::unordered_map<std::string, ygl::texture*> nameToTexture{};
 	std::unordered_map<std::string, ygl::material*> nameToMaterial{};
 };
 
-struct ShapeData {
+struct DeclaredObject {
 	bool referenced = false;
 	ygl::shape_group *sg;
 	ygl::mat4f CTM;
 
-	ShapeData(ygl::shape_group *s, ygl::mat4f ctm) : sg(s), CTM(ctm) {};
+	DeclaredObject(ygl::shape_group *s, ygl::mat4f ctm) : sg(s), CTM(ctm) {};
 };
 
-// This structure will simplify the code later, allowing to use
+// This structure will simplify the code later, allowing to work at the same time with
 // both HDR and LDR images.
 class TextureSupport {
 public:
@@ -135,7 +130,7 @@ class PBRTParser {
 	// Defines the current graphics properties active and to apply to the scene objects.
 	GraphicState gState{ ygl::identity_mat4f, {}, nullptr};
 	// name to pair (list_of_shapes, CTM)
-	std::unordered_map < std::string, ShapeData> nameToObject{}; // instancing
+	std::unordered_map < std::string, DeclaredObject> nameToObject{}; // instancing
 
 	// the following items are used to assign unique names to elements.
 	unsigned int shapeCounter = 0;
@@ -273,7 +268,7 @@ class PBRTParser {
 
 	//
 	// parse_value
-	// Parse an array of values.
+	// Parse an array of values (or a single value).
 	//
 	template <typename T, int LT, typename _CONVERTER>
 	void parse_value(std::vector<T> *vals, _CONVERTER converter) {
