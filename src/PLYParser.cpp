@@ -11,6 +11,9 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 	// first, parse the header
 	std::ifstream plyFile;
 	plyFile.open(filename, std::ios::in | std::ios::binary);
+
+	if (!plyFile.is_open())
+		return false;
 	// current line read
 	std::string line;
 
@@ -26,11 +29,9 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 	std::vector<std::string> elements;
 	bool is_asc = false;
 	auto errMsgStart = "[File: " + filename + "]: ";
-
 	std::getline(plyFile, line);
-	
+
 	while (true) {
-		// skip comments
 		if (ygl::startswith(line, "end_header"))
 			break;
 		if (ygl::startswith(line, "format") && ygl::contains(line, "ascii")) {
