@@ -471,154 +471,85 @@ int PBRTParser::find_param(std::string name, std::vector<PBRTParameter> &vec) {
 // execute_Translate()
 //
 void PBRTParser::execute_Translate() {
-	float x, y, z;
-
 	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'x' parameter of Translate directive.");
-	x = atof(this->current_token().value.c_str());
+	ygl::vec3f transl_vec{ };
 
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'y' parameter of Translate directive.");
-	y = atof(this->current_token().value.c_str());
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'z' parameter of Translate directive.");
-	z = atof(this->current_token().value.c_str());
+	for (int i = 0; i < 3; i++) {
+		if (this->current_token().type != LexemeType::NUMBER)
+			throw_syntax_error("Expected a float value.");
+		transl_vec[i] = atof(this->current_token().value.c_str());
+		this->advance();
+	}
 	
-	const ygl::vec3f transl_vec { x, y, z };
 	auto transl_mat = ygl::frame_to_mat(ygl::translation_frame(transl_vec));
 	this->gState.CTM = this->gState.CTM * transl_mat;
-	this->advance();
 }
 
 //
 // execute_Scale()
 //
 void PBRTParser::execute_Scale(){
-	float x, y, z;
-
 	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'x' parameter of Scale directive.");
-	x = atof(this->current_token().value.c_str());
+	ygl::vec3f scale_vec;
 
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'y' parameter of Scale directive.");
-	y = atof(this->current_token().value.c_str());
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'z' parameter of Scale directive.");
-	z = atof(this->current_token().value.c_str());
-
-	const ygl::vec3f scale_vec{ x, y, z };
+	for (int i = 0; i < 3; i++) {
+		if (this->current_token().type != LexemeType::NUMBER)
+			throw_syntax_error("Expected a float value.");
+		scale_vec[i] = atof(this->current_token().value.c_str());
+		this->advance();
+	}
 	
 	auto scale_mat = ygl::frame_to_mat(ygl::scaling_frame(scale_vec));
 	this->gState.CTM =  this->gState.CTM * scale_mat;
-	this->advance();
 }
 
 //
 // execute_Rotate()
 //
 void PBRTParser::execute_Rotate() {
-	float angle, x, y, z;
-
 	this->advance();
+	float angle;
+	ygl::vec3f rot_vec;
+
 	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'angle' parameter of Rotate directive.");
 	angle = atof(this->current_token().value.c_str());
 	angle = angle *ygl::pif / 180;
-
 	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'x' parameter of Rotate directive.");
-	x = atof(this->current_token().value.c_str());
 
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'y' parameter of Rotate directive.");
-	y = atof(this->current_token().value.c_str());
+	for (int i = 0; i < 3; i++) {
+		if (this->current_token().type != LexemeType::NUMBER)
+			throw_syntax_error("Expected a float value.");
+		rot_vec[i] = atof(this->current_token().value.c_str());
+		this->advance();
+	}
 
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'z' parameter of Rotate directive.");
-	z = atof(this->current_token().value.c_str());
-
-	const ygl::vec3f rot_vec{ x, y, z };
 	auto rot_mat = ygl::frame_to_mat(ygl::rotation_frame(rot_vec, angle));
 	this->gState.CTM = this->gState.CTM * rot_mat;
-	this->advance();
 }
 
 //
 // execute_LookAt()
 //
 void PBRTParser::execute_LookAt(){
-	float eye_x, eye_y, eye_z, look_x, look_y, look_z, up_x, up_y, up_z;
+	this->advance();
+	std::vector<ygl::vec3f> vects(3); //eye, look and up
 	
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'eye_x' parameter of LookAt directive.");
-	eye_x = atof(this->current_token().value.c_str());
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			if (this->current_token().type != LexemeType::NUMBER)
+				throw_syntax_error("Expected a float value.");
+			vects[i][j] = atof(this->current_token().value.c_str());
+			this->advance();
+		}
+	}
 
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'eye_y' parameter of LookAt directive.");
-	eye_y = atof(this->current_token().value.c_str());
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'eye_z' parameter of LookAt directive.");
-	eye_z = atof(this->current_token().value.c_str());
-
-	const ygl::vec3f eye{ eye_x, eye_y, eye_z };
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'look_x' parameter of LookAt directive.");
-	look_x = atof(this->current_token().value.c_str());
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'look_y' parameter of LookAt directive.");
-	look_y = atof(this->current_token().value.c_str());
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'look_z' parameter of LookAt directive.");
-	look_z = atof(this->current_token().value.c_str());
-
-	const ygl::vec3f peek { look_x, look_y, look_z };
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'up_x' parameter of LookAt directive.");
-	up_x = atof(this->current_token().value.c_str());
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'up_y' parameter of LookAt directive.");
-	up_y = atof(this->current_token().value.c_str());
-
-	this->advance();
-	if (this->current_token().type != LexemeType::NUMBER)
-		throw_syntax_error("Expected a float value for 'up_z' parameter of LookAt directive.");
-	up_z = atof(this->current_token().value.c_str());
-
-	const ygl::vec3f up{ up_x, up_y, up_z };
-
-	auto fm = ygl::lookat_frame(eye, peek, up);
+	auto fm = ygl::lookat_frame(vects[0], vects[1], vects[2]);
 	fm.x = -fm.x;
 	fm.z = -fm.z;
 	auto mm = ygl::frame_to_mat(fm);
-	this->defaultFocus = ygl::length(eye - peek);
+	this->defaultFocus = ygl::length(vects[0] - vects[1]);
 	this->gState.CTM = this->gState.CTM * ygl::inverse(mm); // inverse here because pbrt boh
-	this->advance();
 }
 
 //
@@ -1059,14 +990,14 @@ void PBRTParser::execute_ObjectBlock() {
 
 	auto it = nameToObject.find(objName);
 	if (it == nameToObject.end()){
-		nameToObject.insert(std::make_pair(objName, ShapeData(shapesInObject, this->gState.CTM)));
+		nameToObject.insert(std::make_pair(objName, DeclaredObject(shapesInObject, this->gState.CTM)));
 	}		
 	else {
 		auto prev = it->second;
 		if (prev.referenced == false) {
 			delete prev.sg;
 		}
-		it->second = ShapeData(this->shapesInObject, this->gState.CTM);
+		it->second = DeclaredObject(this->shapesInObject, this->gState.CTM);
 		std::cout << "Object defined at line " << start << " overrides an existent one.\n";
 	}
 		
