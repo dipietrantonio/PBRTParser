@@ -980,7 +980,6 @@ void PBRTParser::execute_ObjectBlock() {
 	//NOTE: the current transformation matrix defines the transformation from
 	//object space to instance's coordinate space
 	std::string objName = this->current_token().value;
-	// DEGUB
 	this->advance();
 
 	while (!(this->current_token().type == LexemeType::IDENTIFIER &&
@@ -1094,7 +1093,6 @@ void PBRTParser::parse_InfiniteLight() {
 
 	if (mapname.length() > 0) {
 		auto completePath = this->current_path() + mapname;
-		auto path_name = get_path_and_filename(completePath);
 		ygl::texture *txt = new ygl::texture;
 		scn->textures.push_back(txt);
 		txt->path = completePath;
@@ -1108,6 +1106,7 @@ void PBRTParser::parse_InfiniteLight() {
 		else {
 			throw_syntax_error("Texture format not recognised.");
 		}
+		env->ke_txt = txt;
 	}
 	scn->environments.push_back(env);
 }
@@ -1213,7 +1212,7 @@ void PBRTParser::execute_AreaLightSource() {
 void PBRTParser::set_k_property(PBRTParameter &par, ygl::vec3f &k, ygl::texture **txt) {
 
 	if (par.type == "texture") {
-		auto txtName = get_single_value < std::string>(par);
+		auto txtName = get_single_value<std::string>(par);
 		auto it = gState.nameToTexture.find(txtName);
 		if (it == gState.nameToTexture.end())
 			throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
@@ -1248,7 +1247,7 @@ void PBRTParser::execute_Material() {
 	// bump is common to every material
 	int i_bump = find_param("bump", params);
 	if (i_bump >= 0) {
-		auto txtName = get_single_value < std::string>(params[i_bump]);
+		auto txtName = get_single_value<std::string>(params[i_bump]);
 		auto it = gState.nameToTexture.find(txtName);
 		if (it == gState.nameToTexture.end())
 			throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
@@ -1477,7 +1476,6 @@ void PBRTParser::parse_material_glass(ygl::material *mat, std::vector<PBRTParame
 // TODO: test them. Actually I should check if PBRT implements this in a similar way
 // --------------------------------------------------------------------------------
 
-
 //
 // blend_textures
 // Mix two textures
@@ -1552,7 +1550,7 @@ void PBRTParser::parse_material_mix(ygl::material *mat, std::vector<PBRTParamete
 	else {
 		throw_syntax_error("Missing namedmaterial1.");
 	}
-	int i_m2 = find_param("namedmaterial1", params);
+	int i_m2 = find_param("namedmaterial2", params);
 	if (i_m2 >= 0) {
 		m2 = get_single_value<std::string>(params[i_m2]);
 	}
@@ -1703,16 +1701,9 @@ void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
 		throw_syntax_error("No texture filename provided.");
 	}	
 
-	txt->path = filename;
-	if (ygl::endswith(filename, ".png")) {
-		txt->ldr = ygl::load_image4b(filename);
-	}
-	else if (ygl::endswith(filename, ".exr")) {
-		txt->hdr = ygl::load_image4f(filename);
-	}
-	else {
-		throw_syntax_error("Texture format not recognized.");
-	}
+	txt->path = txt->name + ygl::path_extension(filename);
+	auto completePath = this->current_path() + "/" + filename;
+	txt->ldr = ygl::load_image4b(completePath);
 }
 
 //

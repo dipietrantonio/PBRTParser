@@ -33,7 +33,15 @@ int main(int argc, char** argv){
 		return 1;
 	}
 
-	std::cout << "Conversion ended. Saving obj to file..\n";
-	ygl::save_scene(argv[2], scn, ygl::save_options());
+	try {
+		std::cout << "Conversion ended. Saving obj to file..\n";
+		auto so = ygl::save_options();
+		so.skip_missing = false;
+		ygl::save_scene(argv[2], scn, so);
+	}
+	catch (std::exception ex) {
+		std::cout << ex.what() << "\n";
+	}
+	
 	return 0;
 }

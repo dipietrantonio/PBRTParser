@@ -18,7 +18,7 @@
 #include <sstream>
 #include <exception>
 #include <unordered_map>
-#define YGL_IMAGEIO_IMPLEMENTATION 1
+#define YGL_IMAGEIO 1
 #define YGL_OPENGL 0
 #include "../yocto/yocto_gl.h"
 #include "PBRTLexer.h"
@@ -211,7 +211,6 @@ class PBRTParser {
 
 	// TEXTURES
 	ygl::texture* blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount);
-
 	void parse_imagemap_texture(ygl::texture *txt);
 	void parse_constant_texture(ygl::texture *txt);
 	void parse_checkerboard_texture(ygl::texture *txt);
