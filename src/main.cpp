@@ -8,15 +8,16 @@ int main(int argc, char** argv){
 	std::cout << "make bvh..\n";
 	auto bvh = ygl::make_bvh(obj);
 	auto tp = ygl::trace_params();
-	tp.nsamples = 32;
+	tp.nsamples = 4;
 	tp.parallel = true;
-	tp.resolution = 360;
-
+	tp.min_depth = 1;
+	tp.max_depth = 2;
+	tp.resolution = 80;
 	std::cout << "tracing..\n";
 	auto im = ygl::trace_image(obj, obj->cameras[0], bvh, tp);
-	ygl::save_image("codetraced.png", im, 0, 2, 2);
-	exit(1);
-	*/
+	ygl::save_image("codetraced.png", im, 0, 2);
+	exit(1);*/
+	
 	if (argc < 3)
 	{
 		printf("Usage: command <input_scene_file> <output_scene_file>\n");
