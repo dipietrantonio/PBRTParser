@@ -53,7 +53,7 @@ void PBRTParser::fill_parameter_to_type_mapping() {
 	parameterToType.insert(MP("uv", { "float" }));
 	// lights
 	parameterToType.insert(MP("scale", { "spectrum", "rgb" }));
-	parameterToType.insert(MP("L", { "spectrum, rgb" }));
+	parameterToType.insert(MP("L", { "spectrum", "rgb" }));
 	parameterToType.insert(MP("mapname", { "string" }));
 	parameterToType.insert(MP("I", { "spectrum" }));
 	parameterToType.insert(MP("from", { "point3" }));
@@ -102,7 +102,7 @@ ygl::scene *PBRTParser::parse() {
 // throws an exception if the type differs from the expected one.
 //
 bool PBRTParser::check_param_type(std::string par, std::string parsedType) {
-	auto p = parameterToType.find("par");
+	auto p = parameterToType.find(par);
 	if (p == parameterToType.end()) {
 		return false;
 	}
@@ -315,12 +315,6 @@ std::string PBRTParser::get_unique_id(CounterID id) {
 
 // ----------------------------------------------------------------------------
 //                      PARAMETERS PARSING
-//
-// The following functions are used to parse a directive parameter, i.e.
-// "type name" <value>, where value can be a single value or array of values.
-// Type checking is also performed.
-// NOTE: to parse values of different types, i tried to use a template function
-// but the result was messy and less readable than the current solution.
 // ----------------------------------------------------------------------------
 
 
@@ -460,7 +454,7 @@ void PBRTParser::execute_Include() {
 //
 int PBRTParser::find_param(std::string name, std::vector<PBRTParameter> &vec) {
 	int count = 0;
-	for (PBRTParameter &P : vec) {
+	for (PBRTParameter P : vec) {
 		if (P.name == name)
 			return count;
 		else
@@ -651,15 +645,15 @@ void PBRTParser::execute_Transform() {
 //
 void PBRTParser::execute_ConcatTransform() {
 	this->advance();
-	std::vector<float> *vals = new std::vector<float>();
-	this->parse_value<float, LexemeType::NUMBER>(vals, [](std::string x)->float {return atof(x.c_str()); });
+	std::vector<float> vals;
+	this->parse_value<float, LexemeType::NUMBER>(&vals, [](std::string x)->float {return atof(x.c_str()); });
 	ygl::mat4f nCTM;
-	if (vals->size() != 16)
+	if (vals.size() != 16)
 		throw_syntax_error("Wrong number of values given. Expected a 4x4 matrix.");
 
 	for (int i = 0; i < 4; i++) {
 		for (int j = 0; j < 4; j++) {
-			nCTM[i][j] = vals->at(i * 4 + j);
+			nCTM[i][j] = vals.at(i * 4 + j);
 		}
 	}
 	gState.CTM = gState.CTM * nCTM;
@@ -708,9 +702,10 @@ void PBRTParser::execute_Camera() {
 		cam->aspect = get_single_value<float>(params[i_frameaspect]);
 	
 	int i_fov = find_param("fov", params);
-	if (i_fov >= 0)
-		cam->yfov = get_single_value<float>(params[i_fov]);
-
+	if (i_fov >= 0) {
+		cam->yfov = get_single_value<float>(params[i_fov])*ygl::pif / 180;
+	}
+		
 	scn->cameras.push_back(cam);
 }
 
