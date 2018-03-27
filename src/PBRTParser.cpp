@@ -1090,22 +1090,12 @@ void PBRTParser::parse_InfiniteLight() {
 	ygl::environment *env = new ygl::environment;
 	env->name = get_unique_id(CounterID::environment);
 	env->ke = scale * L;
-
+	
 	if (mapname.length() > 0) {
-		auto completePath = this->current_path() + mapname;
 		ygl::texture *txt = new ygl::texture;
-		scn->textures.push_back(txt);
-		txt->path = completePath;
 		txt->name = get_unique_id(CounterID::texture);
-		if (ygl::endswith(mapname, ".png")){
-			txt->ldr = ygl::load_image4b(completePath);
-		}
-		else if (ygl::endswith(mapname, ".exr")){
-			txt->hdr = ygl::load_image4f(completePath);
-		}
-		else {
-			throw_syntax_error("Texture format not recognised.");
-		}
+		load_texture(txt, mapname);
+		scn->textures.push_back(txt);
 		env->ke_txt = txt;
 	}
 	scn->environments.push_back(env);
@@ -1687,6 +1677,22 @@ ygl::image4b PBRTParser::make_constant_image(ygl::vec3f v) {
 	return x;
 }
 
+//
+// load_texture image from file
+//
+void PBRTParser::load_texture(ygl::texture *txt, std::string &filename) {
+	auto completePath = this->current_path() + "/" + filename;
+	auto ext = ygl::path_extension(filename);
+	auto name = ygl::path_basename(filename);
+	ext = ext == ".exr" ? ".hdr" : ext;
+	txt->path = name + ext;
+	if (ext == ".hdr")
+		txt->hdr = ygl::load_image4f(completePath);
+	else
+		txt->ldr = ygl::load_image4b(completePath);
+}
+
+
 void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
 	std::string filename = "";
 	
@@ -1700,10 +1706,7 @@ void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
 	else {
 		throw_syntax_error("No texture filename provided.");
 	}	
-
-	txt->path = txt->name + ygl::path_extension(filename);
-	auto completePath = this->current_path() + "/" + filename;
-	txt->ldr = ygl::load_image4b(completePath);
+	load_texture(txt, filename);
 }
 
 //

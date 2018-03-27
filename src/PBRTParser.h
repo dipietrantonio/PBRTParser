@@ -308,6 +308,8 @@ class PBRTParser {
 	ygl::image4b PBRTParser::make_constant_image(float v);
 	ygl::image4b PBRTParser::make_constant_image(ygl::vec3f v);
 
+	// load_texture image from file
+	void load_texture(ygl::texture *txt, std::string &filename);
 
     public:
     
