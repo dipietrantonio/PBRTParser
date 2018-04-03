@@ -713,7 +713,11 @@ void PBRTParser::execute_Film() {
 		yres = get_single_value<int>(params[i_yres]);
 
 	if (xres && yres) {
-		this->defaultAspect = ((float)xres) / ((float)yres);
+		auto asp = ((float)xres) / ((float)yres);
+		if (asp < 1)
+			asp = 1; // TODO: vertical images
+		this->defaultAspect = asp;
+
 		for (auto cam : scn->cameras)
 			cam->aspect = this->defaultAspect;
 	}
@@ -1085,6 +1089,7 @@ void PBRTParser::execute_ObjectInstance() {
 // execute_LightSource
 //
 void PBRTParser::execute_LightSource() {
+	// TODO: check how scale exactly is used
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)
 		throw_syntax_error("Expected lightsource type as a string.");
@@ -1722,6 +1727,10 @@ ygl::image4b PBRTParser::make_constant_image(ygl::vec3f v) {
 	return x;
 }
 
+//
+// flip_image
+// flip an image on the y axis.
+//
 template <typename T>
 ygl::image<T> flip_image(ygl::image<T> in) {
 	ygl::image<T> nI(in.width(), in.height());
