@@ -10,14 +10,13 @@ parse <file_to_parse> <output_obj>
 
 ## TODO
 
+- Environment maps don't work.
 - Fix memory leaks using shared pointers.
-- Implement spectrum type (convert it to rgb)
+- Checker texture produce different colors.
 - Review materials
 - Textures: detect if there are textures that are not used
 - Testures: implement mix, scale textures.
-- Textures: save them properly (and use the yocto IO properly)
 - Test illumination, implement some hack for distant light.
-- Test environment map.
 - Uber material has index property that will use to create a constant texture for "eta" (seen in code)
 - Render big scenes
 

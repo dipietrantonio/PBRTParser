@@ -52,7 +52,7 @@ int find_interval(int size, const Predicate &pred) {
 // is_spectrum_sorted
 //
 bool is_spectrum_sorted(std::vector<ygl::vec2f> &samples) {
-	for (int i = 0; i < samples.size(); ++i)
+	for (int i = 0; i < samples.size() - 1; ++i)
 		if (samples[i].x > samples[i + 1].x) 
 			return false;
 	return true;
@@ -191,7 +191,7 @@ ygl::vec3f blackbody_to_rgb(float T, float scale) {
 	std::vector<ygl::vec2f> samples;
 	for (int i = 0; i < nCIESamples; i++)
 		samples.push_back({ CIE_lambda[i], v[i] });
-	auto rgb = scale * spectrum_to_rgb(samples);
+	return  scale * spectrum_to_rgb(samples);
 }
 
 const float CIE_X[nCIESamples] = {

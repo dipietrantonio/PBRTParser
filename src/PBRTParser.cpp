@@ -53,7 +53,7 @@ void PBRTParser::fill_parameter_to_type_mapping() {
 	parameterToType.insert(MP("uv", { "float" }));
 	// lights
 	parameterToType.insert(MP("scale", { "spectrum", "rgb" }));
-	parameterToType.insert(MP("L", { "spectrum", "rgb" }));
+	parameterToType.insert(MP("L", { "spectrum", "rgb", "blackbody" }));
 	parameterToType.insert(MP("mapname", { "string" }));
 	parameterToType.insert(MP("I", { "spectrum" }));
 	parameterToType.insert(MP("from", { "point3" }));
@@ -301,7 +301,7 @@ std::string PBRTParser::get_unique_id(CounterID id) {
 	else if (id == CounterID::shape_group)
 		st = "sg_", val = shapeGroupCounter++;
 	else if (id == CounterID::instance)
-		st = "i_", instanceCounter++;
+		st = "i_", val = instanceCounter++;
 	else if (id == CounterID::material)
 		st = "m_", val = materialCounter++;
 	else if (id == CounterID::environment)
@@ -394,7 +394,8 @@ void PBRTParser::parse_parameter(PBRTParameter &par){
 			// filename given
 			std::string fname = this->current_path() + "/" + this->current_token().value;
 			this->advance();
-			load_spectrum_from_file(fname, samples);
+			if (!load_spectrum_from_file(fname, samples))
+				throw_syntax_error("Error loading spectrum data from file.");
 		}else {
 			// step 1: read raw data
 			std::unique_ptr<std::vector<float>> vals(new::std::vector<float>());
@@ -1813,8 +1814,8 @@ void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
 	if (i_v >= 0)
 		vscale = get_single_value<float>(params[i_v]);
 
-	int i_txt1 = find_param("txt1", params);
-	if (i_txt1) {
+	int i_txt1 = find_param("tex1", params);
+	if (i_txt1 >= 0) {
 		if (params[i_txt1].type == "float") {
 			auto v = get_single_value<float>(params[i_txt1]);
 			tex1.x = v;
@@ -1828,8 +1829,8 @@ void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
 			tex1.z = v.z;
 		}
 	}
-	int i_txt2 = find_param("txt2", params);
-	if (i_txt2) {
+	int i_txt2 = find_param("tex2", params);
+	if (i_txt2 >= 0) {
 		if (params[i_txt2].type == "float") {
 			auto v = get_single_value<float>(params[i_txt2]);
 			tex2.x = v;

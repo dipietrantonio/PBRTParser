@@ -39,9 +39,11 @@ add_library(mylib STATIC
     src/utils.h
     src/PLYParser.h
     src/PBRTLexer.h
+    src/spectrum.h
+    src/spectrum.cpp
     src/PBRTParser.cpp
     src/utils.cpp
-    src/PLYParser.cpp 
+    src/PLYParser.cpp
     src/PBRTLexer.cpp)
 
 add_executable(parse src/main.cpp)
