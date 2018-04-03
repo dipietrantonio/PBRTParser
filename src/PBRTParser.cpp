@@ -370,7 +370,7 @@ void PBRTParser::parse_parameter(PBRTParameter &par){
 		par.value = (void *)vals;
 	}
 	// now we come at a special case of arrays of vec3f
-	else if (par.type == "point3" || par.type == "normal3"|| par.type == "rgb" || par.type == "spectrum") {
+	else if (par.type == "point3" || par.type == "normal3"|| par.type == "rgb") {
 		std::vector<float> *vals = new::std::vector<float>();
 		this->parse_value<float, LexemeType::NUMBER>(vals, valueToFloat);
 		if (vals->size() % 3 != 0)
@@ -386,6 +386,48 @@ void PBRTParser::parse_parameter(PBRTParameter &par){
 		}
 		delete vals;
 		par.value = (void *)vectors;
+	}
+	else if (par.type == "spectrum") {
+		// spectrum data can be given using a file or directly as list
+		std::vector<ygl::vec2f> samples;
+		if (this->current_token().type == LexemeType::STRING) {
+			// filename given
+			std::string fname = this->current_path() + "/" + this->current_token().value;
+			this->advance();
+			load_spectrum_from_file(fname, samples);
+		}else {
+			// step 1: read raw data
+			std::unique_ptr<std::vector<float>> vals(new::std::vector<float>());
+			this->parse_value<float, LexemeType::NUMBER>(vals.get(), valueToFloat);
+			// step 2: pack it in list of vec2f (lambda, val)
+			if (vals->size() % 2 != 0)
+				throw_syntax_error("Wrong number of values given.");
+			int count = 0;
+			while (count < vals->size()) {
+				auto lamb = vals->at(count++);
+				auto v = vals->at(count++);
+				samples.push_back({ lamb, v });
+			}
+		}
+		// step 3: convert to rgb and store in a vector (because it simplifies interface to get data)
+		std::vector<ygl::vec3f> *data = new std::vector<ygl::vec3f>();
+		data->push_back(spectrum_to_rgb(samples));
+		par.value = (void *)data;
+		par.type = std::string("rgb");
+	}
+	else if (par.type == "blackbody") {
+		// step 1: read raw data
+		std::unique_ptr<std::vector<float>> vals(new::std::vector<float>());
+		this->parse_value<float, LexemeType::NUMBER>(vals.get(), valueToFloat);
+		// step 2: pack it in list of vec2f (lambda, val)
+		if (vals.get()->size() != 2) // NOTE: actually must be % 2 != 0
+			throw_syntax_error("Wrong number of values given.");
+		
+		// step 3: convert to rgb and store in a vector (because it simplifies interface to get data)
+		std::vector<ygl::vec3f> *data = new std::vector<ygl::vec3f>();
+		data->push_back(blackbody_to_rgb(vals.get()->at(0), vals.get()->at(1)));
+		par.value = (void *)data;
+		par.type = std::string("rgb");
 	}
 	else {
 		throw_syntax_error("Cannot able to parse the value: type '" + par.type + "' not supported.");
@@ -514,7 +556,8 @@ void PBRTParser::execute_Rotate() {
 	if (this->current_token().type != LexemeType::NUMBER)
 		throw_syntax_error("Expected a float value for 'angle' parameter of Rotate directive.");
 	angle = atof(this->current_token().value.c_str());
-	angle = angle *ygl::pif / 180;
+	angle = angle * (ygl::pif / 180.0f);
+	
 	this->advance();
 
 	for (int i = 0; i < 3; i++) {
@@ -523,7 +566,6 @@ void PBRTParser::execute_Rotate() {
 		rot_vec[i] = atof(this->current_token().value.c_str());
 		this->advance();
 	}
-
 	auto rot_mat = ygl::frame_to_mat(ygl::rotation_frame(rot_vec, angle));
 	this->gState.CTM = this->gState.CTM * rot_mat;
 }
@@ -726,7 +768,6 @@ void PBRTParser::execute_TransformEnd() {
 
 // ---------------------------------------------------------------------------------
 //                                  SHAPES
-// TODO: curves
 // ---------------------------------------------------------------------------------
 
 //
@@ -1090,12 +1131,15 @@ void PBRTParser::parse_InfiniteLight() {
 	ygl::environment *env = new ygl::environment;
 	env->name = get_unique_id(CounterID::environment);
 	env->ke = scale * L;
-	
+	//auto pf = ygl::frame_to_mat(ygl::frame3f{ { 0, 0, 1 },{ 0, 1, 0 },{ 1, 0, 0 },{ 0, 0, 0 } });
+	auto fm = ygl::mat_to_frame(gState.CTM);
+	env->frame = fm; 
 	if (mapname.length() > 0) {
 		ygl::texture *txt = new ygl::texture;
 		txt->name = get_unique_id(CounterID::texture);
-		load_texture(txt, mapname);
+		load_texture(txt, mapname, false);
 		scn->textures.push_back(txt);
+		env->ke_txt_info = new ygl::texture_info();
 		env->ke_txt = txt;
 	}
 	scn->environments.push_back(env);
@@ -1677,19 +1721,35 @@ ygl::image4b PBRTParser::make_constant_image(ygl::vec3f v) {
 	return x;
 }
 
+template <typename T>
+ygl::image<T> flip_image(ygl::image<T> in) {
+	ygl::image<T> nI(in.width(), in.height());
+
+	for (int j = 0; j < in.height(); j++) {
+		for (int i = 0; i < in.width(); i++) {
+			nI.at(i, j) = in.at(i, in.height() - j - 1);
+		}
+	}
+	return nI;
+}
+
 //
 // load_texture image from file
 //
-void PBRTParser::load_texture(ygl::texture *txt, std::string &filename) {
+void PBRTParser::load_texture(ygl::texture *txt, std::string &filename, bool flip) {
 	auto completePath = this->current_path() + "/" + filename;
 	auto ext = ygl::path_extension(filename);
 	auto name = ygl::path_basename(filename);
 	ext = ext == ".exr" ? ".hdr" : ext;
 	txt->path = name + ext;
-	if (ext == ".hdr")
-		txt->hdr = ygl::load_image4f(completePath);
-	else
-		txt->ldr = ygl::load_image4b(completePath);
+	if (ext == ".hdr") {
+		auto im = ygl::load_image4f(completePath);
+		txt->hdr = flip ? flip_image(im) : im;
+	}
+	else {
+		auto im = ygl::load_image4b(completePath);
+		txt->ldr = flip ? flip_image(im) : im;
+	}
 }
 
 

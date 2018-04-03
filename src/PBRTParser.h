@@ -24,6 +24,7 @@
 #include "PBRTLexer.h"
 #include "PLYParser.h"
 #include "utils.h"
+#include "spectrum.h"
 
 // A general directive parsed parameter has type, name and value
 struct PBRTParameter{
@@ -309,7 +310,7 @@ class PBRTParser {
 	ygl::image4b PBRTParser::make_constant_image(ygl::vec3f v);
 
 	// load_texture image from file
-	void load_texture(ygl::texture *txt, std::string &filename);
+	void load_texture(ygl::texture *txt, std::string &filename, bool flip = true);
 
     public:
     
