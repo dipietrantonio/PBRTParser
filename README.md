@@ -9,16 +9,17 @@ parse <file_to_parse> <output_obj>
 ```
 
 ## TODO
+In order of importance
 
 - Environment maps don't work.
-- Normal flipping (must be implemented in yocto).
+- Normal flipping (must be implemented in yocto)
+- Textures: support for uv scaling and st parameters (must be implemented in yocto)
 - Fix memory leaks using shared pointers.
 - File paths: better handling.
 - Checker texture produce different colors.
 - Review materials
 - Textures: detect if there are textures that are not used
 - Testures: implement mix textures.
-- Textures: implemement 
 - Test illumination, implement some hack for distant light.
 - Uber material has index property that will use to create a constant texture for "eta" (seen in code)
 - Render big scenes

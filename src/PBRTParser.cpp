@@ -1135,9 +1135,8 @@ void PBRTParser::parse_InfiniteLight() {
 	ygl::environment *env = new ygl::environment;
 	env->name = get_unique_id(CounterID::environment);
 	env->ke = scale * L;
-	//auto pf = ygl::frame_to_mat(ygl::frame3f{ { 0, 0, 1 },{ 0, 1, 0 },{ 1, 0, 0 },{ 0, 0, 0 } });
 	auto fm = ygl::mat_to_frame(gState.CTM);
-	//env->frame = fm; 
+	env->frame = fm; 
 	if (mapname.length() > 0) {
 		ygl::texture *txt = new ygl::texture;
 		txt->name = get_unique_id(CounterID::texture);
@@ -1740,6 +1739,7 @@ ygl::image<T> flip_image(ygl::image<T> in) {
 	return nI;
 }
 
+
 //
 // load_texture image from file
 //
@@ -1762,9 +1762,19 @@ void PBRTParser::load_texture(ygl::texture *txt, std::string &filename, bool fli
 
 void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
 	std::string filename = "";
-	
+	float uscale = 1, vscale = 1;
+
+	// read parameters
 	std::vector<PBRTParameter> params{};
 	this->parse_parameters(params);
+
+	int i_u = find_param("uscale", params);
+	if (i_u >= 0)
+		uscale = get_single_value<float>(params[i_u]);
+
+	int i_v = find_param("vscale", params);
+	if (i_v >= 0)
+		vscale = get_single_value<float>(params[i_v]);
 	
 	int i_fn = find_param("filename", params);
 	if (i_fn >= 0) {
@@ -1772,8 +1782,14 @@ void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
 	}
 	else {
 		throw_syntax_error("No texture filename provided.");
-	}	
+	}
+
+	if (uscale < 1) uscale = 1;
+	if (vscale < 1) vscale = 1;
+
 	load_texture(txt, filename);
+
+	// TODO: implement scaling factors
 }
 
 //
