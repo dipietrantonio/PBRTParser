@@ -1,13 +1,12 @@
 #include "PLYParser.h"
 //
 // parse_ply
-// Parse a PLY file format and returns a shape.
+// Parse a PLY file format and fills a shape object (shp must be already created).
 // Note: works for binary and ascii, but only when faces and vertex elements are present.
 // TODO: a less ugly implementation (maybe is better a third party lib).
 //
-bool parse_ply(std::string filename, ygl::shape **shape) {
+bool parse_ply(std::string filename, ygl::shape *shp) {
 
-	auto shp = new ygl::shape();
 	// first, parse the header
 	std::ifstream plyFile;
 	plyFile.open(filename, std::ios::in | std::ios::binary);
@@ -244,7 +243,6 @@ bool parse_ply(std::string filename, ygl::shape **shape) {
 		}
 
 	}
-	(*shape) = shp;
 	plyFile.close();
 	return true;
 }

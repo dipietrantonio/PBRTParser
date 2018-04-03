@@ -22,7 +22,8 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
+#ifndef __SPECTRUM__
+#define __SPECTRUM__
 #include <algorithm>
 #include <vector>
 #include <fstream>
@@ -55,3 +56,4 @@ bool load_spectrum_from_file(std::string filename, std::vector<ygl::vec2f> &samp
 // blackbody_to_rgb
 //
 ygl::vec3f blackbody_to_rgb(float T, float scale);
+#endif

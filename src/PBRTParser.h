@@ -227,10 +227,18 @@ class PBRTParser {
 
 	inline void throw_syntax_error(std::string msg){
         std::stringstream ss;
-        ss << "Syntax Error (file: " << this->current_file() << ", line " << this->lexers.at(0)->get_line() <<\
-			", column " << this->lexers.at(0)->get_column() << "): " << msg;
+        ss << "Syntax Error (" << this->current_file() << ":" << this->lexers.at(0)->get_line() <<\
+			"," << this->lexers.at(0)->get_column() << "): " << msg;
         throw std::exception(ss.str().c_str());
     };
+
+	inline void warning_message(std::string msg) {
+		std::stringstream ss;
+		ss << "WARNING: ("  << this->current_file() << ":" << this->lexers.at(0)->get_line() << \
+			"," << this->lexers.at(0)->get_column() << "): " << msg;
+		std::cout << ss.str() << "\n";
+	};
+
 	// get an id for shape, instance, ..
 	std::string get_unique_id(CounterID id);
 	void fill_parameter_to_type_mapping();

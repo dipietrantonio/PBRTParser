@@ -191,8 +191,7 @@ void PBRTParser::execute_preworld_directives() {
 			this->execute_LookAt();
 		}
 		else {
-			std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring "\
-				<< this->current_token().value << " directive..\n";
+			warning_message("Ignoring " + this->current_token().value + " directive..");
 			this->ignore_current_directive();
 		}
 	}
@@ -282,8 +281,7 @@ void PBRTParser::execute_world_directive() {
 		this->execute_Texture();
 	}
 	else {
-		std::cout << "(Line " << this->lexers.at(0)->get_line() << ") Ignoring "\
-			<< this->current_token().value << " directive..\n";
+		warning_message("Ignoring " + this->current_token().value + " directive..");
 		this->ignore_current_directive();
 	}
 }
@@ -915,8 +913,8 @@ void PBRTParser::parse_trianglemesh(ygl::shape *shp) {
 	// overriding (for this shape) the value of the current material in the graphical state.
 
 	// TODO: solve problem with normals
-	//if (shp->norm.size() == 0);
-		//my_compute_normals(shp->triangles, shp->pos, shp->norm, true);
+	if (shp->norm.size() == 0);
+		my_compute_normals(shp->triangles, shp->pos, shp->norm, true);
 
 	if (!(indicesCheck && PCheck))
 		throw_syntax_error("Missing indices or positions in triangle mesh specification.");
@@ -973,7 +971,7 @@ void PBRTParser::execute_Shape() {
 
 		std::string fname = this->current_path() + "/" + get_single_value<std::string>(par);
 
-		if (!parse_ply(fname, &shp)){
+		if (!parse_ply(fname, shp)){
 			throw_syntax_error("Error parsing ply file: " + fname);
 		}
 
@@ -983,7 +981,7 @@ void PBRTParser::execute_Shape() {
 	}
 	else {
 		this->ignore_current_directive();
-		std::cout << "Ignoring shape " << shapeName << "..\n";
+		warning_message("Ignoring shape " + shapeName + ".");
 		return;
 	}
 
@@ -1458,7 +1456,6 @@ void PBRTParser::parse_material_metal(ygl::material *mat, std::vector<PBRTParame
 		}
 	}
 	mat->ks = ygl::fresnel_metal(1, eta, k);
-	mat->type = ygl::material_type::metallic_roughness;
 }
 
 //

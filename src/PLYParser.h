@@ -16,9 +16,9 @@
 
 //
 // parse_ply
-// Parse a PLY file format and returns a shape.
+// Parse a PLY file format and fills a shape structure (must be altready allocated).
 // Note: works for binary and ascii, but only when faces and vertex elements are present.
 // TODO: a less ugly implementation (maybe is better a third party lib).
 //
-bool parse_ply(std::string filename, ygl::shape **shape);
+bool parse_ply(std::string filename, ygl::shape *shape);
 #endif
