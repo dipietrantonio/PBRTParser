@@ -77,8 +77,8 @@ void PBRTParser::fill_parameter_to_type_mapping() {
 	parameterToType.insert(MP("value", { "float", "spectrum", "rgb" }));
 	parameterToType.insert(MP("uscale", { "float" }));
 	parameterToType.insert(MP("vscale", { "float" }));
-	parameterToType.insert(MP("tex1", { "float", "spectrum", "rgb" }));
-	parameterToType.insert(MP("tex2", { "float", "spectrum", "rgb" }));
+	parameterToType.insert(MP("tex1", { "texture", "float", "spectrum", "rgb" }));
+	parameterToType.insert(MP("tex2", { "texture", "float", "spectrum", "rgb" }));
 }
 
 // =====================================================================================
@@ -1137,7 +1137,7 @@ void PBRTParser::parse_InfiniteLight() {
 	env->ke = scale * L;
 	//auto pf = ygl::frame_to_mat(ygl::frame3f{ { 0, 0, 1 },{ 0, 1, 0 },{ 1, 0, 0 },{ 0, 0, 0 } });
 	auto fm = ygl::mat_to_frame(gState.CTM);
-	env->frame = fm; 
+	//env->frame = fm; 
 	if (mapname.length() > 0) {
 		ygl::texture *txt = new ygl::texture;
 		txt->name = get_unique_id(CounterID::texture);
@@ -1860,6 +1860,87 @@ void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
 }
 
 //
+// parse_scale_texture
+//
+void PBRTParser::parse_scale_texture(ygl::texture *txt) {
+
+	ygl::texture *ytex1;
+	ygl::texture *ytex2;
+
+	// read parameters
+	std::vector<PBRTParameter> params{};
+	this->parse_parameters(params);
+	
+	// first get the first texture
+	int i_tex1 = find_param("tex1", params);
+	if (i_tex1 == -1)
+		throw_syntax_error("Impossible to create scale texture, missing tex1.");
+
+	if (params[i_tex1].type == "texture") {
+		std::string tex1;
+		tex1 = get_single_value<std::string>(params[i_tex1]);
+		auto it1 = gState.nameToTexture.find(tex1);
+		if (it1 == gState.nameToTexture.end())
+			throw_syntax_error("tex1 not found in the loaded textures.");
+		ytex1 = it1->second;
+
+	}
+	else {
+		ytex1 = new ygl::texture();
+		if (params[i_tex1].type == "float")
+			ytex1->ldr = make_constant_image(get_single_value<float>(params[i_tex1]));
+		else if (params[i_tex1].type == "rgb")
+			ytex1->ldr = make_constant_image(get_single_value<ygl::vec3f>(params[i_tex1]));
+		else
+			throw_syntax_error("Texture argument 'tex1' type not recognised in scale texture.");
+	}
+	// retrieve the textures
+	int i_tex2 = find_param("tex2", params);
+	if (i_tex2 == -1)
+		throw_syntax_error("Impossible to create scale texture, missing tex2.");
+	
+	if (params[i_tex2].type == "texture") {
+		std::string tex2;
+		tex2 = get_single_value<std::string>(params[i_tex2]);
+		auto it2 = gState.nameToTexture.find(tex2);
+		if (it2 == gState.nameToTexture.end())
+			throw_syntax_error("tex2 not found in the loaded textures.");
+		ytex2 = it2->second;
+
+	}
+	else {
+		ytex2 = new ygl::texture();
+		if (params[i_tex2].type == "float")
+			ytex2->ldr = make_constant_image(get_single_value<float>(params[i_tex2]));
+		else if (params[i_tex2].type == "rgb")
+			ytex2->ldr = make_constant_image(get_single_value<ygl::vec3f>(params[i_tex2]));
+		else
+			throw_syntax_error("Texture argument 'tex2' type not recognised in scale texture.");
+	}
+	auto ts1 = TextureSupport(ytex1);
+	auto ts2 = TextureSupport(ytex2);
+	// NOTE: tiling of the smaller texture is performed here. Check if pbrt does the same
+
+	int width = ts1.width > ts2.width ? ts1.width : ts2.width;
+	int height = ts1.height > ts2.height ? ts1.height : ts2.height;
+	auto img = ygl::image4b(width, height);
+
+	for (int w = 0; w < width; w++) {
+		for (int h = 0; h < height; h++) {
+			int w1 = w % ts1.width;
+			int h1 = h % ts1.height;
+			int w2 = w % ts2.width;
+			int h2 = h % ts2.height;
+
+			auto newPixel = ts1.at(w1, h1)* ts2.at(w2, h2);
+			img.at(w, h) = ygl::float_to_byte(newPixel);
+		}
+	}
+	txt->ldr = img;
+	txt->path = txt->name + ".png";
+}
+
+//
 // parse_fbm_texture
 // TODO: implement and test it
 //
@@ -1910,6 +1991,9 @@ void PBRTParser::execute_Texture() {
 	}
 	else if (textureClass == "constant") {
 		this->parse_constant_texture(txt);
+	}
+	else if (textureClass == "scale") {
+		this->parse_scale_texture(txt);
 	}
 	else {
 		throw_syntax_error("Texture class not supported: " + textureClass);

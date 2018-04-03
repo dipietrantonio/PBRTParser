@@ -214,6 +214,7 @@ class PBRTParser {
 	ygl::texture* blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount);
 	void parse_imagemap_texture(ygl::texture *txt);
 	void parse_constant_texture(ygl::texture *txt);
+	void parse_scale_texture(ygl::texture *txt);
 	void parse_checkerboard_texture(ygl::texture *txt);
 	void parse_fbm_texture(ygl::texture *txt);
 	void execute_Texture();
