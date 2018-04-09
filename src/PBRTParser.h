@@ -40,6 +40,16 @@ struct AreaLightMode {
 	bool twosided = false;
 };
 
+struct DeclaredTexture {
+	ygl::texture *txt = nullptr;
+	float uscale = 1;
+	float vscale = 1;
+	bool referenced = false;
+
+	DeclaredTexture() {};
+	DeclaredTexture(ygl::texture *t, float uscale, float vscale) : txt(t), uscale(uscale), vscale(vscale) {};
+};
+
 struct GraphicState {
 	// Current Transformation Matrix
 	ygl::mat4f CTM;
@@ -47,9 +57,11 @@ struct GraphicState {
 	AreaLightMode ALInfo;
 	// Current Material
 	ygl::material *mat = nullptr;
+	float uscale = 1;
+	float vscale = 1;
 
 	// mappings to memorize data by name and use them in different times during parsing
-	std::unordered_map<std::string, ygl::texture*> nameToTexture{};
+	std::unordered_map<std::string, DeclaredTexture> nameToTexture{};
 	std::unordered_map<std::string, ygl::material*> nameToMaterial{};
 };
 
@@ -60,6 +72,7 @@ struct DeclaredObject {
 
 	DeclaredObject(ygl::shape_group *s, ygl::mat4f ctm) : sg(s), CTM(ctm) {};
 };
+
 
 // This structure will simplify the code later, allowing to work at the same time with
 // both HDR and LDR images.
@@ -212,11 +225,11 @@ class PBRTParser {
 
 	// TEXTURES
 	ygl::texture* blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount);
-	void parse_imagemap_texture(ygl::texture *txt);
-	void parse_constant_texture(ygl::texture *txt);
-	void parse_scale_texture(ygl::texture *txt);
-	void parse_checkerboard_texture(ygl::texture *txt);
-	void parse_fbm_texture(ygl::texture *txt);
+	void parse_imagemap_texture(DeclaredTexture &dt);
+	void parse_constant_texture(DeclaredTexture &dt);
+	void parse_scale_texture(DeclaredTexture &dt);
+	void parse_checkerboard_texture(DeclaredTexture &dt);
+	void parse_fbm_texture(DeclaredTexture &dt);
 	void execute_Texture();
 
 	void execute_preworld_directives();

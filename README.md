@@ -12,7 +12,6 @@ parse <file_to_parse> <output_obj>
 In order of importance
 
 - Environment maps don't work.
-- Normal flipping (must be implemented in yocto)
 - Textures: support for uv scaling and st parameters (must be implemented in yocto)
 - Fix memory leaks using shared pointers.
 - File paths: better handling.
@@ -22,7 +21,8 @@ In order of importance
 - Testures: implement mix textures.
 - Test illumination, implement some hack for distant light.
 - Uber material has index property that will use to create a constant texture for "eta" (seen in code)
-- Render big scenes
+
 
 ## Credits
 This software is intended to work with and is built upon the yocto library, which is developed at the following repository: https://github.com/xelatihy/yocto-gl.
+The yocto version used by this parser is https://github.com/xelatihy/yocto-gl/tree/1b0a001b82005485f83811728f7761c4f2a0d3a4

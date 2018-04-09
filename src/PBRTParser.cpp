@@ -831,6 +831,7 @@ void PBRTParser::parse_curve(ygl::shape *shp) {
 //
 // my_compute_normals
 // because pbrt computes it differently
+// TODO: must be removed in future.
 //
 void my_compute_normals(const std::vector<ygl::vec3i>& triangles,
 	const std::vector<ygl::vec3f>& pos, std::vector<ygl::vec3f>& norm, bool weighted ) {
@@ -933,7 +934,7 @@ void PBRTParser::execute_Shape() {
 	this->advance();
 	
 	ygl::shape *shp = new ygl::shape();
-	std::string shpName = get_unique_id(CounterID::shape);
+	shp->name = get_unique_id(CounterID::shape);
 	// add material to shape
 	if (!gState.mat) {
 		// since no material was defined, empty material is created
@@ -945,7 +946,6 @@ void PBRTParser::execute_Shape() {
 	else {
 		shp->mat = gState.mat;
 	}
-	shp->name = shpName;
 	// TODO: handle when shapes override some material properties
 
 	if (this->gState.ALInfo.active) {
@@ -958,7 +958,7 @@ void PBRTParser::execute_Shape() {
 	
 	else if (shapeName == "trianglemesh")
 		this->parse_trianglemesh(shp);
-	
+
 	else if (shapeName == "cube")
 		this->parse_cube(shp);
 
@@ -983,6 +983,12 @@ void PBRTParser::execute_Shape() {
 		this->ignore_current_directive();
 		warning_message("Ignoring shape " + shapeName + ".");
 		return;
+	}
+
+	// handle texture coordinate scaling
+	for (int i = 0; i < shp->texcoord.size(); i++) {
+		shp->texcoord[i].x *= gState.uscale;
+		shp->texcoord[i].y *= gState.vscale;
 	}
 
 	if (this->inObjectDefinition) {
@@ -1254,7 +1260,16 @@ void PBRTParser::set_k_property(PBRTParameter &par, ygl::vec3f &k, ygl::texture 
 		if (it == gState.nameToTexture.end())
 			throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
 				+ par.name + "' was not found.");
-		*txt = it->second;
+		auto declTexture = it->second;
+
+		if (!it->second.referenced) {
+			it->second.referenced = true;
+			scn->textures.push_back(it->second.txt);
+		}
+
+		*txt = declTexture.txt;
+		gState.uscale = declTexture.uscale;
+		gState.vscale = declTexture.vscale;
 		k = { 1, 1, 1 };
 	}
 	else {
@@ -1290,7 +1305,15 @@ void PBRTParser::execute_Material() {
 		if (it == gState.nameToTexture.end())
 			throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
 				+ params[i_bump].name + "' was not found.");
-		newMat->bump_txt = it->second;
+
+		auto declTexture = it->second;
+		if (!it->second.referenced) {
+			it->second.referenced = true;
+			scn->textures.push_back(it->second.txt);
+		}
+		newMat->bump_txt = declTexture.txt;
+		gState.uscale = declTexture.uscale;
+		gState.vscale = declTexture.vscale;
 	}
 
 	if (materialType == "matte")
@@ -1363,8 +1386,12 @@ void PBRTParser::parse_material_uber(ygl::material *mat, std::vector<PBRTParamet
 			if (it == gState.nameToTexture.end())
 				throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
 					+ params[i_rs].name + "' was not found.");
+			if (!it->second.referenced) {
+				it->second.referenced = true;
+				scn->textures.push_back(it->second.txt);
+			}
 			mat->rs = 1;
-			mat->rs_txt = it->second;
+			mat->rs_txt = it->second.txt;
 		}
 		else {
 			mat->rs = get_single_value<float>(params[i_rs]);
@@ -1411,8 +1438,12 @@ void PBRTParser::parse_material_translucent(ygl::material *mat, std::vector<PBRT
 			if (it == gState.nameToTexture.end())
 				throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
 					+ params[i_rs].name + "' was not found.");
+			if (!it->second.referenced) {
+				it->second.referenced = true;
+				scn->textures.push_back(it->second.txt);
+			}
 			mat->rs = 1;
-			mat->rs_txt = it->second;
+			mat->rs_txt = it->second.txt;
 		}
 		else {
 			mat->rs = get_single_value<float>(params[i_rs]);
@@ -1448,8 +1479,12 @@ void PBRTParser::parse_material_metal(ygl::material *mat, std::vector<PBRTParame
 			if (it == gState.nameToTexture.end())
 				throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
 					+ params[i_rs].name + "' was not found.");
+			if (!it->second.referenced) {
+				it->second.referenced = true;
+				scn->textures.push_back(it->second.txt);
+			}
 			mat->rs = 1;
-			mat->rs_txt = it->second;
+			mat->rs_txt = it->second.txt;
 		}
 		else {
 			mat->rs = get_single_value<float>(params[i_rs]);
@@ -1660,7 +1695,13 @@ void PBRTParser::execute_MakeNamedMaterial() {
 		if (it == gState.nameToTexture.end())
 			throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
 				+ params[i_bump].name + "' was not found.");
-		mat->bump_txt = it->second;
+		if (!it->second.referenced) {
+			it->second.referenced = true;
+			scn->textures.push_back(it->second.txt);
+		}
+		mat->bump_txt = it->second.txt;
+		gState.uscale = it->second.uscale;
+		gState.vscale = it->second.vscale;
 	}
 
 	if (mtype == "metal")
@@ -1761,21 +1802,23 @@ void PBRTParser::load_texture(ygl::texture *txt, std::string &filename, bool fli
 }
 
 
-void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
-	std::string filename = "";
-	float uscale = 1, vscale = 1;
+void PBRTParser::parse_imagemap_texture(DeclaredTexture &dt) {
+	ygl::texture *txt = new ygl::texture();
+	txt->name = get_unique_id(CounterID::texture);
+	dt.txt = txt;
 
+	std::string filename = "";
 	// read parameters
 	std::vector<PBRTParameter> params{};
 	this->parse_parameters(params);
 
 	int i_u = find_param("uscale", params);
 	if (i_u >= 0)
-		uscale = get_single_value<float>(params[i_u]);
+		dt.uscale = get_single_value<float>(params[i_u]);
 
 	int i_v = find_param("vscale", params);
 	if (i_v >= 0)
-		vscale = get_single_value<float>(params[i_v]);
+		dt.vscale = get_single_value<float>(params[i_v]);
 	
 	int i_fn = find_param("filename", params);
 	if (i_fn >= 0) {
@@ -1785,8 +1828,8 @@ void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
 		throw_syntax_error("No texture filename provided.");
 	}
 
-	if (uscale < 1) uscale = 1;
-	if (vscale < 1) vscale = 1;
+	if (dt.uscale < 1) dt.uscale = 1;
+	if (dt.vscale < 1) dt.vscale = 1;
 
 	load_texture(txt, filename);
 
@@ -1796,8 +1839,14 @@ void PBRTParser::parse_imagemap_texture(ygl::texture *txt) {
 //
 // parse_constant_texture
 //
-void PBRTParser::parse_constant_texture(ygl::texture *txt) {
-	ygl::vec3f value { 1, 1, 1 };
+void PBRTParser::parse_constant_texture(DeclaredTexture &dt) {
+	
+	ygl::texture *txt = new ygl::texture();
+	txt->name = get_unique_id(CounterID::texture);
+	txt->path = txt->name + ".png";
+	dt.txt = txt;
+
+	ygl::vec3f value{ 1, 1, 1 };
 	// read parameters
 	std::vector<PBRTParameter> params{};
 	this->parse_parameters(params);
@@ -1815,14 +1864,17 @@ void PBRTParser::parse_constant_texture(ygl::texture *txt) {
 		}
 	}
 	txt->ldr = make_constant_image(value);
-	txt->path = txt->name + ".png";
 }
 
 //
 // parse_checkerboard_texture
 //
-void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
-	float uscale = 1, vscale = 1;
+void PBRTParser::parse_checkerboard_texture(DeclaredTexture &dt) {
+	ygl::texture *txt = new ygl::texture();
+	txt->name = get_unique_id(CounterID::texture);
+	txt->path = txt->name + ".png";
+	dt.txt = txt;
+
 	ygl::vec4f tex1{ 0,0,0, 255 }, tex2{ 1,1,1, 255};
 
 	// read parameters
@@ -1831,11 +1883,11 @@ void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
 
 	int i_u = find_param("uscale", params);
 	if (i_u >= 0)
-		uscale = get_single_value<float>(params[i_u]);
+		dt.uscale = get_single_value<float>(params[i_u]);
 
 	int i_v = find_param("vscale", params);
 	if (i_v >= 0)
-		vscale = get_single_value<float>(params[i_v]);
+		dt.vscale = get_single_value<float>(params[i_v]);
 
 	int i_txt1 = find_param("tex1", params);
 	if (i_txt1 >= 0) {
@@ -1869,18 +1921,21 @@ void PBRTParser::parse_checkerboard_texture(ygl::texture *txt) {
 	}
 
 	// hack
-	if (uscale < 0) uscale = 1;
-	if (vscale < 0) vscale = 1;
+	if (dt.uscale < 0) dt.uscale = 1;
+	if (dt.vscale < 0) dt.vscale = 1;
 
-	txt->ldr = ygl::make_checker_image(128 * vscale, 128 * uscale, 64, float_to_byte(tex1), float_to_byte(tex2));
-	txt->path = txt->name + ".png";
+	txt->ldr = ygl::make_checker_image(128, 128, 64, float_to_byte(tex1), float_to_byte(tex2));
 }
 
 //
 // parse_scale_texture
 //
-void PBRTParser::parse_scale_texture(ygl::texture *txt) {
-
+void PBRTParser::parse_scale_texture(DeclaredTexture &dt) {
+	
+	ygl::texture *txt = new ygl::texture();
+	txt->name = get_unique_id(CounterID::texture);
+	txt->path = txt->name + ".png";
+	dt.txt = txt;
 	ygl::texture *ytex1;
 	ygl::texture *ytex2;
 
@@ -1899,7 +1954,7 @@ void PBRTParser::parse_scale_texture(ygl::texture *txt) {
 		auto it1 = gState.nameToTexture.find(tex1);
 		if (it1 == gState.nameToTexture.end())
 			throw_syntax_error("tex1 not found in the loaded textures.");
-		ytex1 = it1->second;
+		ytex1 = it1->second.txt;
 
 	}
 	else {
@@ -1922,7 +1977,7 @@ void PBRTParser::parse_scale_texture(ygl::texture *txt) {
 		auto it2 = gState.nameToTexture.find(tex2);
 		if (it2 == gState.nameToTexture.end())
 			throw_syntax_error("tex2 not found in the loaded textures.");
-		ytex2 = it2->second;
+		ytex2 = it2->second.txt;
 
 	}
 	else {
@@ -1953,15 +2008,24 @@ void PBRTParser::parse_scale_texture(ygl::texture *txt) {
 			img.at(w, h) = ygl::float_to_byte(newPixel);
 		}
 	}
+
+	int i_u = find_param("uscale", params);
+	if (i_u >= 0)
+		dt.uscale = get_single_value<float>(params[i_u]);
+
+	int i_v = find_param("vscale", params);
+	if (i_v >= 0)
+		dt.vscale = get_single_value<float>(params[i_v]);
+
 	txt->ldr = img;
-	txt->path = txt->name + ".png";
 }
 
 //
 // parse_fbm_texture
 // TODO: implement and test it
 //
-void PBRTParser::parse_fbm_texture(ygl::texture *txt) {
+void PBRTParser::parse_fbm_texture(DeclaredTexture &dt) {
+	throw_syntax_error("FBM textures are not supported yet");
 	int octaves = 8;
 	float roughness = 0.5;
 
@@ -1996,25 +2060,23 @@ void PBRTParser::execute_Texture() {
 	std::string textureClass = this->current_token().value;
 	this->advance();
 
-	ygl::texture *txt = new ygl::texture();
-	txt->name = get_unique_id(CounterID::texture);
-	scn->textures.push_back(txt);
+	DeclaredTexture declTxt;
 
 	if (textureClass == "imagemap") {
-		this->parse_imagemap_texture(txt);
+		this->parse_imagemap_texture(declTxt);
 	}
 	else if (textureClass == "checkerboard") {
-		this->parse_checkerboard_texture(txt);
+		this->parse_checkerboard_texture(declTxt);
 	}
 	else if (textureClass == "constant") {
-		this->parse_constant_texture(txt);
+		this->parse_constant_texture(declTxt);
 	}
 	else if (textureClass == "scale") {
-		this->parse_scale_texture(txt);
+		this->parse_scale_texture(declTxt);
 	}
 	else {
 		throw_syntax_error("Texture class not supported: " + textureClass);
 	}
 
-	gState.nameToTexture.insert(std::make_pair(textureName, txt));
+	gState.nameToTexture.insert(std::make_pair(textureName, declTxt));
 }
