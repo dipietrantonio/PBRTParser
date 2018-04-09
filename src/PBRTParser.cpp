@@ -1255,6 +1255,7 @@ void PBRTParser::set_k_property(PBRTParameter &par, ygl::vec3f &k, ygl::texture 
 			throw_syntax_error("the specified texture '" + txtName + "' for parameter '"\
 				+ par.name + "' was not found.");
 		*txt = it->second;
+		k = { 1, 1, 1 };
 	}
 	else {
 		k = get_single_value<ygl::vec3f>(par);
