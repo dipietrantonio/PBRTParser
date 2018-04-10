@@ -961,7 +961,11 @@ void PBRTParser::execute_Shape() {
 
 	else if (shapeName == "cube")
 		this->parse_cube(shp);
-
+	
+	else if (shapeName == "sphere") {
+		this->ignore_current_directive();
+		ygl::make_sphere(shp->quads, shp->pos, 20);
+	}
 	else if (shapeName == "plymesh"){
 		PBRTParameter par;
 		this->parse_parameter(par);
