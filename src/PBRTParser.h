@@ -243,7 +243,7 @@ class PBRTParser {
         std::stringstream ss;
         ss << "Syntax Error (" << this->current_file() << ":" << this->lexers.at(0)->get_line() <<\
 			"," << this->lexers.at(0)->get_column() << "): " << msg;
-        throw std::exception(ss.str().c_str());
+        throw std::runtime_error((char*)ss.str().c_str());
     };
 
 	inline void warning_message(std::string msg) {
@@ -328,8 +328,8 @@ class PBRTParser {
 	//
 	// make_constant_image
 	//
-	ygl::image4b PBRTParser::make_constant_image(float v);
-	ygl::image4b PBRTParser::make_constant_image(ygl::vec3f v);
+	ygl::image4b make_constant_image(float v);
+	ygl::image4b make_constant_image(ygl::vec3f v);
 
 	// load_texture image from file
 	void load_texture(ygl::texture *txt, std::string &filename, bool flip = true);

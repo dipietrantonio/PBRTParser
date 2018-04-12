@@ -1,10 +1,5 @@
 #include "PBRTParser.h"
 
-// TODOs
-//	- Fix memory leaks (use shared pointers?)
-//  - spectrum type support http://www.fourmilab.ch/documents/specrend/
-
-
 // =====================================================================================
 //                           TYPE CHECKING
 // =====================================================================================
@@ -964,7 +959,15 @@ void PBRTParser::execute_Shape() {
 	
 	else if (shapeName == "sphere") {
 		this->ignore_current_directive();
-		ygl::make_sphere(shp->quads, shp->pos, 20);
+		ygl::make_cube(shp->quads, shp->pos, 1);
+	}
+
+	else if (shapeName == "disk") {
+		this->ignore_current_directive();
+		shp->pos.push_back({ 5, 0, 5 }); shp->pos.push_back({ -5, 0, 5 }); 
+		shp->pos.push_back({ -5, 0, -5 }); shp->pos.push_back({ 5, 0, -5 });
+		shp->quads.push_back({ 0, 1, 2, 3 });
+		
 	}
 	else if (shapeName == "plymesh"){
 		PBRTParameter par;

@@ -3,20 +3,20 @@
 #include <fstream>
 
 int main(int argc, char** argv){
-	/*std::cout << "Loading scene\n";
+	std::cout << "Loading scene\n";
 	auto obj = ygl::load_scene(argv[1]);
 	std::cout << "make bvh..\n";
 	auto bvh = ygl::make_bvh(obj);
 	auto tp = ygl::trace_params();
-	tp.nsamples = 4;
+	tp.nsamples = 32;
 	tp.parallel = true;
-	tp.min_depth = 1;
-	tp.max_depth = 2;
+	tp.min_depth = 2;
+	tp.max_depth = 3;
 	tp.resolution = 80;
 	std::cout << "tracing..\n";
 	auto im = ygl::trace_image(obj, obj->cameras[0], bvh, tp);
 	ygl::save_image("codetraced.png", im, 0, 2);
-	exit(1);*/
+	exit(1);
 	
 	if (argc < 3)
 	{

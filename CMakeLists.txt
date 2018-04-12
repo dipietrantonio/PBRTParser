@@ -32,6 +32,10 @@ add_library(yocto STATIC
     yocto/yocto_gltf.cpp
     yocto/yocto_gl.h
     yocto/yocto_gl.cpp)
+if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(yocto Threads::Threads)
+endif(UNIX AND NOT APPLE)
 
 add_library(mylib STATIC
 
