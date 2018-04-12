@@ -67,10 +67,10 @@ struct GraphicState {
 
 struct DeclaredObject {
 	bool referenced = false;
-	ygl::shape_group *sg;
+	std::vector<ygl::shape_group *> sg;
 	ygl::mat4f CTM;
 
-	DeclaredObject(ygl::shape_group *s, ygl::mat4f ctm) : sg(s), CTM(ctm) {};
+	DeclaredObject(std::vector<ygl::shape_group *> &s, ygl::mat4f ctm) : sg(s), CTM(ctm) {};
 };
 
 
@@ -139,7 +139,7 @@ class PBRTParser {
 	// track of all the shapes that define the object. While "inObjectDefinition"
 	// is true, every shape parsed will be put in this vector. Since we can parse
 	// one Object at time, using a single vector is fine.
-	ygl::shape_group *shapesInObject = nullptr;
+	std::vector<ygl::shape_group *> shapesInObject {};
 
 	// Defines the current graphics properties active and to apply to the scene objects.
 	GraphicState gState{ ygl::identity_mat4f, {}, nullptr};

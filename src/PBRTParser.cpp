@@ -998,14 +998,15 @@ void PBRTParser::execute_Shape() {
 		shp->texcoord[i].y *= gState.vscale;
 	}
 
+	// add shp in scene
+	ygl::shape_group *sg = new ygl::shape_group;
+	sg->shapes.push_back(shp);
+	sg->name = get_unique_id(CounterID::shape_group);
+
 	if (this->inObjectDefinition) {
-		shapesInObject->shapes.push_back(shp);
+		shapesInObject.push_back(sg);
 	}
 	else {
-		// add shp in scene
-		ygl::shape_group *sg = new ygl::shape_group;
-		sg->shapes.push_back(shp);
-		sg->name = get_unique_id(CounterID::shape_group);
 		scn->shapes.push_back(sg);
 		// add a single instance directly to the scene
 		ygl::instance *inst = new ygl::instance();
@@ -1028,8 +1029,7 @@ void PBRTParser::execute_ObjectBlock() {
 		throw_syntax_error("Cannot define an object inside another object.");
 	this->execute_AttributeBegin(); // it will execute advance() too
 	this->inObjectDefinition = true;
-	this->shapesInObject = new ygl::shape_group();
-	this->shapesInObject->name = get_unique_id(CounterID::shape_group);
+	this->shapesInObject.clear();
 	int start = this->lexers[0]->get_line();
 
 	if (this->current_token().type != LexemeType::STRING)
@@ -1051,7 +1051,8 @@ void PBRTParser::execute_ObjectBlock() {
 	else {
 		auto prev = it->second;
 		if (prev.referenced == false) {
-			delete prev.sg;
+			for (auto sg : prev.sg)
+				delete sg;
 		}
 		it->second = DeclaredObject(this->shapesInObject, this->gState.CTM);
 		std::cout << "Object defined at line " << start << " overrides an existent one.\n";
@@ -1078,20 +1079,22 @@ void PBRTParser::execute_ObjectInstance() {
 		throw_syntax_error("Object name not found.");
 
 	auto shapes = obj->second.sg;
-	if (shapes->shapes.size() > 0) {
+	if (shapes.size() > 0) {
 		ygl::mat4f finalCTM = this->gState.CTM * obj->second.CTM;
-		if (!obj->second.referenced) {
-			obj->second.referenced = true;
-		}
-		for (auto shape : shapes->shapes) {
+
+		
+		for (auto shape : shapes) {
 			ygl::instance *inst = new ygl::instance();
-			ygl::shape_group *sg = new ygl::shape_group();
-			inst->shp = sg;
-			sg->shapes.push_back(shape);
-			sg->name = get_unique_id(CounterID::shape_group);
+			if (!obj->second.referenced) {
+				scn->shapes.push_back(shape);
+			}
+			inst->shp = shape;
 			inst->frame = ygl::mat_to_frame(finalCTM);
 			inst->name = get_unique_id(CounterID::instance);
 			scn->instances.push_back(inst);
+		}
+		if (!obj->second.referenced) {
+			obj->second.referenced = true;
 		}
 	}
 }
