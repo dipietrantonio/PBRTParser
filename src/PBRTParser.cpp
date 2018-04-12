@@ -1082,13 +1082,17 @@ void PBRTParser::execute_ObjectInstance() {
 		ygl::mat4f finalCTM = this->gState.CTM * obj->second.CTM;
 		if (!obj->second.referenced) {
 			obj->second.referenced = true;
-			scn->shapes.push_back(shapes);
 		}
-		ygl::instance *inst = new ygl::instance();
-		inst->shp = shapes;
-		inst->frame = ygl::mat_to_frame(finalCTM);
-		inst->name = get_unique_id(CounterID::instance);
-		scn->instances.push_back(inst);
+		for (auto shape : shapes->shapes) {
+			ygl::instance *inst = new ygl::instance();
+			ygl::shape_group *sg = new ygl::shape_group();
+			inst->shp = sg;
+			sg->shapes.push_back(shape);
+			sg->name = get_unique_id(CounterID::shape_group);
+			inst->frame = ygl::mat_to_frame(finalCTM);
+			inst->name = get_unique_id(CounterID::instance);
+			scn->instances.push_back(inst);
+		}
 	}
 }
 

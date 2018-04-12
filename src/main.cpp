@@ -8,7 +8,7 @@ int main(int argc, char** argv){
 	std::cout << "make bvh..\n";
 	auto bvh = ygl::make_bvh(obj);
 	auto tp = ygl::trace_params();
-	tp.nsamples = 32;
+	tp.nsamples = 8;
 	tp.parallel = true;
 	tp.min_depth = 2;
 	tp.max_depth = 3;
