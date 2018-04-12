@@ -2,6 +2,8 @@
 
 A parser written to convert pbrt scenes to yocto scenes (obj).
 
+<img src="images/landscape_view_0.png"/>
+
 ## How to use
 Once compiled using cmake, run
 ```
