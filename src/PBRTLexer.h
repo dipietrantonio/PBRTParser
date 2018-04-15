@@ -15,6 +15,19 @@ class InputEndedException : public std::exception {
 	}
 };
 
+class PBRTException : public std::exception {
+
+	private:
+	std::string _msg;
+
+	public:
+	PBRTException(std::string message) : _msg(message) {};
+	virtual const char *what() const throw() {
+		return _msg.c_str();
+	}
+};
+
+
 enum LexemeType { IDENTIFIER, NUMBER, STRING, SINGLETON };
 
 class Lexeme {

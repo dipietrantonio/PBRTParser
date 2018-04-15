@@ -47,7 +47,7 @@ void PBRTParser::fill_parameter_to_type_mapping() {
 	parameterToType.insert(MP("P", { "point3" }));
 	parameterToType.insert(MP("uv", { "float" }));
 	// lights
-	parameterToType.insert(MP("scale", { "spectrum", "rgb" }));
+	parameterToType.insert(MP("scale", { "spectrum", "rgb", "float" }));
 	parameterToType.insert(MP("L", { "spectrum", "rgb", "blackbody" }));
 	parameterToType.insert(MP("mapname", { "string" }));
 	parameterToType.insert(MP("I", { "spectrum" }));
@@ -933,7 +933,7 @@ void PBRTParser::execute_Shape() {
 	// add material to shape
 	if (!gState.mat) {
 		// since no material was defined, empty material is created
-		std::cout << "Empty material created..\n";
+		warning_message("No material defined for this shape. Empty material created..");
 		ygl::material *nM = new ygl::material();
 		shp->mat = nM;
 		scn->materials.push_back(nM);
@@ -958,8 +958,14 @@ void PBRTParser::execute_Shape() {
 		this->parse_cube(shp);
 	
 	else if (shapeName == "sphere") {
-		this->ignore_current_directive();
-		ygl::make_cube(shp->quads, shp->pos, 1);
+		std::vector<PBRTParameter> params;
+		this->parse_parameters(params);
+		float radius = 1;
+		int i_rad = find_param("radius", params);
+		if (i_rad >= 0) {
+			radius = get_single_value<float>(params[i_rad]);
+		}
+		ygl::make_uvspherizedcube(shp->quads, shp->pos, shp->norm, shp->texcoord, 4, radius);
 	}
 
 	else if (shapeName == "disk") {
@@ -1055,7 +1061,6 @@ void PBRTParser::execute_ObjectBlock() {
 				delete sg;
 		}
 		it->second = DeclaredObject(this->shapesInObject, this->gState.CTM);
-		std::cout << "Object defined at line " << start << " overrides an existent one.\n";
 	}
 		
 	this->inObjectDefinition = false;
@@ -1346,8 +1351,10 @@ void PBRTParser::execute_Material() {
 		this->parse_material_translucent(newMat, params);
 	else if (materialType == "glass")
 		this->parse_material_glass(newMat, params);
+	else if (materialType == "substrate")
+		this->parse_material_substrate(newMat, params);
 	else {
-		std::cerr << "Material '" + materialType + "' not supported. Ignoring and using 'matte'..\n";
+		warning_message("Material '" + materialType + "' not supported. Ignoring and using 'matte'..");
 		this->parse_material_matte(newMat, params);
 	}
 	this->gState.mat = newMat;
@@ -1526,6 +1533,28 @@ void PBRTParser::parse_material_plastic(ygl::material *mat, std::vector<PBRTPara
 	mat->kd = { 0.25, 0.25, 0.25 };
 	mat->ks = { 0.25, 0.25, 0.25 };
 	mat->rs = 0.1;
+	
+	int i_kd = find_param("Kd", params);
+	if (i_kd >= 0) {
+		set_k_property(params[i_kd], mat->kd, &(mat->kd_txt));
+	}
+
+	int i_ks = find_param("Ks", params);
+	if (i_ks >= 0) {
+		set_k_property(params[i_ks], mat->ks, &(mat->ks_txt));
+	}
+}
+
+//
+// parse_material_substrate
+//
+//
+// parse_material_plastic
+//
+void PBRTParser::parse_material_substrate(ygl::material *mat, std::vector<PBRTParameter> &params) {
+	mat->kd = { 0.5, 0.5, 0.5 };
+	mat->ks = { 0.5, 0.5, 0.5 };
+	mat->rs = 0;
 	
 	int i_kd = find_param("Kd", params);
 	if (i_kd >= 0) {
@@ -1734,8 +1763,13 @@ void PBRTParser::execute_MakeNamedMaterial() {
 		this->parse_material_translucent(mat, params);
 	else if (mtype == "glass")
 		this->parse_material_glass(mat, params);
-	else
-		throw_syntax_error("Material type " + mtype + " not supported or recognized.");
+	else if (mtype == "substrate")
+		this->parse_material_substrate(mat, params);
+	else {
+		warning_message("Material '" + mtype + "' not supported. Ignoring and using 'matte'..");
+		this->parse_material_matte(mat, params);
+
+	}
 	gState.nameToMaterial.insert(std::make_pair(materialName, mat));
 	scn->materials.push_back(mat);
 }
@@ -2057,8 +2091,12 @@ void PBRTParser::execute_Texture() {
 		throw_syntax_error("Expected texture name string.");
 	std::string textureName = this->current_token().value;
 	
-	if (gState.nameToTexture.find(textureName) != gState.nameToTexture.end())
-		throw_syntax_error("Texture name already used.");
+	auto it = gState.nameToTexture.find(textureName);
+	if (it != gState.nameToTexture.end()) {
+		if (!it->second.referenced)
+			delete it->second.txt;
+		gState.nameToTexture.erase(it);
+	}
 
 	this->advance();
 	if (this->current_token().type != LexemeType::STRING)

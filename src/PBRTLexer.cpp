@@ -65,7 +65,7 @@ bool PBRTLexer::next_lexeme() {
 
 	std::stringstream errStr;
 	errStr << "Lexical error (file: " << this->filename << ", line " << this->line << ", column " << this->column << ") input not recognized.";
-	throw std::runtime_error(errStr.str().c_str());
+	throw PBRTException(errStr.str());
 }
 
 
@@ -181,7 +181,7 @@ bool PBRTLexer::read_number() {
 		else {
 			std::stringstream errstr;
 			errstr << "Lexical error (line: " << this->line << ", column " << this->column << "): wrong litteral specification.";
-			throw std::runtime_error(errstr.str().c_str());
+			throw PBRTException(errstr.str());
 		}
 		ss << c;
 		this->advance();

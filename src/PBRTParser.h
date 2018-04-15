@@ -57,9 +57,9 @@ struct GraphicState {
 	AreaLightMode ALInfo;
 	// Current Material
 	ygl::material *mat = nullptr;
+	// hack to apply uv scaling factor to shapes texture coordinates
 	float uscale = 1;
 	float vscale = 1;
-
 	// mappings to memorize data by name and use them in different times during parsing
 	std::unordered_map<std::string, DeclaredTexture> nameToTexture{};
 	std::unordered_map<std::string, ygl::material*> nameToMaterial{};
@@ -222,7 +222,7 @@ class PBRTParser {
 	void parse_material_mirror(ygl::material *mat, std::vector<PBRTParameter> &params);
 	void parse_material_mix(ygl::material *mat, std::vector<PBRTParameter> &params);
 	void parse_material_glass(ygl::material *mat, std::vector<PBRTParameter> &params);
-
+	void parse_material_substrate(ygl::material *mat, std::vector<PBRTParameter> &params);
 	// TEXTURES
 	ygl::texture* blend_textures(ygl::texture *txt1, ygl::texture *txt2, float amount);
 	void parse_imagemap_texture(DeclaredTexture &dt);
@@ -243,7 +243,7 @@ class PBRTParser {
         std::stringstream ss;
         ss << "Syntax Error (" << this->current_file() << ":" << this->lexers.at(0)->get_line() <<\
 			"," << this->lexers.at(0)->get_column() << "): " << msg;
-        throw std::runtime_error((char*)ss.str().c_str());
+        throw  PBRTException(ss.str());
     };
 
 	inline void warning_message(std::string msg) {
