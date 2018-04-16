@@ -25,7 +25,7 @@ int main(int argc, char** argv){
 		so.skip_missing = false;
 		ygl::save_scene(argv[2], scn, so);
 	}
-	catch (std::exception ex) {
+	catch (PBRTException ex) {
 		std::cout << ex.what() << "\n";
 	}
 	

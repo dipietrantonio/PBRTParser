@@ -1160,7 +1160,13 @@ void PBRTParser::parse_InfiniteLight() {
 	ygl::environment *env = new ygl::environment;
 	env->name = get_unique_id(CounterID::environment);
 	env->ke = scale * L;
-	auto fm = ygl::mat_to_frame(gState.CTM);
+	
+	const ygl::vec3f x_axis = {1, 0, 0};
+	const ygl::vec3f y_axis = {0, 1, 0};
+	auto rm = ygl::frame_to_mat(ygl::rotation_frame(x_axis, 90 * ygl::pif / 180));
+	rm *= ygl::frame_to_mat(ygl::rotation_frame(y_axis, 180 * ygl::pif / 180));
+	auto fm = ygl::mat_to_frame(gState.CTM * rm);
+	fm.z = -fm.z;
 	env->frame = fm; 
 	if (mapname.length() > 0) {
 		ygl::texture *txt = new ygl::texture;

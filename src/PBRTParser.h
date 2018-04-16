@@ -243,6 +243,7 @@ class PBRTParser {
         std::stringstream ss;
         ss << "Syntax Error (" << this->current_file() << ":" << this->lexers.at(0)->get_line() <<\
 			"," << this->lexers.at(0)->get_column() << "): " << msg;
+		std::cout << ss.str() << "\n";
         throw  PBRTException(ss.str());
     };
 

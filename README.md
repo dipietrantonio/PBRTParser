@@ -2,7 +2,7 @@
 
 A parser written to convert pbrt scenes to yocto scenes (obj).
 
-<img src="images/landscape_view_0.png"/>
+<img src="images/ecosys.png"/>
 
 ## How to use
 Once compiled using cmake, run
@@ -13,12 +13,11 @@ parse <file_to_parse> <output_obj>
 ## TODO
 In order of importance
 
-- Environment maps don't work.
-- File paths (also textures file saving): better handling.
 - Mix material: texture blending might have some transparency problem (check landscape(view-0 as an example).
 - Shapes can override current material's properties. Implement this.
 - Checkerboard texture produce different colors.
 - [pavilion-night] check the transparency issue of the left part of image, check why lights are much stronger than pbrt rendering.
+- File paths (also textures file saving): better handling.
 - Testures: implement mix textures.
 - Test illumination, implement some hack for distant light.
 - Fix memory leaks using shared pointers.
