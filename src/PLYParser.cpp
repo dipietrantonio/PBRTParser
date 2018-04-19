@@ -16,6 +16,13 @@ bool parse_ply(std::string filename, ygl::shape *shp) {
 	// current line read
 	std::string line;
 
+	// read float from 4bytes
+	auto readFloat = [&plyFile]() {
+		char buff[4];
+		plyFile.read(buff, 4);
+		return  *((float *)buff);
+	};
+
 	// we are interested in vertices and faces (for now)
 	// number of vertices (equivalent to shape.pos)
 	int n_vertices = 0;
@@ -141,47 +148,31 @@ bool parse_ply(std::string filename, ygl::shape *shp) {
 					// read binary
 					for (auto prop : vertex_prop) {
 						if (prop == "x") {
-							char buff[4];
 							bpos = true;
-							plyFile.read(buff, 4);
-							pos.x = *((float *)buff);
+							pos.x = readFloat();
 						}
 						else if (prop == "y") {
-							char buff[4];
-							plyFile.read(buff, 4);
-							pos.y = *((float *)buff);
+							pos.y = readFloat();
 						}
 						else if (prop == "z") {
-							char buff[4];
-							plyFile.read(buff, 4);
-							pos.z = *((float *)buff);
+							pos.z = readFloat();
 						}
 						else if (prop == "nx") {
-							char buff[4];
 							bnorm = true;
-							plyFile.read(buff, 4);
-							norm.x = *((float *)buff);
+							norm.x = readFloat();
 						}
 						else if (prop == "ny") {
-							char buff[4];
-							plyFile.read(buff, 4);
-							norm.y = *((float *)buff);
+							norm.y = readFloat();
 						}
 						else if (prop == "nz") {
-							char buff[4];
-							plyFile.read(buff, 4);
-							norm.z = *((float *)buff);
+							norm.z = readFloat();
 						}
 						else if (prop == "u") {
-							char buff[4];
 							buv = true;
-							plyFile.read(buff, 4);
-							uv.x = *((float *)buff);
+							uv.x = readFloat();
 						}
 						else if (prop == "v") {
-							char buff[4];
-							plyFile.read(buff, 4);
-							uv.y = *((float *)buff);
+							uv.y = readFloat();
 						}
 						else {
 							std::cerr << "Value " << prop << " is not a recognized property of vertex.\n";
@@ -241,7 +232,6 @@ bool parse_ply(std::string filename, ygl::shape *shp) {
 			std::cerr << errMsgStart << "Element '" << elem << "' not recognized.\n";
 			return false;
 		}
-
 	}
 	plyFile.close();
 	return true;

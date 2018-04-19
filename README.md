@@ -4,11 +4,6 @@ A parser written to convert scene from pbrt (v3) format to [yocto](https://githu
 
 <img src="images/ecosys.png"/>
 
-##Introduction
-
-Computer Graphics' major concern is to render 3D scenes. Given a set of 3D objects with several 
-properties (material, position, etc..), the goal is to produce an image which is how the set of objects is seen
-by a camera positioned somewhere in the scene. The software that solve this task is called renderer, and the major 
 ## How to use
 Once compiled using cmake, run
 ```
