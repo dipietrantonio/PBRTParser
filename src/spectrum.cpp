@@ -59,39 +59,6 @@ bool is_spectrum_sorted(std::vector<ygl::vec2f> &samples) {
 }
 
 //
-// average_spectrum_samples
-//
-float average_spectrum_samples(std::vector<ygl::vec2f> &samples, float lambdaStart, float lambdaEnd) {
-	
-	// Handle cases with out-of-bounds range or single sample only
-	int n = samples.size();
-	if (lambdaEnd <= samples[0].x) return samples[0].y;
-	if (lambdaStart >= samples[n - 1].x) return samples[n - 1].y;
-	if (n == 1) return samples[0].y;
-	float sum = 0;
-	// Add contributions of constant segments before/after samples
-	if (lambdaStart < samples[0].x) sum += samples[0].y * (samples[0].x - lambdaStart);
-	if (lambdaEnd > samples[n - 1].x)
-		sum += samples[n - 1].y * (lambdaEnd - samples[n - 1].x);
-
-	// Advance to first relevant wavelength segment
-	int i = 0;
-	while (lambdaStart > samples[i + 1].x) ++i;
-	// Loop over wavelength sample segments and add contributions
-	auto interp = [samples](float w, int i) {
-		return lerp((w - samples[i].x) / (samples[i + 1].x - samples[i].x), samples[i].y,
-			samples[i + 1].y);
-	};
-	for (; i + 1 < n && lambdaEnd >= samples[i].x; ++i) {
-		float segLambdaStart = std::max(lambdaStart, samples[i].x);
-		float segLambdaEnd = std::min(lambdaEnd, samples[i + 1].x);
-		sum += 0.5 * (interp(segLambdaStart, i) + interp(segLambdaEnd, i)) *
-			(segLambdaEnd - segLambdaStart);
-	}
-	return sum / (lambdaEnd - lambdaStart);
-}
-
-//
 // interpolate_spectrum_samples
 //
 float interpolate_spectrum_samples(std::vector<ygl::vec2f> &samples, float l) {

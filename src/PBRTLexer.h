@@ -1,11 +1,9 @@
 #ifndef __PBRTLEXER__
 #define __PBRTLEXER__
 #include <string>
-#include <iostream>
-#include <fstream>
 #include <sstream>
+#include <fstream>
 #include <exception>
-#include <cctype>
 #include "utils.h"
 
 class InputEndedException : public std::exception {
@@ -15,12 +13,16 @@ class InputEndedException : public std::exception {
 	}
 };
 
+//
+// PBRTEception is used to signal syntax and lexical errors.
+//
 class PBRTException : public std::exception {
 
 	private:
 	std::string _msg;
 
 	public:
+	
 	PBRTException(std::string message) : _msg(message) {};
 	virtual const char *what() const throw() {
 		return _msg.c_str();
@@ -50,18 +52,18 @@ private:
 	int currentPos;
 	// text to be parsed
 	std::string text;
-	bool inputEnded;
 	// index of last character of the text to be parsed
 	int lastPos;
-
+	// signals if the input has ended (auxiliary variable.)
+	bool inputEnded;
+	
 	// Private methods
 
 	// remove whitespaces
 	void remove_blanks();
 	// advance the lexer head (currentPos)
 	void advance();
-	// read the file and store the content in text
-	std::string read_file(std::string filename);
+
 	// see the current character
 	inline char peek(int i = 0) {
 		return this->text[currentPos + i];
@@ -72,6 +74,13 @@ private:
 	bool read_indentifier();
 	bool read_number();
 	bool read_string();
+
+	// Error handling
+	inline void throw_lexical_exception(std::string msg){
+        std::stringstream ss;
+        ss << "Syntax Error (" << this->path + "/" << this->filename << ":" << line << "," << column << "): " << msg;
+        throw  PBRTException(ss.str());
+    };
 
 public:
 	std::string filename;

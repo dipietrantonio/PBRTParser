@@ -14,7 +14,7 @@ int main(int argc, char** argv){
 	try {
 		scn = parser.parse();
 	}
-	catch (std::exception ex) {
+	catch (PBRTException ex) {
 		std::cout << ex.what() << std::endl;
 		return 1;
 	}
@@ -25,7 +25,7 @@ int main(int argc, char** argv){
 		so.skip_missing = false;
 		ygl::save_scene(argv[2], scn, so);
 	}
-	catch (PBRTException ex) {
+	catch (std::exception ex) {
 		std::cout << ex.what() << "\n";
 	}
 	

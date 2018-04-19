@@ -20,26 +20,6 @@ PBRTLexer::PBRTLexer(std::string filename) {
 	this->filename = path_and_name.second;
 }
 
-
-//
-// read_file
-// Load a text file as a string.
-//
-std::string PBRTLexer::read_file(std::string filename) {
-	std::fstream inputFile;
-	inputFile.open(filename, std::ios::in);
-	std::stringstream ss;
-	std::string line;
-	while (std::getline(inputFile, line)) {
-		ss << line << "\n";
-	}
-	// set filename and path properties
-	auto textToParse = ss.str();
-	inputFile.close();
-	return textToParse;
-}
-
-
 //
 // next_lexeme
 // get the next lexeme in the file.
@@ -63,9 +43,7 @@ bool PBRTLexer::next_lexeme() {
 		return true;
 	}
 
-	std::stringstream errStr;
-	errStr << "Lexical error (file: " << this->filename << ", line " << this->line << ", column " << this->column << ") input not recognized.";
-	throw PBRTException(errStr.str());
+	throw_lexical_exception("input symbol not recognized.");
 }
 
 
@@ -116,7 +94,6 @@ bool PBRTLexer::read_number() {
 	* state = 4: waiting for `-`, `+` or a digit after "E" (exponential)
 	* state = 5: waiting for mandatory digit
 	* state = 6: waiting for zero or more additional digits [final state]
-	* state = 7: waiting for mandatoty digit or dot
 	*/
 	int state = 0;
 
@@ -179,9 +156,7 @@ bool PBRTLexer::read_number() {
 			break;
 		}
 		else {
-			std::stringstream errstr;
-			errstr << "Lexical error (line: " << this->line << ", column " << this->column << "): wrong litteral specification.";
-			throw PBRTException(errstr.str());
+			throw_lexical_exception("wrong litteral specification.");
 		}
 		ss << c;
 		this->advance();
