@@ -179,7 +179,6 @@ void PBRTLexer::advance() {
 			this->line++;
 			this->column = 0;
 		}
-		this->column++;
 	}
 	else if (this->inputEnded)
 		throw InputEndedException();
