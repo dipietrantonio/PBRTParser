@@ -12,7 +12,6 @@ PBRTParser::PBRTParser(std::string filename) {
 // parse
 //
 ygl::scene *PBRTParser::parse() {
-	ygl::mat4f CTM = ygl::identity_mat4f;
 	this->advance();
 	this->execute_preworld_directives();
 	this->execute_world_directives();
